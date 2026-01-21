@@ -220,7 +220,11 @@ def calculate_rms_from_psd(
     
     # Integrate PSD using trapezoidal rule
     # The integral of PSD gives the mean square value
-    mean_square = np.trapz(psd, frequencies)
+    # Use trapezoid (NumPy 2.0+) with fallback to trapz for older versions
+    try:
+        mean_square = np.trapezoid(psd, frequencies)
+    except AttributeError:
+        mean_square = np.trapz(psd, frequencies)
     
     # RMS is the square root of the mean square
     rms = np.sqrt(mean_square)

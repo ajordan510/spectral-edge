@@ -1,0 +1,5 @@
+Launch the application--> run.bat
+Pull latest changes from GitHub--> sync.bat pull
+Push your changes to GitHub --> sync.bat push
+Check what files changed --> sync.bat status
+Full sync (pull + push) --> sync.bat sync

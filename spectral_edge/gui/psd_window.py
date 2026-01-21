@@ -26,6 +26,43 @@ from spectral_edge.core.psd import (
 )
 
 
+class LogAxisItem(pg.AxisItem):
+    """
+    Custom axis item for logarithmic scale with specific tick values.
+    
+    This class ensures that the X-axis shows only powers of 10 (10, 100, 1000, etc.)
+    and always displays values in Hz (not kHz).
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def tickStrings(self, values, scale, spacing):
+        """
+        Override tick string generation to show only Hz values.
+        
+        Args:
+            values: The tick values to display
+            scale: The scale factor
+            spacing: The spacing between ticks
+        
+        Returns:
+            List of strings for tick labels
+        """
+        strings = []
+        for v in values:
+            # Convert from log scale to linear
+            actual_value = 10 ** v
+            
+            # Format as integer if it's close to a whole number
+            if abs(actual_value - round(actual_value)) < 0.01:
+                strings.append(f"{int(round(actual_value))}")
+            else:
+                strings.append(f"{actual_value:.1f}")
+        
+        return strings
+
+
 class PSDAnalysisWindow(QMainWindow):
     """
     Main window for PSD Analysis tool.
@@ -109,10 +146,13 @@ class PSDAnalysisWindow(QMainWindow):
                 color: #e0e0e0;
                 border: 1px solid #4a5568;
                 border-radius: 3px;
-                padding: 5px;
+                padding: 8px;
+                font-size: 13px;
+                min-height: 25px;
             }
             QComboBox::drop-down {
                 border: none;
+                width: 25px;
             }
             QComboBox::down-arrow {
                 image: none;
@@ -120,8 +160,19 @@ class PSDAnalysisWindow(QMainWindow):
                 border-right: 5px solid transparent;
                 border-top: 5px solid #e0e0e0;
             }
+            QSpinBox::up-button, QDoubleSpinBox::up-button,
+            QSpinBox::down-button, QDoubleSpinBox::down-button {
+                width: 20px;
+                background-color: #3d4758;
+                border: 1px solid #4a5568;
+            }
+            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+            QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+                background-color: #4d5768;
+            }
             QCheckBox {
                 color: #e0e0e0;
+                padding: 5px;
             }
             QCheckBox::indicator {
                 width: 18px;
@@ -133,6 +184,13 @@ class PSDAnalysisWindow(QMainWindow):
             QCheckBox::indicator:checked {
                 background-color: #60a5fa;
                 border-color: #60a5fa;
+            }
+            QScrollArea {
+                border: none;
+                background-color: #1a1f2e;
+            }
+            QWidget#channelWidget {
+                background-color: #1a1f2e;
             }
         """)
     
@@ -238,9 +296,9 @@ class PSDAnalysisWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setMaximumHeight(150)
-        scroll.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
         
         self.channel_widget = QWidget()
+        self.channel_widget.setObjectName("channelWidget")  # For styling
         self.channel_layout = QVBoxLayout(self.channel_widget)
         self.channel_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         
@@ -334,13 +392,13 @@ class PSDAnalysisWindow(QMainWindow):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         
-        # Create plot widget using pyqtgraph
-        self.plot_widget = pg.PlotWidget()
+        # Create custom plot widget with custom axis
+        self.plot_widget = pg.PlotWidget(axisItems={'bottom': LogAxisItem(orientation='bottom')})
         self.plot_widget.setBackground('#1a1f2e')
         
         # Set labels with proper units
         self.plot_widget.setLabel('left', 'PSD', units='', color='#e0e0e0', size='12pt')
-        self.plot_widget.setLabel('bottom', 'Frequency', units='Hz', color='#e0e0e0', size='12pt')
+        self.plot_widget.setLabel('bottom', 'Frequency (Hz)', color='#e0e0e0', size='12pt')
         
         # Enable grid
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
@@ -369,13 +427,68 @@ class PSDAnalysisWindow(QMainWindow):
         self.plot_widget.getPlotItem().showAxis('top')
         self.plot_widget.getPlotItem().showAxis('right')
         
-        # Format axis tick labels to avoid scientific notation
-        self.plot_widget.getPlotItem().getAxis('bottom').setStyle(autoExpandTextSpace=True)
-        self.plot_widget.getPlotItem().getAxis('left').setStyle(autoExpandTextSpace=True)
+        # Format Y-axis to use scientific notation
+        left_axis = self.plot_widget.getPlotItem().getAxis('left')
+        left_axis.enableAutoSIPrefix(False)  # Disable auto SI prefix
+        
+        # Add crosshair for cursor position display
+        self.vLine = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('#60a5fa', width=1, style=Qt.PenStyle.DashLine))
+        self.hLine = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('#60a5fa', width=1, style=Qt.PenStyle.DashLine))
+        self.plot_widget.addItem(self.vLine, ignoreBounds=True)
+        self.plot_widget.addItem(self.hLine, ignoreBounds=True)
+        
+        # Add label for cursor coordinates
+        self.coord_label = pg.TextItem(anchor=(0, 1), color='#e0e0e0')
+        self.plot_widget.addItem(self.coord_label)
+        
+        # Connect mouse move event
+        self.plot_widget.scene().sigMouseMoved.connect(self._on_mouse_moved)
+        
+        # Hide crosshair initially
+        self.vLine.setVisible(False)
+        self.hLine.setVisible(False)
+        self.coord_label.setVisible(False)
         
         layout.addWidget(self.plot_widget)
         
         return panel
+    
+    def _on_mouse_moved(self, pos):
+        """
+        Handle mouse movement over the plot to show cursor coordinates.
+        
+        Args:
+            pos: Mouse position in scene coordinates
+        """
+        # Check if mouse is within plot area
+        if self.plot_widget.sceneBoundingRect().contains(pos):
+            mouse_point = self.plot_widget.plotItem.vb.mapSceneToView(pos)
+            
+            # Convert from log scale to linear
+            freq = 10 ** mouse_point.x()
+            psd = 10 ** mouse_point.y()
+            
+            # Update crosshair position
+            self.vLine.setPos(mouse_point.x())
+            self.hLine.setPos(mouse_point.y())
+            self.vLine.setVisible(True)
+            self.hLine.setVisible(True)
+            
+            # Update coordinate label
+            if self.channel_units and self.channel_units[0]:
+                unit = self.channel_units[0]
+                label_text = f"f = {freq:.2f} Hz\nPSD = {psd:.3e} {unit}²/Hz"
+            else:
+                label_text = f"f = {freq:.2f} Hz\nPSD = {psd:.3e}"
+            
+            self.coord_label.setText(label_text)
+            self.coord_label.setPos(mouse_point.x(), mouse_point.y())
+            self.coord_label.setVisible(True)
+        else:
+            # Hide crosshair when mouse leaves plot area
+            self.vLine.setVisible(False)
+            self.hLine.setVisible(False)
+            self.coord_label.setVisible(False)
     
     def _update_nperseg_from_df(self):
         """
@@ -519,14 +632,18 @@ class PSDAnalysisWindow(QMainWindow):
                     noverlap=noverlap
                 )
                 
-                # Store full frequency range
+                # Store full frequency range (same for all channels)
                 if self.frequencies is None:
                     self.frequencies = frequencies
                 
-                # Calculate RMS over specified frequency range
-                rms = calculate_rms_from_psd(frequencies, psd, freq_range=(freq_min, freq_max))
-                
+                # Store PSD for this channel
                 self.psd_results[channel_name] = psd
+                
+                # Calculate RMS over specified frequency range
+                # Filter frequencies for RMS calculation
+                rms_mask = (frequencies >= freq_min) & (frequencies <= freq_max)
+                rms = calculate_rms_from_psd(frequencies[rms_mask], psd[rms_mask])
+                
                 self.rms_values[channel_name] = rms
             
             # Update plot
@@ -542,7 +659,11 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Clear previous plot
         self.plot_widget.clear()
-        self.legend.clear()
+        
+        # Re-add crosshair and label
+        self.plot_widget.addItem(self.vLine, ignoreBounds=True)
+        self.plot_widget.addItem(self.hLine, ignoreBounds=True)
+        self.plot_widget.addItem(self.coord_label)
         
         # Re-add legend after clearing
         self.legend = self.plot_widget.addLegend(offset=(10, 10))
@@ -551,7 +672,7 @@ class PSDAnalysisWindow(QMainWindow):
         freq_min = self.freq_min_spin.value()
         freq_max = self.freq_max_spin.value()
         
-        # Filter frequencies
+        # Filter frequencies for plotting
         freq_mask = (self.frequencies >= freq_min) & (self.frequencies <= freq_max)
         frequencies_plot = self.frequencies[freq_mask]
         

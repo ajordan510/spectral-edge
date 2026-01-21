@@ -252,6 +252,10 @@ class PSDAnalysisWindow(QMainWindow):
         display_group = self._create_display_options_group()
         layout.addWidget(display_group)
         
+        # Axis limits group
+        axis_limits_group = self._create_axis_limits_group()
+        layout.addWidget(axis_limits_group)
+        
         # Calculate button
         self.calc_button = QPushButton("Calculate PSD")
         self.calc_button.setEnabled(False)
@@ -429,6 +433,77 @@ class PSDAnalysisWindow(QMainWindow):
         self.show_crosshair_checkbox.setChecked(False)
         self.show_crosshair_checkbox.stateChanged.connect(self._toggle_crosshair)
         layout.addWidget(self.show_crosshair_checkbox)
+        
+        group.setLayout(layout)
+        return group
+    
+    def _create_axis_limits_group(self):
+        """Create axis limits control group."""
+        group = QGroupBox("Axis Limits")
+        layout = QGridLayout()
+        
+        row = 0
+        
+        # X-axis limits (Frequency)
+        layout.addWidget(QLabel("X-Axis (Hz):"), row, 0, 1, 2)
+        row += 1
+        
+        layout.addWidget(QLabel("Min:"), row, 0)
+        self.x_min_spin = QDoubleSpinBox()
+        self.x_min_spin.setRange(0.001, 100000)
+        self.x_min_spin.setValue(10.0)  # Default 10 Hz
+        self.x_min_spin.setDecimals(3)
+        self.x_min_spin.setSingleStep(10)
+        layout.addWidget(self.x_min_spin, row, 1)
+        row += 1
+        
+        layout.addWidget(QLabel("Max:"), row, 0)
+        self.x_max_spin = QDoubleSpinBox()
+        self.x_max_spin.setRange(0.001, 100000)
+        self.x_max_spin.setValue(3000.0)  # Default 3000 Hz
+        self.x_max_spin.setDecimals(3)
+        self.x_max_spin.setSingleStep(100)
+        layout.addWidget(self.x_max_spin, row, 1)
+        row += 1
+        
+        # Y-axis limits (PSD)
+        layout.addWidget(QLabel("Y-Axis (PSD):"), row, 0, 1, 2)
+        row += 1
+        
+        layout.addWidget(QLabel("Min:"), row, 0)
+        self.y_min_spin = QDoubleSpinBox()
+        self.y_min_spin.setRange(1e-20, 1e10)
+        self.y_min_spin.setValue(1e-7)  # Default 1E-7
+        self.y_min_spin.setDecimals(10)
+        self.y_min_spin.setSingleStep(1e-7)
+        # Use scientific notation for display
+        self.y_min_spin.setSpecialValueText("1e-7")
+        layout.addWidget(self.y_min_spin, row, 1)
+        row += 1
+        
+        layout.addWidget(QLabel("Max:"), row, 0)
+        self.y_max_spin = QDoubleSpinBox()
+        self.y_max_spin.setRange(1e-20, 1e10)
+        self.y_max_spin.setValue(10.0)  # Default 10
+        self.y_max_spin.setDecimals(10)
+        self.y_max_spin.setSingleStep(1.0)
+        layout.addWidget(self.y_max_spin, row, 1)
+        row += 1
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        
+        # Apply limits button
+        apply_button = QPushButton("Apply")
+        apply_button.clicked.connect(self._apply_axis_limits)
+        button_layout.addWidget(apply_button)
+        
+        # Auto-fit button
+        auto_button = QPushButton("Auto-Fit")
+        auto_button.clicked.connect(self._auto_fit_axes)
+        button_layout.addWidget(auto_button)
+        
+        layout.addLayout(button_layout, row, 0, 1, 2)
         
         group.setLayout(layout)
         return group
@@ -887,14 +962,8 @@ class PSDAnalysisWindow(QMainWindow):
         else:
             self.plot_widget.setLabel('left', 'PSD (units²/Hz)', color='#e0e0e0', size='12pt')
         
-        # Set X-axis range to user-specified range
-        self.plot_widget.setXRange(np.log10(freq_min), np.log10(freq_max))
-        
-        # Set custom frequency ticks (powers of 10 only)
-        self._set_frequency_ticks()
-        
-        # Re-enable auto-range for user interaction, but keep current view
-        self.plot_widget.getPlotItem().vb.enableAutoRange(enable=False)
+        # Apply axis limits from controls
+        self._apply_axis_limits()
     
     def _open_spectrogram(self):
         """Open spectrogram window for selected channel."""
@@ -1250,3 +1319,85 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Disable auto-range
         self.plot_widget.getPlotItem().vb.enableAutoRange(enable=False)
+    
+    def _apply_axis_limits(self):
+        """Apply user-specified axis limits to the PSD plot."""
+        # Get limits from spinboxes
+        x_min = self.x_min_spin.value()
+        x_max = self.x_max_spin.value()
+        y_min = self.y_min_spin.value()
+        y_max = self.y_max_spin.value()
+        
+        # Validate limits
+        if x_min >= x_max:
+            QMessageBox.warning(self, "Invalid Limits", "X-axis minimum must be less than maximum.")
+            return
+        
+        if y_min >= y_max:
+            QMessageBox.warning(self, "Invalid Limits", "Y-axis minimum must be less than maximum.")
+            return
+        
+        # Set X-axis range (log scale)
+        self.plot_widget.setXRange(np.log10(x_min), np.log10(x_max))
+        
+        # Set Y-axis range (log scale)
+        self.plot_widget.setYRange(np.log10(y_min), np.log10(y_max))
+        
+        # Update frequency ticks
+        self._set_frequency_ticks()
+        
+        # Disable auto-range to maintain user-specified limits
+        self.plot_widget.getPlotItem().vb.enableAutoRange(enable=False)
+    
+    def _auto_fit_axes(self):
+        """Auto-fit axes based on current data."""
+        if self.frequencies is None or not self.psd_results:
+            QMessageBox.information(self, "No Data", "Please calculate PSD first before using auto-fit.")
+            return
+        
+        # Get frequency range from data
+        freq_min = self.freq_min_spin.value()
+        freq_max = self.freq_max_spin.value()
+        
+        # Filter frequencies
+        freq_mask = (self.frequencies >= freq_min) & (self.frequencies <= freq_max)
+        
+        if not np.any(freq_mask):
+            QMessageBox.warning(self, "No Data", "No data in the specified frequency range.")
+            return
+        
+        # Find min/max PSD values across all selected channels
+        psd_min = np.inf
+        psd_max = -np.inf
+        
+        for i, checkbox in enumerate(self.channel_checkboxes):
+            if checkbox.isChecked():
+                channel_name = self.channel_names[i]
+                
+                if channel_name in self.psd_results:
+                    psd = self.psd_results[channel_name][freq_mask]
+                    
+                    # Filter out zeros and negative values for log scale
+                    psd_positive = psd[psd > 0]
+                    
+                    if len(psd_positive) > 0:
+                        psd_min = min(psd_min, np.min(psd_positive))
+                        psd_max = max(psd_max, np.max(psd_positive))
+        
+        # If we found valid data, update limits
+        if psd_min != np.inf and psd_max != -np.inf:
+            # Add some margin (10% on log scale)
+            log_range = np.log10(psd_max) - np.log10(psd_min)
+            margin = log_range * 0.1
+            
+            y_min_auto = 10 ** (np.log10(psd_min) - margin)
+            y_max_auto = 10 ** (np.log10(psd_max) + margin)
+            
+            # Update spinboxes
+            self.y_min_spin.setValue(y_min_auto)
+            self.y_max_spin.setValue(y_max_auto)
+            
+            # Apply the new limits
+            self._apply_axis_limits()
+        else:
+            QMessageBox.warning(self, "No Valid Data", "No positive PSD values found for auto-fit.")

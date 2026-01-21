@@ -25,6 +25,7 @@ from spectral_edge.core.psd import (
     calculate_psd_welch, psd_to_db, calculate_rms_from_psd, get_window_options
 )
 from spectral_edge.gui.spectrogram_window import SpectrogramWindow
+from spectral_edge.gui.event_manager import EventManagerWindow, Event
 
 
 class ScientificAxisItem(pg.AxisItem):
@@ -99,6 +100,14 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Spectrogram windows
         self.spectrogram_windows = {}
+        
+        # Event management
+        self.event_manager = None
+        self.events = []  # List of Event objects
+        self.event_regions = []  # List of LinearRegionItem for visualization
+        self.interactive_selection_mode = False
+        self.selection_start = None
+        self.temp_selection_line = None
         
         # Apply styling
         self._apply_styling()
@@ -270,6 +279,12 @@ class PSDAnalysisWindow(QMainWindow):
         self.spec_button.clicked.connect(self._open_spectrogram)
         layout.addWidget(self.spec_button)
         
+        # Event Manager button
+        self.event_button = QPushButton("Manage Events")
+        self.event_button.setEnabled(False)
+        self.event_button.clicked.connect(self._open_event_manager)
+        layout.addWidget(self.event_button)
+        
         layout.addStretch()
         
         return panel
@@ -436,6 +451,9 @@ class PSDAnalysisWindow(QMainWindow):
         self.time_legend = self.time_plot_widget.addLegend(offset=(10, 10))
         self.time_legend.setBrush(pg.mkBrush(26, 31, 46, 200))  # Semi-transparent GUI background
         self.time_legend.setPen(pg.mkPen(74, 85, 104, 255))  # Subtle border
+        
+        # Connect click event for interactive event selection
+        self.time_plot_widget.scene().sigMouseClicked.connect(self._on_time_plot_clicked)
         
         layout.addWidget(self.time_plot_widget, stretch=1)
         
@@ -637,6 +655,7 @@ class PSDAnalysisWindow(QMainWindow):
             # Enable calculate buttons
             self.calc_button.setEnabled(True)
             self.spec_button.setEnabled(True)
+            self.event_button.setEnabled(True)
             
             # Clear previous results
             self.frequencies = None
@@ -927,3 +946,307 @@ class PSDAnalysisWindow(QMainWindow):
             )
             window_obj.show()
             self.spectrogram_windows[channel_name] = window_obj
+    
+    def _open_event_manager(self):
+        """Open the Event Manager window."""
+        if self.time_data is None:
+            return
+        
+        # Create event manager if it doesn't exist
+        if self.event_manager is None:
+            max_time = self.time_data[-1]
+            self.event_manager = EventManagerWindow(max_time=max_time)
+            
+            # Connect signals
+            self.event_manager.events_updated.connect(self._on_events_updated)
+            self.event_manager.interactive_mode_changed.connect(self._on_interactive_mode_changed)
+        
+        # Show the window
+        self.event_manager.show()
+        self.event_manager.raise_()
+        self.event_manager.activateWindow()
+    
+    def _on_events_updated(self, events):
+        """
+        Handle events updated from Event Manager.
+        
+        Args:
+            events: List of Event objects
+        """
+        self.events = events
+        
+        # Update visualization
+        self._update_event_regions()
+        
+        # Calculate PSDs for all events
+        self._calculate_event_psds()
+    
+    def _on_interactive_mode_changed(self, enabled):
+        """
+        Handle interactive selection mode toggle.
+        
+        Args:
+            enabled: True if interactive mode is enabled
+        """
+        self.interactive_selection_mode = enabled
+        
+        # Reset selection state
+        self.selection_start = None
+        if self.temp_selection_line is not None:
+            self.time_plot_widget.removeItem(self.temp_selection_line)
+            self.temp_selection_line = None
+    
+    def _on_time_plot_clicked(self, event):
+        """
+        Handle click on time history plot for interactive event selection.
+        
+        Args:
+            event: Mouse click event
+        """
+        if not self.interactive_selection_mode:
+            return
+        
+        # Check if click is within plot area
+        if not self.time_plot_widget.sceneBoundingRect().contains(event.scenePos()):
+            return
+        
+        # Get time value at click position
+        mouse_point = self.time_plot_widget.plotItem.vb.mapSceneToView(event.scenePos())
+        time_value = mouse_point.x()
+        
+        # Clamp to valid range
+        time_value = max(0, min(time_value, self.time_data[-1]))
+        
+        if self.selection_start is None:
+            # First click - set start time
+            self.selection_start = time_value
+            
+            # Add temporary vertical line
+            self.temp_selection_line = pg.InfiniteLine(
+                pos=time_value,
+                angle=90,
+                pen=pg.mkPen('#60a5fa', width=2, style=Qt.PenStyle.DashLine),
+                label='Start'
+            )
+            self.time_plot_widget.addItem(self.temp_selection_line)
+        
+        else:
+            # Second click - set end time and create event
+            end_time = time_value
+            
+            # Remove temporary line
+            if self.temp_selection_line is not None:
+                self.time_plot_widget.removeItem(self.temp_selection_line)
+                self.temp_selection_line = None
+            
+            # Ensure start < end
+            if self.selection_start > end_time:
+                self.selection_start, end_time = end_time, self.selection_start
+            
+            # Add event to Event Manager
+            if self.event_manager is not None:
+                self.event_manager.add_event_from_selection(self.selection_start, end_time)
+            
+            # Reset selection
+            self.selection_start = None
+    
+    def _update_event_regions(self):
+        """Update visual representation of events on time history plot."""
+        # Remove existing regions
+        for region in self.event_regions:
+            self.time_plot_widget.removeItem(region)
+        self.event_regions.clear()
+        
+        # Add new regions
+        colors = [
+            (96, 165, 250, 50),   # Blue
+            (16, 185, 129, 50),   # Green
+            (245, 158, 11, 50),   # Orange
+            (239, 68, 68, 50),    # Red
+            (139, 92, 246, 50),   # Purple
+            (236, 72, 153, 50),   # Pink
+        ]
+        
+        for i, event in enumerate(self.events):
+            # Skip "Full" event
+            if event.name == "Full":
+                continue
+            
+            color = colors[i % len(colors)]
+            
+            # Create shaded region
+            region = pg.LinearRegionItem(
+                values=[event.start_time, event.end_time],
+                brush=pg.mkBrush(*color),
+                pen=pg.mkPen(color[:3] + (150,), width=2),
+                movable=False
+            )
+            
+            self.time_plot_widget.addItem(region)
+            self.event_regions.append(region)
+    
+    def _calculate_event_psds(self):
+        """Calculate PSDs for all defined events."""
+        if self.signal_data is None or not self.events:
+            return
+        
+        try:
+            # Get parameters from UI
+            window = self.window_combo.currentText().lower()
+            df = self.df_spin.value()
+            nperseg = int(self.sample_rate / df)
+            
+            if self.efficient_fft_checkbox.isChecked():
+                nperseg = 2 ** int(np.ceil(np.log2(nperseg)))
+            
+            overlap_percent = self.overlap_spin.value()
+            noverlap = int(nperseg * overlap_percent / 100)
+            
+            # Get frequency range for RMS calculation
+            freq_min = self.freq_min_spin.value()
+            freq_max = self.freq_max_spin.value()
+            
+            # Clear previous results
+            self.psd_results = {}
+            self.rms_values = {}
+            
+            # Calculate PSD for each event and channel
+            for event in self.events:
+                # Get time indices for this event
+                start_idx = int(event.start_time * self.sample_rate)
+                end_idx = int(event.end_time * self.sample_rate)
+                
+                # Clamp to valid range
+                start_idx = max(0, start_idx)
+                end_idx = min(len(self.time_data), end_idx)
+                
+                if end_idx - start_idx < nperseg:
+                    # Skip events that are too short
+                    continue
+                
+                # Calculate PSD for each channel
+                for channel_idx in range(self.signal_data.shape[0]):
+                    channel_name = self.channel_names[channel_idx]
+                    signal_segment = self.signal_data[channel_idx, start_idx:end_idx]
+                    
+                    # Calculate PSD
+                    frequencies, psd = calculate_psd_welch(
+                        signal_segment,
+                        self.sample_rate,
+                        window=window,
+                        nperseg=nperseg,
+                        noverlap=noverlap
+                    )
+                    
+                    # Store full frequency range (same for all)
+                    if self.frequencies is None:
+                        self.frequencies = frequencies
+                    
+                    # Create unique key for event + channel
+                    key = f"{event.name}_{channel_name}"
+                    
+                    # Store PSD for this event and channel
+                    self.psd_results[key] = psd
+                    
+                    # Calculate RMS over specified frequency range
+                    rms_mask = (frequencies >= freq_min) & (frequencies <= freq_max)
+                    if np.any(rms_mask):
+                        rms = calculate_rms_from_psd(frequencies[rms_mask], psd[rms_mask])
+                    else:
+                        rms = 0.0
+                    
+                    self.rms_values[key] = rms
+            
+            # Update plot
+            self._update_plot_with_events()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Calculation Error", f"Failed to calculate event PSDs: {e}")
+    
+    def _update_plot_with_events(self):
+        """Update the PSD plot with event-based PSDs."""
+        if self.frequencies is None or not self.psd_results:
+            return
+        
+        # Clear previous plot
+        self._clear_psd_plot()
+        
+        # Get frequency range for plotting
+        freq_min = self.freq_min_spin.value()
+        freq_max = self.freq_max_spin.value()
+        
+        # Filter frequencies for plotting
+        freq_mask = (self.frequencies >= freq_min) & (self.frequencies <= freq_max)
+        
+        if not np.any(freq_mask):
+            QMessageBox.warning(self, "No Data", "No frequency data in the specified range.")
+            return
+        
+        frequencies_plot = self.frequencies[freq_mask]
+        
+        # Define colors for different events
+        colors = ['#60a5fa', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
+        
+        # Plot PSDs for each event and selected channel
+        plot_count = 0
+        for event in self.events:
+            for i, checkbox in enumerate(self.channel_checkboxes):
+                if checkbox.isChecked():
+                    channel_name = self.channel_names[i]
+                    key = f"{event.name}_{channel_name}"
+                    
+                    # Check if PSD exists for this event + channel
+                    if key not in self.psd_results:
+                        continue
+                    
+                    psd = self.psd_results[key][freq_mask]
+                    rms = self.rms_values[key]
+                    unit = self.channel_units[i] if i < len(self.channel_units) else ''
+                    
+                    # Create legend label with event name, channel, and RMS
+                    if len(self.events) > 1:
+                        # Show event name when multiple events
+                        if unit:
+                            legend_label = f"{event.name} - {channel_name}: RMS={rms:.4f} {unit}"
+                        else:
+                            legend_label = f"{event.name} - {channel_name}: RMS={rms:.4f}"
+                    else:
+                        # Just channel name for single event
+                        if unit:
+                            legend_label = f"{channel_name}: RMS={rms:.4f} {unit}"
+                        else:
+                            legend_label = f"{channel_name}: RMS={rms:.4f}"
+                    
+                    # Plot the PSD
+                    color = colors[plot_count % len(colors)]
+                    
+                    # Use dashed line for "Full" event
+                    if event.name == "Full":
+                        pen = pg.mkPen(color=color, width=2, style=Qt.PenStyle.DashLine)
+                    else:
+                        pen = pg.mkPen(color=color, width=2)
+                    
+                    self.plot_widget.plot(
+                        frequencies_plot, 
+                        psd, 
+                        pen=pen,
+                        name=legend_label
+                    )
+                    
+                    plot_count += 1
+        
+        # Update Y-axis label with units
+        if self.channel_units and self.channel_units[0]:
+            unit = self.channel_units[0]
+            self.plot_widget.setLabel('left', f'PSD ({unit}²/Hz)', color='#e0e0e0', size='12pt')
+        else:
+            self.plot_widget.setLabel('left', 'PSD (units²/Hz)', color='#e0e0e0', size='12pt')
+        
+        # Set X-axis range
+        self.plot_widget.setXRange(np.log10(freq_min), np.log10(freq_max))
+        
+        # Set custom frequency ticks
+        self._set_frequency_ticks()
+        
+        # Disable auto-range
+        self.plot_widget.getPlotItem().vb.enableAutoRange(enable=False)

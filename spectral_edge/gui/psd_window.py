@@ -27,46 +27,6 @@ from spectral_edge.core.psd import (
 from spectral_edge.gui.spectrogram_window import SpectrogramWindow
 
 
-class LogAxisItem(pg.AxisItem):
-    """
-    Custom axis item for logarithmic scale with specific tick values.
-    
-    This class ensures that the X-axis shows only powers of 10 (10, 100, 1000, etc.)
-    and always displays values in Hz (not kHz).
-    """
-    
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-    
-    def tickStrings(self, values, scale, spacing):
-        """
-        Override tick string generation to show only Hz values at powers of 10.
-        
-        Args:
-            values: The tick values to display
-            scale: The scale factor
-            spacing: The spacing between ticks
-        
-        Returns:
-            List of strings for tick labels
-        """
-        strings = []
-        for v in values:
-            # Convert from log scale to linear
-            actual_value = 10 ** v
-            
-            # Only show values that are close to powers of 10
-            log_value = np.log10(actual_value)
-            if abs(log_value - round(log_value)) < 0.1:
-                # This is close to a power of 10
-                strings.append(f"{int(round(actual_value))}")
-            else:
-                # Don't show this tick
-                strings.append("")
-        
-        return strings
-
-
 class ScientificAxisItem(pg.AxisItem):
     """
     Custom axis item that always displays values in scientific notation.
@@ -371,6 +331,7 @@ class PSDAnalysisWindow(QMainWindow):
         self.freq_min_spin.setRange(0.1, 10000)
         self.freq_min_spin.setValue(10.0)
         self.freq_min_spin.setDecimals(1)
+        self.freq_min_spin.valueChanged.connect(self._on_parameter_changed)
         layout.addWidget(self.freq_min_spin, 0, 1)
         
         # Max frequency
@@ -379,6 +340,7 @@ class PSDAnalysisWindow(QMainWindow):
         self.freq_max_spin.setRange(1, 100000)
         self.freq_max_spin.setValue(2000.0)
         self.freq_max_spin.setDecimals(1)
+        self.freq_max_spin.valueChanged.connect(self._on_parameter_changed)
         layout.addWidget(self.freq_max_spin, 1, 1)
         
         group.setLayout(layout)
@@ -398,6 +360,7 @@ class PSDAnalysisWindow(QMainWindow):
         for window_name in window_options.keys():
             self.window_combo.addItem(window_name.capitalize())
         self.window_combo.setCurrentText("Hann")
+        self.window_combo.currentTextChanged.connect(self._on_parameter_changed)
         layout.addWidget(self.window_combo, row, 1)
         row += 1
         
@@ -409,6 +372,7 @@ class PSDAnalysisWindow(QMainWindow):
         self.df_spin.setDecimals(2)
         self.df_spin.setSingleStep(0.1)
         self.df_spin.valueChanged.connect(self._update_nperseg_from_df)
+        self.df_spin.valueChanged.connect(self._on_parameter_changed)
         layout.addWidget(self.df_spin, row, 1)
         row += 1
         
@@ -423,6 +387,7 @@ class PSDAnalysisWindow(QMainWindow):
         self.efficient_fft_checkbox = QCheckBox("Use efficient FFT size")
         self.efficient_fft_checkbox.setChecked(True)
         self.efficient_fft_checkbox.stateChanged.connect(self._update_nperseg_from_df)
+        self.efficient_fft_checkbox.stateChanged.connect(self._on_parameter_changed)
         layout.addWidget(self.efficient_fft_checkbox, row, 0, 1, 2)
         row += 1
         
@@ -432,6 +397,7 @@ class PSDAnalysisWindow(QMainWindow):
         self.overlap_spin.setRange(0, 90)
         self.overlap_spin.setValue(50)
         self.overlap_spin.setSingleStep(10)
+        self.overlap_spin.valueChanged.connect(self._on_parameter_changed)
         layout.addWidget(self.overlap_spin, row, 1)
         row += 1
         
@@ -475,7 +441,6 @@ class PSDAnalysisWindow(QMainWindow):
         
         # PSD plot with custom axes
         self.plot_widget = pg.PlotWidget(axisItems={
-            'bottom': LogAxisItem(orientation='bottom'),
             'left': ScientificAxisItem(orientation='left')
         })
         self.plot_widget.setBackground('#1a1f2e')
@@ -485,7 +450,9 @@ class PSDAnalysisWindow(QMainWindow):
         self.plot_widget.setTitle("Power Spectral Density", color='#60a5fa', size='14pt')
         self.plot_widget.setMouseEnabled(x=True, y=True)
         self.plot_widget.setLogMode(x=True, y=True)
-        self.plot_widget.setXRange(np.log10(10), np.log10(3000))
+        
+        # Disable auto-range to prevent crosshair from panning
+        self.plot_widget.getPlotItem().vb.disableAutoRange()
         
         # Add legend for PSD with styled background
         self.legend = self.plot_widget.addLegend(offset=(10, 10))
@@ -509,7 +476,7 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Add label for cursor coordinates
         self.coord_label = pg.TextItem(anchor=(0, 1), color='#e0e0e0')
-        self.plot_widget.addItem(self.coord_label)
+        self.plot_widget.addItem(self.coord_label, ignoreBounds=True)
         
         # Connect mouse move event
         self.plot_widget.scene().sigMouseMoved.connect(self._on_mouse_moved)
@@ -571,6 +538,30 @@ class PSDAnalysisWindow(QMainWindow):
             self.vLine.setVisible(False)
             self.hLine.setVisible(False)
             self.coord_label.setVisible(False)
+    
+    def _on_parameter_changed(self):
+        """Handle parameter changes - clear PSD results to force recalculation."""
+        # Clear PSD results
+        self.frequencies = None
+        self.psd_results = {}
+        self.rms_values = {}
+        
+        # Clear the PSD plot but keep time history
+        self._clear_psd_plot()
+    
+    def _clear_psd_plot(self):
+        """Clear only the PSD plot."""
+        self.plot_widget.clear()
+        
+        # Re-add crosshair and label
+        self.plot_widget.addItem(self.vLine, ignoreBounds=True)
+        self.plot_widget.addItem(self.hLine, ignoreBounds=True)
+        self.plot_widget.addItem(self.coord_label, ignoreBounds=True)
+        
+        # Re-add legend with styling
+        self.legend = self.plot_widget.addLegend(offset=(10, 10))
+        self.legend.setBrush(pg.mkBrush(26, 31, 46, 200))
+        self.legend.setPen(pg.mkPen(74, 85, 104, 255))
     
     def _update_nperseg_from_df(self):
         """
@@ -790,23 +781,36 @@ class PSDAnalysisWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Calculation Error", f"Failed to calculate PSD: {e}\n\nPlease try adjusting the frequency resolution or frequency range.")
     
+    def _set_frequency_ticks(self):
+        """Set frequency axis ticks to only show powers of 10."""
+        freq_min = self.freq_min_spin.value()
+        freq_max = self.freq_max_spin.value()
+        
+        # Generate powers of 10 within the frequency range
+        min_power = int(np.floor(np.log10(freq_min)))
+        max_power = int(np.ceil(np.log10(freq_max)))
+        
+        # Create tick values (in log space)
+        tick_values = []
+        tick_labels = []
+        
+        for power in range(min_power, max_power + 1):
+            freq = 10 ** power
+            if freq >= freq_min and freq <= freq_max:
+                tick_values.append(np.log10(freq))
+                tick_labels.append(str(int(freq)))
+        
+        # Set the ticks on the bottom axis
+        bottom_axis = self.plot_widget.getPlotItem().getAxis('bottom')
+        bottom_axis.setTicks([[(val, label) for val, label in zip(tick_values, tick_labels)]])
+    
     def _update_plot(self):
         """Update the PSD plot with selected channels."""
         if self.frequencies is None or not self.psd_results:
             return
         
         # Clear previous plot
-        self.plot_widget.clear()
-        
-        # Re-add crosshair and label
-        self.plot_widget.addItem(self.vLine, ignoreBounds=True)
-        self.plot_widget.addItem(self.hLine, ignoreBounds=True)
-        self.plot_widget.addItem(self.coord_label)
-        
-        # Re-add legend after clearing with styling
-        self.legend = self.plot_widget.addLegend(offset=(10, 10))
-        self.legend.setBrush(pg.mkBrush(26, 31, 46, 200))
-        self.legend.setPen(pg.mkPen(74, 85, 104, 255))
+        self._clear_psd_plot()
         
         # Get frequency range for plotting
         freq_min = self.freq_min_spin.value()
@@ -866,6 +870,12 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Set X-axis range to user-specified range
         self.plot_widget.setXRange(np.log10(freq_min), np.log10(freq_max))
+        
+        # Set custom frequency ticks (powers of 10 only)
+        self._set_frequency_ticks()
+        
+        # Re-enable auto-range for user interaction, but keep current view
+        self.plot_widget.getPlotItem().vb.enableAutoRange(enable=False)
     
     def _open_spectrogram(self):
         """Open spectrogram window for selected channel."""

@@ -425,7 +425,10 @@ class SpectrogramWindow(QMainWindow):
         
         # Add label for cursor coordinates
         self.coord_label = pg.TextItem(anchor=(0, 1), color='#e0e0e0')
-        self.plot_widget.addItem(self.coord_label)
+        self.plot_widget.addItem(self.coord_label, ignoreBounds=True)
+        
+        # Disable auto-range to prevent crosshair from panning
+        self.plot_widget.getPlotItem().vb.disableAutoRange()
         
         # Connect mouse move event
         self.plot_widget.scene().sigMouseMoved.connect(self._on_mouse_moved)
@@ -572,12 +575,11 @@ class SpectrogramWindow(QMainWindow):
                 self.spec_times[-1], np.log10(freq_max_plot) - np.log10(freq_min_plot)
             ))
             
-            # Set log mode for Y-axis with custom axis
+            # Set log mode for Y-axis
             self.plot_widget.setLogMode(x=False, y=True)
             
-            # Replace Y-axis with custom log axis
-            log_axis = LogAxisItem(orientation='left')
-            self.plot_widget.setAxisItems({'left': log_axis})
+            # Set custom frequency ticks (powers of 10 only)
+            self._set_frequency_ticks_log(freq_min_plot, freq_max_plot)
             self.plot_widget.setLabel('left', 'Frequency (Hz)', color='#e0e0e0', size='12pt')
             
         else:
@@ -606,3 +608,26 @@ class SpectrogramWindow(QMainWindow):
         
         # Update colorbar
         self.colorbar.setLevels((vmin, vmax))
+        
+        # Re-enable auto-range for user interaction, but keep current view
+        self.plot_widget.getPlotItem().vb.enableAutoRange(enable=False)
+    
+    def _set_frequency_ticks_log(self, freq_min, freq_max):
+        """Set frequency axis ticks to only show powers of 10 in log scale."""
+        # Generate powers of 10 within the frequency range
+        min_power = int(np.floor(np.log10(freq_min)))
+        max_power = int(np.ceil(np.log10(freq_max)))
+        
+        # Create tick values (in log space)
+        tick_values = []
+        tick_labels = []
+        
+        for power in range(min_power, max_power + 1):
+            freq = 10 ** power
+            if freq >= freq_min and freq <= freq_max:
+                tick_values.append(np.log10(freq))
+                tick_labels.append(str(int(freq)))
+        
+        # Set the ticks on the left axis
+        left_axis = self.plot_widget.getPlotItem().getAxis('left')
+        left_axis.setTicks([[(val, label) for val, label in zip(tick_values, tick_labels)]])

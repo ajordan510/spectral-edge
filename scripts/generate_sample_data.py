@@ -26,6 +26,8 @@ def generate_sample_vibration_data():
     - 500 Hz high frequency component
     - Random noise
     
+    Data is in units of g (acceleration due to gravity, where 1 g = 9.81 m/s²)
+    
     The data is saved to data/sample_vibration_data.csv
     """
     print("Generating sample vibration data...")
@@ -40,6 +42,7 @@ def generate_sample_vibration_data():
     
     # Create signal with multiple frequency components
     # These simulate different vibration sources in a mechanical system
+    # All amplitudes are in units of g (gravitational acceleration)
     
     # 10 Hz component (low frequency vibration, e.g., from rotating machinery)
     signal_10hz = 0.5 * np.sin(2 * np.pi * 10 * time)
@@ -62,11 +65,11 @@ def generate_sample_vibration_data():
     # Channel 2 (Accelerometer Y-axis) has different amplitudes
     channel2 = 0.8 * signal_10hz + 0.5 * signal_60hz + noise * 0.8
     
-    # Create DataFrame
+    # Create DataFrame with units in column headers
     df = pd.DataFrame({
-        'Time': time,
-        'Accelerometer_X': channel1,
-        'Accelerometer_Y': channel2
+        'Time (s)': time,
+        'Accelerometer_X (g)': channel1,
+        'Accelerometer_Y (g)': channel2
     })
     
     # Ensure data directory exists
@@ -84,6 +87,7 @@ def generate_sample_vibration_data():
     print(f"  Duration: {duration} seconds")
     print(f"  Total samples: {num_samples}")
     print(f"  Channels: 2 (Accelerometer_X, Accelerometer_Y)")
+    print(f"  Units: g (gravitational acceleration)")
     print(f"  Frequency components: 10, 60, 120, 500 Hz")
     print(f"\nYou can now load this file in the PSD Analysis tool!")
 

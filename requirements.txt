@@ -5,3 +5,4 @@ scipy
 h5py
 python-pptx
 pytest
+pandas

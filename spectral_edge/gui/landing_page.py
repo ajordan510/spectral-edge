@@ -15,6 +15,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QIcon, QPalette, QColor
 
+# Import tool windows
+from spectral_edge.gui.psd_window import PSDAnalysisWindow
+
 
 class LandingPage(QMainWindow):
     """
@@ -37,6 +40,9 @@ class LandingPage(QMainWindow):
         # Set window properties
         self.setWindowTitle("SpectralEdge - Signal Processing Suite")
         self.setMinimumSize(1000, 700)
+        
+        # Storage for tool windows
+        self.tool_windows = {}
         
         # Apply aerospace-inspired styling
         self._apply_styling()
@@ -283,13 +289,35 @@ class LandingPage(QMainWindow):
         """
         Handle tool card click events.
         
-        This method is called when a user clicks on a tool card. Currently
-        it's a placeholder that will be expanded in future epics to launch
-        the appropriate tool interface.
+        This method is called when a user clicks on a tool card. It launches
+        the appropriate tool window.
         
         Args:
             tool_name (str): The name of the tool that was clicked.
         """
-        # Placeholder: Print to console (will be replaced with actual tool launch)
-        print(f"Tool clicked: {tool_name}")
-        # TODO: Implement tool launching in future epics
+        # Launch the appropriate tool based on name
+        if tool_name == "PSD Analysis":
+            self._launch_psd_tool()
+        else:
+            # Other tools not yet implemented
+            print(f"Tool clicked: {tool_name} (not yet implemented)")
+    
+    def _launch_psd_tool(self):
+        """
+        Launch the PSD Analysis tool window.
+        
+        Creates a new PSD Analysis window if one doesn't exist, or brings
+        the existing window to the front.
+        """
+        # Check if PSD window already exists
+        if "PSD Analysis" in self.tool_windows:
+            # Bring existing window to front
+            window = self.tool_windows["PSD Analysis"]
+            window.show()
+            window.raise_()
+            window.activateWindow()
+        else:
+            # Create new PSD window
+            psd_window = PSDAnalysisWindow()
+            psd_window.show()
+            self.tool_windows["PSD Analysis"] = psd_window

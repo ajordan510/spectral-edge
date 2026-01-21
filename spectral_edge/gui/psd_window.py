@@ -24,6 +24,7 @@ from spectral_edge.utils.data_loader import load_csv_data, DataLoadError
 from spectral_edge.core.psd import (
     calculate_psd_welch, psd_to_db, calculate_rms_from_psd, get_window_options
 )
+from spectral_edge.gui.spectrogram_window import SpectrogramWindow
 
 
 class LogAxisItem(pg.AxisItem):
@@ -73,6 +74,8 @@ class PSDAnalysisWindow(QMainWindow):
     - Computing and displaying PSD results
     - Interactive plotting with zoom and pan
     - Multi-channel selection and display
+    - Time history visualization
+    - Spectrogram generation
     """
     
     def __init__(self):
@@ -81,7 +84,7 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Window properties
         self.setWindowTitle("SpectralEdge - PSD Analysis")
-        self.setMinimumSize(1400, 900)
+        self.setMinimumSize(1400, 1000)
         
         # Data storage
         self.time_data = None
@@ -98,6 +101,9 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Channel selection checkboxes
         self.channel_checkboxes = []
+        
+        # Spectrogram windows
+        self.spectrogram_windows = {}
         
         # Apply styling
         self._apply_styling()
@@ -205,7 +211,7 @@ class PSDAnalysisWindow(QMainWindow):
         left_panel = self._create_control_panel()
         main_layout.addWidget(left_panel, stretch=1)
         
-        # Right panel: Plot
+        # Right panel: Plots
         right_panel = self._create_plot_panel()
         main_layout.addWidget(right_panel, stretch=3)
     
@@ -238,6 +244,10 @@ class PSDAnalysisWindow(QMainWindow):
         param_group = self._create_parameter_group()
         layout.addWidget(param_group)
         
+        # Display options group
+        display_group = self._create_display_options_group()
+        layout.addWidget(display_group)
+        
         # Calculate button
         self.calc_button = QPushButton("Calculate PSD")
         self.calc_button.setEnabled(False)
@@ -258,6 +268,12 @@ class PSDAnalysisWindow(QMainWindow):
             }
         """)
         layout.addWidget(self.calc_button)
+        
+        # Spectrogram button
+        self.spec_button = QPushButton("Calculate Spectrogram")
+        self.spec_button.setEnabled(False)
+        self.spec_button.clicked.connect(self._open_spectrogram)
+        layout.addWidget(self.spec_button)
         
         layout.addStretch()
         
@@ -387,35 +403,51 @@ class PSDAnalysisWindow(QMainWindow):
         group.setLayout(layout)
         return group
     
+    def _create_display_options_group(self):
+        """Create display options group."""
+        group = QGroupBox("Display Options")
+        layout = QVBoxLayout()
+        
+        # Show crosshair checkbox
+        self.show_crosshair_checkbox = QCheckBox("Show Crosshair")
+        self.show_crosshair_checkbox.setChecked(False)
+        self.show_crosshair_checkbox.stateChanged.connect(self._toggle_crosshair)
+        layout.addWidget(self.show_crosshair_checkbox)
+        
+        group.setLayout(layout)
+        return group
+    
     def _create_plot_panel(self):
-        """Create the right plot panel."""
+        """Create the right plot panel with time history and PSD plots."""
         panel = QWidget()
         layout = QVBoxLayout(panel)
         
-        # Create custom plot widget with custom axis
+        # Time history plot
+        self.time_plot_widget = pg.PlotWidget()
+        self.time_plot_widget.setBackground('#1a1f2e')
+        self.time_plot_widget.setLabel('left', 'Amplitude', color='#e0e0e0', size='11pt')
+        self.time_plot_widget.setLabel('bottom', 'Time', units='s', color='#e0e0e0', size='11pt')
+        self.time_plot_widget.setTitle("Time History", color='#60a5fa', size='12pt')
+        self.time_plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        self.time_plot_widget.setMouseEnabled(x=True, y=True)
+        
+        # Add legend for time plot
+        self.time_legend = self.time_plot_widget.addLegend(offset=(10, 10))
+        
+        layout.addWidget(self.time_plot_widget, stretch=1)
+        
+        # PSD plot
         self.plot_widget = pg.PlotWidget(axisItems={'bottom': LogAxisItem(orientation='bottom')})
         self.plot_widget.setBackground('#1a1f2e')
-        
-        # Set labels with proper units
         self.plot_widget.setLabel('left', 'PSD', units='', color='#e0e0e0', size='12pt')
         self.plot_widget.setLabel('bottom', 'Frequency (Hz)', color='#e0e0e0', size='12pt')
-        
-        # Enable grid
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        
-        # Set title
         self.plot_widget.setTitle("Power Spectral Density", color='#60a5fa', size='14pt')
-        
-        # Enable mouse interaction
         self.plot_widget.setMouseEnabled(x=True, y=True)
-        
-        # Set log-log scale by default
         self.plot_widget.setLogMode(x=True, y=True)
-        
-        # Set default x-axis range (10-3000 Hz)
         self.plot_widget.setXRange(np.log10(10), np.log10(3000))
         
-        # Add legend
+        # Add legend for PSD
         self.legend = self.plot_widget.addLegend(offset=(10, 10))
         
         # Configure axis appearance for full box border
@@ -429,7 +461,7 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Format Y-axis to use scientific notation
         left_axis = self.plot_widget.getPlotItem().getAxis('left')
-        left_axis.enableAutoSIPrefix(False)  # Disable auto SI prefix
+        left_axis.enableAutoSIPrefix(False)
         
         # Add crosshair for cursor position display
         self.vLine = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('#60a5fa', width=1, style=Qt.PenStyle.DashLine))
@@ -449,9 +481,14 @@ class PSDAnalysisWindow(QMainWindow):
         self.hLine.setVisible(False)
         self.coord_label.setVisible(False)
         
-        layout.addWidget(self.plot_widget)
+        layout.addWidget(self.plot_widget, stretch=2)
         
         return panel
+    
+    def _toggle_crosshair(self):
+        """Toggle crosshair visibility."""
+        # Crosshair will only show when checkbox is checked AND mouse is over plot
+        pass  # Actual visibility is handled in _on_mouse_moved
     
     def _on_mouse_moved(self, pos):
         """
@@ -460,6 +497,13 @@ class PSDAnalysisWindow(QMainWindow):
         Args:
             pos: Mouse position in scene coordinates
         """
+        # Only show if checkbox is checked
+        if not self.show_crosshair_checkbox.isChecked():
+            self.vLine.setVisible(False)
+            self.hLine.setVisible(False)
+            self.coord_label.setVisible(False)
+            return
+        
         # Check if mouse is within plot area
         if self.plot_widget.sceneBoundingRect().contains(pos):
             mouse_point = self.plot_widget.plotItem.vb.mapSceneToView(pos)
@@ -561,13 +605,17 @@ class PSDAnalysisWindow(QMainWindow):
             # Create channel selection checkboxes
             self._create_channel_checkboxes()
             
-            # Enable calculate button
+            # Enable calculate buttons
             self.calc_button.setEnabled(True)
+            self.spec_button.setEnabled(True)
             
             # Clear previous results
             self.frequencies = None
             self.psd_results = {}
             self.rms_values = {}
+            
+            # Plot time history
+            self._plot_time_history()
             
         except (DataLoadError, FileNotFoundError) as e:
             QMessageBox.critical(self, "Error Loading File", str(e))
@@ -585,15 +633,62 @@ class PSDAnalysisWindow(QMainWindow):
         for i, channel_name in enumerate(self.channel_names):
             checkbox = QCheckBox(channel_name)
             checkbox.setChecked(True)  # All channels selected by default
-            checkbox.stateChanged.connect(self._update_plot)
+            checkbox.stateChanged.connect(self._on_channel_selection_changed)
             self.channel_layout.addWidget(checkbox)
             self.channel_checkboxes.append(checkbox)
         
         # Show the channel group
         self.channel_group.setVisible(True)
     
+    def _on_channel_selection_changed(self):
+        """Handle channel selection changes."""
+        # Update both time history and PSD plots
+        self._plot_time_history()
+        self._update_plot()
+    
+    def _plot_time_history(self):
+        """Plot time history of selected channels."""
+        if self.signal_data is None:
+            return
+        
+        # Clear previous plot
+        self.time_plot_widget.clear()
+        self.time_legend.clear()
+        
+        # Re-add legend
+        self.time_legend = self.time_plot_widget.addLegend(offset=(10, 10))
+        
+        # Define colors for different channels
+        colors = ['#60a5fa', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
+        
+        # Plot each selected channel
+        plot_count = 0
+        for i, checkbox in enumerate(self.channel_checkboxes):
+            if checkbox.isChecked():
+                channel_name = self.channel_names[i]
+                signal = self.signal_data[i, :]
+                
+                # Plot the time history
+                color = colors[plot_count % len(colors)]
+                pen = pg.mkPen(color=color, width=1.5)
+                self.time_plot_widget.plot(
+                    self.time_data,
+                    signal,
+                    pen=pen,
+                    name=channel_name
+                )
+                
+                plot_count += 1
+        
+        # Update Y-axis label with units
+        if self.channel_units and self.channel_units[0]:
+            unit = self.channel_units[0]
+            self.time_plot_widget.setLabel('left', f'Amplitude ({unit})', color='#e0e0e0', size='11pt')
+        else:
+            self.time_plot_widget.setLabel('left', 'Amplitude', color='#e0e0e0', size='11pt')
+    
     def _calculate_psd(self):
-        """Calculate PSD with current parameters for all selected channels."""
+        """Calculate PSD with current parameters for all channels."""
         if self.signal_data is None:
             return
         
@@ -609,7 +704,7 @@ class PSDAnalysisWindow(QMainWindow):
             overlap_percent = self.overlap_spin.value()
             noverlap = int(nperseg * overlap_percent / 100)
             
-            # Get frequency range
+            # Get frequency range for RMS calculation
             freq_min = self.freq_min_spin.value()
             freq_max = self.freq_max_spin.value()
             
@@ -640,9 +735,12 @@ class PSDAnalysisWindow(QMainWindow):
                 self.psd_results[channel_name] = psd
                 
                 # Calculate RMS over specified frequency range
-                # Filter frequencies for RMS calculation
+                # Create mask for RMS calculation
                 rms_mask = (frequencies >= freq_min) & (frequencies <= freq_max)
-                rms = calculate_rms_from_psd(frequencies[rms_mask], psd[rms_mask])
+                if np.any(rms_mask):
+                    rms = calculate_rms_from_psd(frequencies[rms_mask], psd[rms_mask])
+                else:
+                    rms = 0.0
                 
                 self.rms_values[channel_name] = rms
             
@@ -650,7 +748,7 @@ class PSDAnalysisWindow(QMainWindow):
             self._update_plot()
             
         except Exception as e:
-            QMessageBox.critical(self, "Calculation Error", f"Failed to calculate PSD: {e}")
+            QMessageBox.critical(self, "Calculation Error", f"Failed to calculate PSD: {e}\n\nPlease try adjusting the frequency resolution or frequency range.")
     
     def _update_plot(self):
         """Update the PSD plot with selected channels."""
@@ -674,6 +772,12 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Filter frequencies for plotting
         freq_mask = (self.frequencies >= freq_min) & (self.frequencies <= freq_max)
+        
+        # Check if mask has any True values
+        if not np.any(freq_mask):
+            QMessageBox.warning(self, "No Data", "No frequency data in the specified range. Please adjust the frequency range.")
+            return
+        
         frequencies_plot = self.frequencies[freq_mask]
         
         # Define colors for different channels
@@ -684,6 +788,11 @@ class PSDAnalysisWindow(QMainWindow):
         for i, checkbox in enumerate(self.channel_checkboxes):
             if checkbox.isChecked():
                 channel_name = self.channel_names[i]
+                
+                # Check if PSD exists for this channel
+                if channel_name not in self.psd_results:
+                    continue
+                
                 psd = self.psd_results[channel_name][freq_mask]
                 rms = self.rms_values[channel_name]
                 unit = self.channel_units[i] if i < len(self.channel_units) else ''
@@ -715,3 +824,40 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Set X-axis range to user-specified range
         self.plot_widget.setXRange(np.log10(freq_min), np.log10(freq_max))
+    
+    def _open_spectrogram(self):
+        """Open spectrogram window for selected channel."""
+        if self.signal_data is None:
+            return
+        
+        # Find first selected channel
+        selected_channel_idx = None
+        for i, checkbox in enumerate(self.channel_checkboxes):
+            if checkbox.isChecked():
+                selected_channel_idx = i
+                break
+        
+        if selected_channel_idx is None:
+            QMessageBox.warning(self, "No Channel Selected", "Please select at least one channel to generate spectrogram.")
+            return
+        
+        channel_name = self.channel_names[selected_channel_idx]
+        signal = self.signal_data[selected_channel_idx, :]
+        unit = self.channel_units[selected_channel_idx] if selected_channel_idx < len(self.channel_units) else ''
+        
+        # Create or show spectrogram window
+        if channel_name in self.spectrogram_windows:
+            window = self.spectrogram_windows[channel_name]
+            window.show()
+            window.raise_()
+            window.activateWindow()
+        else:
+            window = SpectrogramWindow(
+                self.time_data,
+                signal,
+                channel_name,
+                self.sample_rate,
+                unit
+            )
+            window.show()
+            self.spectrogram_windows[channel_name] = window

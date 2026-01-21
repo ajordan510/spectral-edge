@@ -97,6 +97,11 @@ def calculate_psd_welch(
     if noverlap is None:
         noverlap = nperseg // 2
     
+    # Note: scipy.signal.welch with scaling='density' automatically applies
+    # the proper window energy correction factor. This ensures that the
+    # total power (integral of PSD) equals the variance of the signal,
+    # regardless of which window function is used.
+    
     # Handle multi-channel data (2D array)
     # If input is 1D, we'll process it directly
     # If input is 2D, we'll process each channel (row) separately

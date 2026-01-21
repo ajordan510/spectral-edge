@@ -40,7 +40,7 @@ class LogAxisItem(pg.AxisItem):
     
     def tickStrings(self, values, scale, spacing):
         """
-        Override tick string generation to show only Hz values.
+        Override tick string generation to show only Hz values at powers of 10.
         
         Args:
             values: The tick values to display
@@ -55,11 +55,46 @@ class LogAxisItem(pg.AxisItem):
             # Convert from log scale to linear
             actual_value = 10 ** v
             
-            # Format as integer if it's close to a whole number
-            if abs(actual_value - round(actual_value)) < 0.01:
+            # Only show values that are close to powers of 10
+            log_value = np.log10(actual_value)
+            if abs(log_value - round(log_value)) < 0.1:
+                # This is close to a power of 10
                 strings.append(f"{int(round(actual_value))}")
             else:
-                strings.append(f"{actual_value:.1f}")
+                # Don't show this tick
+                strings.append("")
+        
+        return strings
+
+
+class ScientificAxisItem(pg.AxisItem):
+    """
+    Custom axis item that always displays values in scientific notation.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.enableAutoSIPrefix(False)
+    
+    def tickStrings(self, values, scale, spacing):
+        """
+        Override tick string generation to always use scientific notation.
+        
+        Args:
+            values: The tick values to display
+            scale: The scale factor
+            spacing: The spacing between ticks
+        
+        Returns:
+            List of strings for tick labels in scientific notation
+        """
+        strings = []
+        for v in values:
+            # Convert from log scale to linear
+            actual_value = 10 ** v
+            
+            # Format in scientific notation
+            strings.append(f"{actual_value:.2e}")
         
         return strings
 
@@ -431,13 +466,18 @@ class PSDAnalysisWindow(QMainWindow):
         self.time_plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.time_plot_widget.setMouseEnabled(x=True, y=True)
         
-        # Add legend for time plot
+        # Add legend for time plot with styled background
         self.time_legend = self.time_plot_widget.addLegend(offset=(10, 10))
+        self.time_legend.setBrush(pg.mkBrush(26, 31, 46, 200))  # Semi-transparent GUI background
+        self.time_legend.setPen(pg.mkPen(74, 85, 104, 255))  # Subtle border
         
         layout.addWidget(self.time_plot_widget, stretch=1)
         
-        # PSD plot
-        self.plot_widget = pg.PlotWidget(axisItems={'bottom': LogAxisItem(orientation='bottom')})
+        # PSD plot with custom axes
+        self.plot_widget = pg.PlotWidget(axisItems={
+            'bottom': LogAxisItem(orientation='bottom'),
+            'left': ScientificAxisItem(orientation='left')
+        })
         self.plot_widget.setBackground('#1a1f2e')
         self.plot_widget.setLabel('left', 'PSD', units='', color='#e0e0e0', size='12pt')
         self.plot_widget.setLabel('bottom', 'Frequency (Hz)', color='#e0e0e0', size='12pt')
@@ -447,8 +487,10 @@ class PSDAnalysisWindow(QMainWindow):
         self.plot_widget.setLogMode(x=True, y=True)
         self.plot_widget.setXRange(np.log10(10), np.log10(3000))
         
-        # Add legend for PSD
+        # Add legend for PSD with styled background
         self.legend = self.plot_widget.addLegend(offset=(10, 10))
+        self.legend.setBrush(pg.mkBrush(26, 31, 46, 200))  # Semi-transparent GUI background
+        self.legend.setPen(pg.mkPen(74, 85, 104, 255))  # Subtle border
         
         # Configure axis appearance for full box border
         axis_pen = pg.mkPen(color='#4a5568', width=2)
@@ -458,10 +500,6 @@ class PSDAnalysisWindow(QMainWindow):
         self.plot_widget.getPlotItem().getAxis('right').setStyle(showValues=False)
         self.plot_widget.getPlotItem().showAxis('top')
         self.plot_widget.getPlotItem().showAxis('right')
-        
-        # Format Y-axis to use scientific notation
-        left_axis = self.plot_widget.getPlotItem().getAxis('left')
-        left_axis.enableAutoSIPrefix(False)
         
         # Add crosshair for cursor position display
         self.vLine = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('#60a5fa', width=1, style=Qt.PenStyle.DashLine))
@@ -655,8 +693,10 @@ class PSDAnalysisWindow(QMainWindow):
         self.time_plot_widget.clear()
         self.time_legend.clear()
         
-        # Re-add legend
+        # Re-add legend with styling
         self.time_legend = self.time_plot_widget.addLegend(offset=(10, 10))
+        self.time_legend.setBrush(pg.mkBrush(26, 31, 46, 200))
+        self.time_legend.setPen(pg.mkPen(74, 85, 104, 255))
         
         # Define colors for different channels
         colors = ['#60a5fa', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
@@ -763,8 +803,10 @@ class PSDAnalysisWindow(QMainWindow):
         self.plot_widget.addItem(self.hLine, ignoreBounds=True)
         self.plot_widget.addItem(self.coord_label)
         
-        # Re-add legend after clearing
+        # Re-add legend after clearing with styling
         self.legend = self.plot_widget.addLegend(offset=(10, 10))
+        self.legend.setBrush(pg.mkBrush(26, 31, 46, 200))
+        self.legend.setPen(pg.mkPen(74, 85, 104, 255))
         
         # Get frequency range for plotting
         freq_min = self.freq_min_spin.value()
@@ -845,19 +887,33 @@ class PSDAnalysisWindow(QMainWindow):
         signal = self.signal_data[selected_channel_idx, :]
         unit = self.channel_units[selected_channel_idx] if selected_channel_idx < len(self.channel_units) else ''
         
+        # Get current PSD parameters to pass to spectrogram
+        window = self.window_combo.currentText().lower()
+        df = self.df_spin.value()
+        overlap_percent = self.overlap_spin.value()
+        efficient_fft = self.efficient_fft_checkbox.isChecked()
+        freq_min = self.freq_min_spin.value()
+        freq_max = self.freq_max_spin.value()
+        
         # Create or show spectrogram window
         if channel_name in self.spectrogram_windows:
-            window = self.spectrogram_windows[channel_name]
-            window.show()
-            window.raise_()
-            window.activateWindow()
+            window_obj = self.spectrogram_windows[channel_name]
+            window_obj.show()
+            window_obj.raise_()
+            window_obj.activateWindow()
         else:
-            window = SpectrogramWindow(
+            window_obj = SpectrogramWindow(
                 self.time_data,
                 signal,
                 channel_name,
                 self.sample_rate,
-                unit
+                unit,
+                window_type=window,
+                df=df,
+                overlap_percent=overlap_percent,
+                efficient_fft=efficient_fft,
+                freq_min=freq_min,
+                freq_max=freq_max
             )
-            window.show()
-            self.spectrogram_windows[channel_name] = window
+            window_obj.show()
+            self.spectrogram_windows[channel_name] = window_obj

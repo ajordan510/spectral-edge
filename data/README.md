@@ -2,6 +2,22 @@
 
 This directory contains sample data files for testing SpectralEdge tools.
 
+## Generating Sample Data
+
+To generate the sample vibration data file, run the following command from the project root directory:
+
+**Windows:**
+```cmd
+python scripts\generate_sample_data.py
+```
+
+**Linux/macOS:**
+```bash
+python3 scripts/generate_sample_data.py
+```
+
+This will create `sample_vibration_data.csv` in this directory.
+
 ## sample_vibration_data.csv
 
 A synthetic vibration signal with the following characteristics:

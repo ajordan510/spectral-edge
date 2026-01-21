@@ -251,3 +251,239 @@ def get_window_options() -> dict:
         'bartlett': 'Bartlett (Triangular) - Simple, moderate performance',
         'boxcar': 'Boxcar (Rectangular) - No windowing, best frequency resolution but poor sidelobe suppression'
     }
+
+
+def calculate_psd_maximax(
+    time_data: np.ndarray,
+    sample_rate: float,
+    maximax_window: float = 1.0,
+    overlap_percent: float = 50.0,
+    window: str = 'hann',
+    df: Optional[float] = None,
+    nperseg: Optional[int] = None,
+    use_efficient_fft: bool = True
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Calculate Maximax PSD using sliding window approach.
+    
+    This function implements the Maximum Predicted Environment (MPE) style PSD
+    calculation commonly used in aerospace applications. Instead of averaging
+    PSDs across time segments (as in traditional Welch's method), this function
+    calculates PSDs over short time windows and takes the maximum value at each
+    frequency bin across all windows.
+    
+    This produces a conservative envelope PSD that represents the worst-case
+    spectral content at each frequency throughout the signal duration.
+    
+    Algorithm:
+    1. Divide the signal into overlapping windows of specified duration
+    2. Calculate PSD for each window using Welch's method
+    3. At each frequency bin, take the maximum value across all window PSDs
+    4. Return the envelope PSD
+    
+    Parameters:
+    -----------
+    time_data : np.ndarray
+        Input time-series data (1D array)
+    sample_rate : float
+        Sampling rate in Hz
+    maximax_window : float
+        Duration of each maximax window in seconds (default 1.0)
+        Typical values: 0.5 to 2.0 seconds
+    overlap_percent : float
+        Overlap percentage between maximax windows (default 50.0)
+        Range: 0 to 90
+    window : str
+        Window function type for PSD calculation
+        Options: 'hann', 'hamming', 'blackman', 'bartlett', 'boxcar'
+    df : float, optional
+        Desired frequency resolution in Hz
+        If provided, nperseg is calculated from df
+    nperseg : int, optional
+        Segment length for Welch's method within each maximax window
+        If None and df is None, uses 256 samples
+    use_efficient_fft : bool
+        If True, rounds nperseg to nearest power of 2 for faster FFT
+    
+    Returns:
+    --------
+    frequencies : np.ndarray
+        Array of frequency values in Hz
+    psd_maximax : np.ndarray
+        Maximax PSD values (envelope of all window PSDs)
+    
+    Raises:
+    -------
+    ValueError
+        If input data is empty, sample_rate is not positive, or
+        maximax_window is too large for the signal duration
+    
+    Example:
+    --------
+    >>> # Generate 30 seconds of test data
+    >>> sample_rate = 1000.0
+    >>> duration = 30.0
+    >>> t = np.linspace(0, duration, int(sample_rate * duration))
+    >>> signal = np.sin(2 * np.pi * 10 * t) + np.random.normal(0, 0.1, len(t))
+    >>> 
+    >>> # Calculate maximax PSD with 1-second windows
+    >>> frequencies, psd_max = calculate_psd_maximax(
+    ...     signal, sample_rate, maximax_window=1.0, overlap_percent=50.0
+    ... )
+    >>> 
+    >>> # psd_max represents the envelope of PSDs from all 1-second windows
+    
+    Notes:
+    ------
+    - Maximax PSD is more conservative than averaged PSD
+    - Useful for defining test specifications (MPE)
+    - Requires longer signal duration for statistical significance
+    - Computational cost scales with number of windows
+    """
+    # Input validation
+    if time_data.size == 0:
+        raise ValueError("Input time_data cannot be empty")
+    
+    if sample_rate <= 0:
+        raise ValueError("sample_rate must be positive")
+    
+    # Calculate signal duration
+    signal_duration = len(time_data) / sample_rate
+    
+    if maximax_window > signal_duration:
+        raise ValueError(f"Maximax window ({maximax_window}s) is larger than signal duration ({signal_duration:.2f}s)")
+    
+    if maximax_window <= 0:
+        raise ValueError("Maximax window must be positive")
+    
+    if not (0 <= overlap_percent < 100):
+        raise ValueError("Overlap percent must be between 0 and 100")
+    
+    # Calculate window parameters
+    window_samples = int(maximax_window * sample_rate)
+    overlap_samples = int(window_samples * overlap_percent / 100)
+    step_samples = window_samples - overlap_samples
+    
+    # Calculate nperseg for Welch's method within each window
+    if df is not None:
+        # Calculate nperseg from desired frequency resolution
+        nperseg_calc = int(sample_rate / df)
+        
+        if use_efficient_fft:
+            # Round to nearest power of 2
+            nperseg_calc = 2 ** int(np.ceil(np.log2(nperseg_calc)))
+        
+        nperseg = nperseg_calc
+    elif nperseg is None:
+        # Default to 256 samples
+        nperseg = min(256, window_samples)
+    
+    # Ensure nperseg doesn't exceed window size
+    nperseg = min(nperseg, window_samples)
+    
+    # Calculate noverlap for Welch's method (50% of nperseg)
+    noverlap = nperseg // 2
+    
+    # Initialize variables for maximax calculation
+    frequencies = None
+    psd_maximax = None
+    num_windows = 0
+    
+    # Slide window across signal
+    start_idx = 0
+    
+    while start_idx + window_samples <= len(time_data):
+        # Extract window
+        window_data = time_data[start_idx:start_idx + window_samples]
+        
+        # Calculate PSD for this window using Welch's method
+        freqs, psd_window = calculate_psd_welch(
+            window_data,
+            sample_rate,
+            window=window,
+            nperseg=nperseg,
+            noverlap=noverlap
+        )
+        
+        # Initialize on first window
+        if frequencies is None:
+            frequencies = freqs
+            psd_maximax = psd_window
+        else:
+            # Take maximum at each frequency bin
+            psd_maximax = np.maximum(psd_maximax, psd_window)
+        
+        num_windows += 1
+        
+        # Move to next window
+        start_idx += step_samples
+    
+    if num_windows == 0:
+        raise ValueError("No windows could be extracted from signal. Check maximax_window parameter.")
+    
+    return frequencies, psd_maximax
+
+
+def calculate_rms_from_psd(frequencies: np.ndarray, psd: np.ndarray) -> float:
+    """
+    Calculate RMS (Root Mean Square) value from PSD using Parseval's theorem.
+    
+    The RMS value represents the overall amplitude of the signal and is calculated
+    by integrating the PSD over frequency and taking the square root.
+    
+    Mathematically:
+        RMS = sqrt(integral of PSD over frequency)
+    
+    For discrete data, the integral is approximated using the trapezoidal rule.
+    
+    Parameters:
+    -----------
+    frequencies : np.ndarray
+        Array of frequency values in Hz (must be equally spaced or monotonically increasing)
+    psd : np.ndarray
+        Power spectral density values corresponding to the frequencies
+    
+    Returns:
+    --------
+    float
+        RMS value in the same units as the original signal
+    
+    Example:
+    --------
+    >>> # Generate a sine wave with known RMS
+    >>> sample_rate = 1000.0
+    >>> t = np.linspace(0, 10, int(sample_rate * 10))
+    >>> amplitude = 2.0
+    >>> signal = amplitude * np.sin(2 * np.pi * 10 * t)
+    >>> 
+    >>> # Calculate PSD and RMS
+    >>> frequencies, psd = calculate_psd_welch(signal, sample_rate)
+    >>> rms = calculate_rms_from_psd(frequencies, psd)
+    >>> 
+    >>> # For a sine wave, RMS = amplitude / sqrt(2) ≈ 1.414
+    >>> print(f"RMS: {rms:.3f}")  # Should be close to 1.414
+    
+    Notes:
+    ------
+    - This function uses trapezoidal integration (np.trapezoid or np.trapz)
+    - The PSD must be in 'density' scaling (units^2/Hz)
+    - For accurate results, ensure adequate frequency resolution
+    """
+    # Input validation
+    if len(frequencies) != len(psd):
+        raise ValueError("frequencies and psd must have the same length")
+    
+    if len(frequencies) < 2:
+        raise ValueError("Need at least 2 frequency points to calculate RMS")
+    
+    # Integrate PSD using trapezoidal rule
+    # Use np.trapezoid for NumPy 2.0+, fall back to np.trapz for older versions
+    try:
+        power = np.trapezoid(psd, frequencies)
+    except AttributeError:
+        power = np.trapz(psd, frequencies)
+    
+    # RMS is square root of integrated power
+    rms = np.sqrt(power)
+    
+    return rms

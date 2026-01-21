@@ -21,11 +21,13 @@ from pathlib import Path
 
 # Import our custom modules
 from spectral_edge.utils.data_loader import load_csv_data, DataLoadError
+from spectral_edge.utils.hdf5_loader import HDF5FlightDataLoader
 from spectral_edge.core.psd import (
-    calculate_psd_welch, psd_to_db, calculate_rms_from_psd, get_window_options
+    calculate_psd_welch, calculate_psd_maximax, psd_to_db, calculate_rms_from_psd, get_window_options
 )
 from spectral_edge.gui.spectrogram_window import SpectrogramWindow
 from spectral_edge.gui.event_manager import EventManagerWindow, Event
+from spectral_edge.gui.flight_navigator import FlightNavigator
 
 
 class ScientificAxisItem(pg.AxisItem):
@@ -108,6 +110,10 @@ class PSDAnalysisWindow(QMainWindow):
         self.interactive_selection_mode = False
         self.selection_start = None
         self.temp_selection_line = None
+        
+        # HDF5 data management
+        self.hdf5_loader = None
+        self.flight_navigator = None
         
         # Apply styling
         self._apply_styling()
@@ -304,10 +310,15 @@ class PSDAnalysisWindow(QMainWindow):
         self.file_label.setStyleSheet("color: #9ca3af; font-style: italic;")
         layout.addWidget(self.file_label)
         
-        # Load file button
-        load_button = QPushButton("Load CSV File")
-        load_button.clicked.connect(self._load_file)
-        layout.addWidget(load_button)
+        # Load CSV button
+        load_csv_button = QPushButton("Load CSV File")
+        load_csv_button.clicked.connect(self._load_file)
+        layout.addWidget(load_csv_button)
+        
+        # Load HDF5 button
+        load_hdf5_button = QPushButton("Load HDF5 File")
+        load_hdf5_button.clicked.connect(self._load_hdf5_file)
+        layout.addWidget(load_hdf5_button)
         
         # File info labels
         self.info_label = QLabel("")
@@ -411,13 +422,45 @@ class PSDAnalysisWindow(QMainWindow):
         row += 1
         
         # Overlap percentage
-        layout.addWidget(QLabel("Overlap (%):"), row, 0)
+        layout.addWidget(QLabel("Overlap (%):" ), row, 0)
         self.overlap_spin = QSpinBox()
         self.overlap_spin.setRange(0, 90)
         self.overlap_spin.setValue(50)
         self.overlap_spin.setSingleStep(10)
         self.overlap_spin.valueChanged.connect(self._on_parameter_changed)
         layout.addWidget(self.overlap_spin, row, 1)
+        row += 1
+        
+        # Maximax PSD checkbox
+        self.maximax_checkbox = QCheckBox("Use Maximax PSD")
+        self.maximax_checkbox.setChecked(True)  # Default to maximax
+        self.maximax_checkbox.setToolTip("Calculate envelope PSD using sliding window maximax method (MPE-style)")
+        self.maximax_checkbox.stateChanged.connect(self._on_maximax_toggled)
+        self.maximax_checkbox.stateChanged.connect(self._on_parameter_changed)
+        layout.addWidget(self.maximax_checkbox, row, 0, 1, 2)
+        row += 1
+        
+        # Maximax window duration
+        layout.addWidget(QLabel("Maximax Window (s):" ), row, 0)
+        self.maximax_window_spin = QDoubleSpinBox()
+        self.maximax_window_spin.setRange(0.1, 10.0)
+        self.maximax_window_spin.setValue(1.0)
+        self.maximax_window_spin.setDecimals(1)
+        self.maximax_window_spin.setSingleStep(0.5)
+        self.maximax_window_spin.setToolTip("Duration of each maximax window in seconds")
+        self.maximax_window_spin.valueChanged.connect(self._on_parameter_changed)
+        layout.addWidget(self.maximax_window_spin, row, 1)
+        row += 1
+        
+        # Maximax overlap percentage
+        layout.addWidget(QLabel("Maximax Overlap (%):" ), row, 0)
+        self.maximax_overlap_spin = QSpinBox()
+        self.maximax_overlap_spin.setRange(0, 90)
+        self.maximax_overlap_spin.setValue(50)
+        self.maximax_overlap_spin.setSingleStep(10)
+        self.maximax_overlap_spin.setToolTip("Overlap percentage between maximax windows")
+        self.maximax_overlap_spin.valueChanged.connect(self._on_parameter_changed)
+        layout.addWidget(self.maximax_overlap_spin, row, 1)
         row += 1
         
         group.setLayout(layout)
@@ -843,14 +886,30 @@ class PSDAnalysisWindow(QMainWindow):
                 channel_name = self.channel_names[channel_idx]
                 signal = self.signal_data[channel_idx, :]
                 
-                # Calculate PSD
-                frequencies, psd = calculate_psd_welch(
-                    signal,
-                    self.sample_rate,
-                    window=window,
-                    nperseg=nperseg,
-                    noverlap=noverlap
-                )
+                # Calculate PSD (maximax or traditional)
+                if self.maximax_checkbox.isChecked():
+                    # Use maximax PSD calculation
+                    maximax_window = self.maximax_window_spin.value()
+                    maximax_overlap = self.maximax_overlap_spin.value()
+                    
+                    frequencies, psd = calculate_psd_maximax(
+                        signal,
+                        self.sample_rate,
+                        maximax_window=maximax_window,
+                        overlap_percent=maximax_overlap,
+                        window=window,
+                        df=df,
+                        use_efficient_fft=self.efficient_fft_checkbox.isChecked()
+                    )
+                else:
+                    # Use traditional averaged PSD
+                    frequencies, psd = calculate_psd_welch(
+                        signal,
+                        self.sample_rate,
+                        window=window,
+                        nperseg=nperseg,
+                        noverlap=noverlap
+                    )
                 
                 # Store full frequency range (same for all channels)
                 if self.frequencies is None:
@@ -1401,3 +1460,135 @@ class PSDAnalysisWindow(QMainWindow):
             self._apply_axis_limits()
         else:
             QMessageBox.warning(self, "No Valid Data", "No positive PSD values found for auto-fit.")
+    
+    def _load_hdf5_file(self):
+        """Load HDF5 file and open flight navigator."""
+        try:
+            # Open file dialog
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Load HDF5 File",
+                str(Path.home()),
+                "HDF5 Files (*.hdf5 *.h5);;All Files (*)"
+            )
+            
+            if not file_path:
+                return
+            
+            # Close existing loader if any
+            if self.hdf5_loader is not None:
+                self.hdf5_loader.close()
+            
+            # Create new loader
+            self.hdf5_loader = HDF5FlightDataLoader(file_path)
+            
+            # Open flight navigator
+            self.flight_navigator = FlightNavigator(self.hdf5_loader, self)
+            self.flight_navigator.data_selected.connect(self._on_hdf5_data_selected)
+            self.flight_navigator.show()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Load Error", f"Failed to load HDF5 file: {e}")
+    
+    def _on_hdf5_data_selected(self, selected_items):
+        """
+        Handle data selection from flight navigator.
+        
+        Parameters:
+        -----------
+        selected_items : list of tuples
+            List of (flight_key, channel_key, channel_info) tuples
+        """
+        try:
+            if not selected_items:
+                return
+            
+            # For now, load only the first selected channel
+            # Future enhancement: support multiple channels from different flights
+            flight_key, channel_key, channel_info = selected_items[0]
+            
+            # Load data with decimation for display
+            time, signal = self.hdf5_loader.load_channel_data(
+                flight_key,
+                channel_key,
+                decimate_factor=None  # Auto-decimate to ~10k points
+            )
+            
+            # Store data
+            self.signal_data = signal.reshape(1, -1)  # Make 2D (1 channel)
+            self.time_vector = time
+            self.sample_rate = channel_info.sample_rate
+            self.channel_names = [channel_key]
+            self.channel_units = [channel_info.units]
+            self.current_file = f"{flight_key}/{channel_key}"
+            
+            # Update UI
+            self.file_label.setText(f"Loaded: {self.current_file}")
+            self.info_label.setText(
+                f"Sample Rate: {self.sample_rate:.0f} Hz | "
+                f"Duration: {time[-1]:.2f} s | "
+                f"Channels: 1"
+            )
+            
+            # Show channel selection group
+            self.channel_group.setVisible(True)
+            
+            # Clear previous channel checkboxes
+            for checkbox in self.channel_checkboxes:
+                checkbox.deleteLater()
+            self.channel_checkboxes.clear()
+            
+            # Create checkbox for this channel
+            checkbox = QCheckBox(channel_info.get_display_name())
+            checkbox.setChecked(True)
+            checkbox.stateChanged.connect(self._update_time_history_plot)
+            self.channel_layout.addWidget(checkbox)
+            self.channel_checkboxes.append(checkbox)
+            
+            # Enable buttons
+            self.calc_button.setEnabled(True)
+            self.spec_button.setEnabled(True)
+            self.event_button.setEnabled(True)
+            
+            # Clear previous results
+            self.frequencies = None
+            self.psd_results = {}
+            self.rms_values = {}
+            self._clear_psd_plot()
+            
+            # Update time history plot
+            self._update_time_history_plot()
+            
+            # Update nperseg display
+            self._update_nperseg_from_df()
+            
+            QMessageBox.information(
+                self,
+                "Data Loaded",
+                f"Successfully loaded channel: {channel_key}\n"
+                f"Flight: {flight_key}\n"
+                f"Sample Rate: {self.sample_rate:.0f} Hz\n"
+                f"Duration: {time[-1]:.2f} seconds\n\n"
+                f"Note: Data was decimated for display. Full resolution will be used for PSD calculation."
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Load Error", f"Failed to load HDF5 data: {e}")
+    
+    def _on_maximax_toggled(self):
+        """Handle maximax checkbox toggle."""
+        is_maximax = self.maximax_checkbox.isChecked()
+        
+        # Enable/disable maximax-specific controls
+        self.maximax_window_spin.setEnabled(is_maximax)
+        self.maximax_overlap_spin.setEnabled(is_maximax)
+        
+        # Update tooltip on calculate button
+        if is_maximax:
+            self.calc_button.setToolTip(
+                "Calculate Maximax PSD (envelope of sliding window PSDs)"
+            )
+        else:
+            self.calc_button.setToolTip(
+                "Calculate averaged PSD using Welch's method"
+            )

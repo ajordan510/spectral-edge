@@ -23,7 +23,8 @@ from pathlib import Path
 from spectral_edge.utils.data_loader import load_csv_data, DataLoadError
 from spectral_edge.utils.hdf5_loader import HDF5FlightDataLoader
 from spectral_edge.core.psd import (
-    calculate_psd_welch, calculate_psd_maximax, psd_to_db, calculate_rms_from_psd, get_window_options
+    calculate_psd_welch, calculate_psd_maximax, psd_to_db, calculate_rms_from_psd, 
+    get_window_options, convert_psd_to_octave_bands
 )
 from spectral_edge.gui.spectrogram_window import SpectrogramWindow
 from spectral_edge.gui.event_manager import EventManagerWindow, Event
@@ -512,6 +513,29 @@ class PSDAnalysisWindow(QMainWindow):
         self.show_crosshair_checkbox.setChecked(False)
         self.show_crosshair_checkbox.stateChanged.connect(self._toggle_crosshair)
         layout.addWidget(self.show_crosshair_checkbox)
+        
+        # Octave band display
+        octave_layout = QHBoxLayout()
+        self.octave_checkbox = QCheckBox("Octave Band Display")
+        self.octave_checkbox.setChecked(False)
+        self.octave_checkbox.setToolTip("Convert narrowband PSD to octave bands for visualization")
+        self.octave_checkbox.stateChanged.connect(self._on_octave_display_changed)
+        octave_layout.addWidget(self.octave_checkbox)
+        
+        # Octave fraction selector
+        self.octave_combo = QComboBox()
+        self.octave_combo.addItem("1/3 Octave", 3.0)
+        self.octave_combo.addItem("1/6 Octave", 6.0)
+        self.octave_combo.addItem("1/12 Octave", 12.0)
+        self.octave_combo.addItem("1/24 Octave", 24.0)
+        self.octave_combo.addItem("1/36 Octave", 36.0)
+        self.octave_combo.setCurrentIndex(0)  # Default to 1/3 octave
+        self.octave_combo.setEnabled(False)
+        self.octave_combo.currentIndexChanged.connect(self._on_octave_fraction_changed)
+        self.octave_combo.setToolTip("Select octave band spacing")
+        octave_layout.addWidget(self.octave_combo)
+        
+        layout.addLayout(octave_layout)
         
         group.setLayout(layout)
         return group
@@ -1031,6 +1055,10 @@ class PSDAnalysisWindow(QMainWindow):
         # Define colors for different channels
         colors = ['#60a5fa', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
         
+        # Check if octave band display is enabled
+        use_octave = self.octave_checkbox.isChecked()
+        octave_fraction = self.octave_combo.currentData() if use_octave else None
+        
         # Plot each selected channel
         plot_count = 0
         for i, checkbox in enumerate(self.channel_checkboxes):
@@ -1045,21 +1073,72 @@ class PSDAnalysisWindow(QMainWindow):
                 rms = self.rms_values[channel_name]
                 unit = self.channel_units[i] if i < len(self.channel_units) else ''
                 
-                # Create legend label with RMS
-                if unit:
-                    legend_label = f"{channel_name}: RMS={rms:.4f} {unit}"
+                # Convert to octave bands if requested
+                if use_octave and octave_fraction is not None:
+                    try:
+                        frequencies_plot_oct, psd_oct = convert_psd_to_octave_bands(
+                            frequencies_plot,
+                            psd,
+                            octave_fraction=octave_fraction,
+                            freq_min=freq_min,
+                            freq_max=freq_max
+                        )
+                        frequencies_to_plot = frequencies_plot_oct
+                        psd_to_plot = psd_oct
+                        # Add octave info to legend
+                        octave_name = self.octave_combo.currentText()
+                        if unit:
+                            legend_label = f"{channel_name} ({octave_name}): RMS={rms:.4f} {unit}"
+                        else:
+                            legend_label = f"{channel_name} ({octave_name}): RMS={rms:.4f}"
+                    except Exception as e:
+                        QMessageBox.warning(self, "Octave Conversion Error", 
+                                          f"Failed to convert to octave bands: {str(e)}\nShowing narrowband data.")
+                        frequencies_to_plot = frequencies_plot
+                        psd_to_plot = psd
+                        if unit:
+                            legend_label = f"{channel_name}: RMS={rms:.4f} {unit}"
+                        else:
+                            legend_label = f"{channel_name}: RMS={rms:.4f}"
                 else:
-                    legend_label = f"{channel_name}: RMS={rms:.4f}"
+                    frequencies_to_plot = frequencies_plot
+                    psd_to_plot = psd
+                    # Create legend label with RMS
+                    if unit:
+                        legend_label = f"{channel_name}: RMS={rms:.4f} {unit}"
+                    else:
+                        legend_label = f"{channel_name}: RMS={rms:.4f}"
                 
                 # Plot the PSD
                 color = colors[plot_count % len(colors)]
                 pen = pg.mkPen(color=color, width=2)
-                self.plot_widget.plot(
-                    frequencies_plot, 
-                    psd, 
-                    pen=pen,
-                    name=legend_label
-                )
+                
+                # Use bar plot for octave bands, line plot for narrowband
+                if use_octave:
+                    # Use scatter plot with larger symbols for octave bands
+                    self.plot_widget.plot(
+                        frequencies_to_plot,
+                        psd_to_plot,
+                        pen=None,
+                        symbol='o',
+                        symbolSize=8,
+                        symbolBrush=color,
+                        symbolPen=pg.mkPen(color=color, width=1),
+                        name=legend_label
+                    )
+                    # Connect with lines
+                    self.plot_widget.plot(
+                        frequencies_to_plot,
+                        psd_to_plot,
+                        pen=pg.mkPen(color=color, width=1.5, style=pg.QtCore.Qt.PenStyle.DashLine)
+                    )
+                else:
+                    self.plot_widget.plot(
+                        frequencies_to_plot, 
+                        psd_to_plot, 
+                        pen=pen,
+                        name=legend_label
+                    )
                 
                 plot_count += 1
         
@@ -1074,28 +1153,41 @@ class PSDAnalysisWindow(QMainWindow):
         self._apply_axis_limits()
     
     def _open_spectrogram(self):
-        """Open spectrogram window for selected channel using FULL RESOLUTION data."""
+        """Open spectrogram window for selected channels (up to 4) using FULL RESOLUTION data."""
         if self.signal_data_full is None:
             return
         
-        # Find first selected channel
-        selected_channel_idx = None
+        # Find all selected channels
+        selected_channels = []
         for i, checkbox in enumerate(self.channel_checkboxes):
             if checkbox.isChecked():
-                selected_channel_idx = i
-                break
+                selected_channels.append(i)
         
-        if selected_channel_idx is None:
+        if len(selected_channels) == 0:
             QMessageBox.warning(self, "No Channel Selected", "Please select at least one channel to generate spectrogram.")
             return
         
-        channel_name = self.channel_names[selected_channel_idx]
-        # Use FULL resolution data for spectrogram calculations
-        if self.signal_data_full.ndim == 1:
-            signal = self.signal_data_full
-        else:
-            signal = self.signal_data_full[:, selected_channel_idx]
-        unit = self.channel_units[selected_channel_idx] if selected_channel_idx < len(self.channel_units) else ''
+        # Warn if more than 4 channels selected
+        if len(selected_channels) > 4:
+            QMessageBox.warning(
+                self, 
+                "Too Many Channels", 
+                f"You have selected {len(selected_channels)} channels. "
+                "Only the first 4 will be displayed in the spectrogram window."
+            )
+            selected_channels = selected_channels[:4]
+        
+        # Prepare data for selected channels
+        channels_data = []
+        for idx in selected_channels:
+            channel_name = self.channel_names[idx]
+            # Use FULL resolution data for spectrogram calculations
+            if self.signal_data_full.ndim == 1:
+                signal = self.signal_data_full
+            else:
+                signal = self.signal_data_full[:, idx]
+            unit = self.channel_units[idx] if idx < len(self.channel_units) else ''
+            channels_data.append((channel_name, signal, unit))
         
         # Get current PSD parameters to pass to spectrogram
         window = self.window_combo.currentText().lower()
@@ -1105,19 +1197,20 @@ class PSDAnalysisWindow(QMainWindow):
         freq_min = self.freq_min_spin.value()
         freq_max = self.freq_max_spin.value()
         
+        # Create unique key for this channel combination
+        channels_key = "_".join([name for name, _, _ in channels_data])
+        
         # Create or show spectrogram window
-        if channel_name in self.spectrogram_windows:
-            window_obj = self.spectrogram_windows[channel_name]
+        if channels_key in self.spectrogram_windows:
+            window_obj = self.spectrogram_windows[channels_key]
             window_obj.show()
             window_obj.raise_()
             window_obj.activateWindow()
         else:
             window_obj = SpectrogramWindow(
                 self.time_data_full,
-                signal,
-                channel_name,
+                channels_data,  # Pass list of (name, signal, unit) tuples
                 self.sample_rate,
-                unit,
                 window_type=window,
                 df=df,
                 overlap_percent=overlap_percent,
@@ -1126,7 +1219,7 @@ class PSDAnalysisWindow(QMainWindow):
                 freq_max=freq_max
             )
             window_obj.show()
-            self.spectrogram_windows[channel_name] = window_obj
+            self.spectrogram_windows[channels_key] = window_obj
     
     def _open_event_manager(self):
         """Open the Event Manager window."""
@@ -1725,3 +1818,19 @@ class PSDAnalysisWindow(QMainWindow):
             self.calc_button.setToolTip(
                 "Calculate averaged PSD using Welch's method"
             )
+
+    
+    def _on_octave_display_changed(self):
+        """Handle octave band display checkbox state change."""
+        is_enabled = self.octave_checkbox.isChecked()
+        self.octave_combo.setEnabled(is_enabled)
+        
+        # Re-plot if we have data
+        if self.frequencies is not None and self.psd_results:
+            self._update_plot()
+    
+    def _on_octave_fraction_changed(self):
+        """Handle octave fraction selection change."""
+        # Re-plot if we have data and octave display is enabled
+        if self.octave_checkbox.isChecked() and self.frequencies is not None and self.psd_results:
+            self._update_plot()

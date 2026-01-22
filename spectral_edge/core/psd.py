@@ -9,6 +9,7 @@ Functions:
     calculate_psd_welch: Calculate PSD using Welch's method (averaged periodogram)
     calculate_psd_maximax: Calculate maximax PSD (envelope of 1-second PSDs per SMC-S-016)
     calculate_rms_from_psd: Calculate RMS value from PSD using Parseval's theorem
+    convert_psd_to_octave_bands: Convert narrowband PSD to octave band representation
     psd_to_db: Convert PSD values to decibel (dB) scale for visualization
     get_window_options: Get available window function options with descriptions
 
@@ -724,3 +725,256 @@ def get_window_options() -> dict:
         'bartlett': 'Bartlett (Triangular) - Simple, moderate performance',
         'boxcar': 'Boxcar (Rectangular) - No windowing, best frequency resolution but poor sidelobe suppression'
     }
+
+
+
+def convert_psd_to_octave_bands(
+    frequencies: np.ndarray,
+    psd: np.ndarray,
+    octave_fraction: float = 3.0,
+    freq_min: Optional[float] = None,
+    freq_max: Optional[float] = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Convert narrowband PSD to octave band representation.
+    
+    Octave bands are logarithmically-spaced frequency bands commonly used in
+    acoustics and vibration analysis. This function integrates the narrowband
+    PSD energy within each octave band to produce an octave band spectrum.
+    
+    Common octave fractions:
+    - 1/1 octave: Each band spans one octave (factor of 2 in frequency)
+    - 1/3 octave: Three bands per octave (most common in acoustics)
+    - 1/6 octave: Six bands per octave
+    - 1/12 octave: Twelve bands per octave
+    - 1/24 octave: Twenty-four bands per octave
+    - 1/36 octave: Thirty-six bands per octave (high resolution)
+    
+    The octave band center frequencies follow the ANSI/IEC preferred series:
+        f_center = f_ref * 2^(n / octave_fraction)
+    
+    where f_ref = 1000 Hz and n is an integer index.
+    
+    Parameters
+    ----------
+    frequencies : np.ndarray
+        Frequency values from narrowband PSD (Hz).
+        Shape: (n_frequencies,)
+        Must be monotonically increasing.
+    
+    psd : np.ndarray
+        Power spectral density values (linear scale).
+        Shape: (n_frequencies,) for single channel or (n_frequencies, n_channels) for multi-channel.
+        Units: Typically (unit²/Hz) where unit is the signal unit.
+    
+    octave_fraction : float, optional
+        Fraction of octave for band spacing. Default is 3.0 (1/3 octave).
+        Common values: 1.0, 3.0, 6.0, 12.0, 24.0, 36.0
+        Smaller values = wider bands, fewer bands total.
+    
+    freq_min : float, optional
+        Minimum frequency for octave band analysis (Hz).
+        If None, uses minimum frequency from input.
+        Default: None
+    
+    freq_max : float, optional
+        Maximum frequency for octave band analysis (Hz).
+        If None, uses maximum frequency from input.
+        Default: None
+    
+    Returns
+    -------
+    octave_frequencies : np.ndarray
+        Center frequencies of octave bands (Hz).
+        Shape: (n_bands,)
+    
+    octave_psd : np.ndarray
+        PSD values for each octave band (linear scale).
+        Shape: (n_bands,) for single channel or (n_bands, n_channels) for multi-channel.
+        Units: Same as input PSD (unit²/Hz)
+        
+        Note: The octave band PSD represents the average PSD level within each band,
+        NOT the integrated energy. To get total energy in a band, multiply by bandwidth.
+    
+    Raises
+    ------
+    ValueError
+        If frequencies are not monotonically increasing.
+        If octave_fraction is not positive.
+        If freq_min >= freq_max.
+    
+    Notes
+    -----
+    **Octave Band Calculation:**
+    
+    For each octave band with center frequency f_c:
+    
+    1. Calculate band edges:
+       - f_lower = f_c / 2^(1 / (2 * octave_fraction))
+       - f_upper = f_c * 2^(1 / (2 * octave_fraction))
+    
+    2. Find all narrowband frequencies within [f_lower, f_upper]
+    
+    3. Integrate narrowband PSD over the band using trapezoidal rule
+    
+    4. Divide by bandwidth to get average PSD level:
+       - octave_psd = integrated_energy / (f_upper - f_lower)
+    
+    **Standard Octave Band Center Frequencies (1/3 octave):**
+    
+    Common 1/3 octave bands (Hz):
+    - Low frequency: 1, 1.25, 1.6, 2, 2.5, 3.15, 4, 5, 6.3, 8, 10, ...
+    - Mid frequency: 100, 125, 160, 200, 250, 315, 400, 500, 630, 800, 1000, ...
+    - High frequency: 10k, 12.5k, 16k, 20k
+    
+    **Applications:**
+    
+    - Acoustic analysis (sound pressure level vs frequency)
+    - Vibration analysis (acceleration vs frequency)
+    - Smoothing narrowband spectra for visualization
+    - Comparing measurements with octave band specifications
+    - Random vibration test specifications
+    
+    Examples
+    --------
+    >>> # Generate test signal with narrowband PSD
+    >>> frequencies = np.linspace(0, 1000, 1001)
+    >>> psd = np.ones_like(frequencies)  # Flat spectrum
+    >>> 
+    >>> # Convert to 1/3 octave bands
+    >>> oct_freq, oct_psd = convert_psd_to_octave_bands(
+    ...     frequencies, psd, octave_fraction=3.0
+    ... )
+    >>> print(f"Narrowband: {len(frequencies)} points")
+    >>> print(f"1/3 octave: {len(oct_freq)} bands")
+    Narrowband: 1001 points
+    1/3 octave: 31 bands
+    
+    >>> # Convert to 1/6 octave bands (higher resolution)
+    >>> oct_freq, oct_psd = convert_psd_to_octave_bands(
+    ...     frequencies, psd, octave_fraction=6.0
+    ... )
+    >>> print(f"1/6 octave: {len(oct_freq)} bands")
+    1/6 octave: 61 bands
+    
+    See Also
+    --------
+    calculate_psd_welch : Generate narrowband PSD
+    calculate_psd_maximax : Generate maximax narrowband PSD
+    psd_to_db : Convert PSD to decibel scale for plotting
+    
+    References
+    ----------
+    - ANSI S1.11: Specification for Octave-Band and Fractional-Octave-Band Analog and Digital Filters
+    - IEC 61260: Electroacoustics - Octave-band and fractional-octave-band filters
+    """
+    # Input validation
+    psd_length = len(psd) if psd.ndim == 1 else psd.shape[0]
+    if len(frequencies) != psd_length:
+        raise ValueError(
+            f"frequencies and psd length mismatch: "
+            f"frequencies={len(frequencies)}, psd={psd_length}"
+        )
+    
+    if not np.all(np.diff(frequencies) > 0):
+        raise ValueError("frequencies must be monotonically increasing")
+    
+    if octave_fraction <= 0:
+        raise ValueError(f"octave_fraction must be positive, got {octave_fraction}")
+    
+    # Set frequency range
+    if freq_min is None:
+        freq_min = frequencies[0]
+    if freq_max is None:
+        freq_max = frequencies[-1]
+    
+    # Ensure freq_min is positive (required for log calculation)
+    if freq_min <= 0:
+        # Find first positive frequency
+        positive_freqs = frequencies[frequencies > 0]
+        if len(positive_freqs) == 0:
+            raise ValueError("No positive frequencies found in input data")
+        freq_min = positive_freqs[0]
+    
+    if freq_min >= freq_max:
+        raise ValueError(f"freq_min ({freq_min}) must be less than freq_max ({freq_max})")
+    
+    # Reference frequency for octave band calculation (ANSI/IEC standard)
+    f_ref = 1000.0  # Hz
+    
+    # Calculate band width factor
+    # For 1/N octave: bandwidth = f_c * (2^(1/(2N)) - 2^(-1/(2N)))
+    bandwidth_factor = 2.0 ** (1.0 / (2.0 * octave_fraction))
+    
+    # Find range of octave band indices needed
+    # f_c = f_ref * 2^(n / octave_fraction)
+    # n = octave_fraction * log2(f_c / f_ref)
+    n_min = int(np.floor(octave_fraction * np.log2(freq_min / f_ref)))
+    n_max = int(np.ceil(octave_fraction * np.log2(freq_max / f_ref)))
+    
+    # Generate octave band center frequencies
+    octave_indices = np.arange(n_min, n_max + 1)
+    octave_frequencies = f_ref * 2.0 ** (octave_indices / octave_fraction)
+    
+    # Filter to only include bands within frequency range
+    valid_bands = (octave_frequencies >= freq_min) & (octave_frequencies <= freq_max)
+    octave_frequencies = octave_frequencies[valid_bands]
+    
+    if len(octave_frequencies) == 0:
+        raise ValueError(
+            f"No octave bands found in frequency range [{freq_min}, {freq_max}] Hz"
+        )
+    
+    # Determine if multi-channel
+    is_multichannel = psd.ndim > 1
+    n_channels = psd.shape[1] if is_multichannel else 1
+    
+    # Initialize output array
+    if is_multichannel:
+        octave_psd = np.zeros((len(octave_frequencies), n_channels))
+    else:
+        octave_psd = np.zeros(len(octave_frequencies))
+    
+    # Calculate PSD for each octave band
+    for i, f_center in enumerate(octave_frequencies):
+        # Calculate band edges
+        f_lower = f_center / bandwidth_factor
+        f_upper = f_center * bandwidth_factor
+        
+        # Find narrowband frequencies within this octave band
+        band_mask = (frequencies >= f_lower) & (frequencies <= f_upper)
+        
+        if not np.any(band_mask):
+            # No data in this band - leave as zero
+            continue
+        
+        # Extract frequencies and PSD for this band
+        band_frequencies = frequencies[band_mask]
+        if is_multichannel:
+            band_psd = psd[band_mask, :]
+        else:
+            band_psd = psd[band_mask]
+        
+        # Integrate PSD over the band using trapezoidal rule
+        # This gives total energy in the band
+        if is_multichannel:
+            for ch in range(n_channels):
+                try:
+                    integrated_energy = np.trapezoid(band_psd[:, ch], band_frequencies)
+                except AttributeError:
+                    integrated_energy = np.trapz(band_psd[:, ch], band_frequencies)
+                
+                # Convert to average PSD level by dividing by bandwidth
+                bandwidth = f_upper - f_lower
+                octave_psd[i, ch] = integrated_energy / bandwidth
+        else:
+            try:
+                integrated_energy = np.trapezoid(band_psd, band_frequencies)
+            except AttributeError:
+                integrated_energy = np.trapz(band_psd, band_frequencies)
+            
+            # Convert to average PSD level by dividing by bandwidth
+            bandwidth = f_upper - f_lower
+            octave_psd[i] = integrated_energy / bandwidth
+    
+    return octave_frequencies, octave_psd

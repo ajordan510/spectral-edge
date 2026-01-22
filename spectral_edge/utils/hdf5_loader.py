@@ -197,33 +197,46 @@ class HDF5FlightDataLoader:
             return self.channels[flight_key][channel_key]
         return None
     
-    def load_channel_data(self, flight_key: str, channel_key: str, 
+    def load_channel_data(self, flight_key: str, channel_key: str,
                          start_time: Optional[float] = None,
                          end_time: Optional[float] = None,
-                         decimate_factor: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
+                         decimate_for_display: bool = True) -> dict:
         """
-        Load channel data with optional time range and decimation.
+        Load channel data with optional time range.
+        
+        Returns both full resolution data (for calculations) and optionally
+        decimated data (for display). This ensures PSD calculations always
+        use full resolution data while plots remain responsive.
         
         Parameters:
         -----------
         flight_key : str
-            Flight key
+            Flight key (e.g., 'flight_001')
         channel_key : str
-            Channel key
+            Channel key (e.g., 'accelerometer_x')
         start_time : float, optional
             Start time in seconds (None = beginning)
         end_time : float, optional
             End time in seconds (None = end)
-        decimate_factor : int, optional
-            Decimation factor (e.g., 10 = keep every 10th sample)
-            If None, automatically calculated for ~10k points
+        decimate_for_display : bool, optional
+            If True, also returns decimated data for plotting (default: True)
+            Decimation targets ~10,000 points for responsive plotting
         
         Returns:
         --------
-        time : ndarray
-            Time vector
-        data : ndarray
-            Signal data
+        dict with keys:
+            'time_full' : ndarray
+                Full resolution time vector
+            'data_full' : ndarray
+                Full resolution signal data
+            'time_display' : ndarray
+                Decimated time vector for plotting (if decimate_for_display=True)
+            'data_display' : ndarray
+                Decimated signal data for plotting (if decimate_for_display=True)
+            'sample_rate' : float
+                Original sample rate in Hz
+            'decimation_factor' : int
+                Decimation factor used (1 = no decimation)
         """
         try:
             # Validate HDF5 file is open
@@ -279,20 +292,37 @@ class HDF5FlightDataLoader:
             data = data_dataset[start_idx:end_idx]
         else:
             # Load full data
-            time = time_dataset[:]
-            data = data_dataset[:]
+            time_full = time_dataset[:]
+            data_full = data_dataset[:]
         
-        # Apply decimation if requested
-        if decimate_factor is not None and decimate_factor > 1:
-            time = time[::decimate_factor]
-            data = data[::decimate_factor]
-        elif decimate_factor is None and len(data) > 10000:
-            # Auto-decimate to ~10k points for display
-            auto_decimate = max(1, len(data) // 10000)
-            time = time[::auto_decimate]
-            data = data[::auto_decimate]
+        # Get sample rate from channel info
+        channel_info = self.get_channel_info(flight_key, channel_key)
+        sample_rate = channel_info.sample_rate
         
-        return time, data
+        # Prepare result dictionary with full resolution data
+        result = {
+            'time_full': time_full,
+            'data_full': data_full,
+            'sample_rate': sample_rate,
+            'decimation_factor': 1
+        }
+        
+        # Calculate decimated data for display if requested
+        if decimate_for_display and len(data_full) > 10000:
+            # Auto-decimate to ~10k points for responsive plotting
+            decimate_factor = max(1, len(data_full) // 10000)
+            time_display = time_full[::decimate_factor]
+            data_display = data_full[::decimate_factor]
+            
+            result['time_display'] = time_display
+            result['data_display'] = data_display
+            result['decimation_factor'] = decimate_factor
+        else:
+            # No decimation needed or not requested
+            result['time_display'] = time_full
+            result['data_display'] = data_full
+        
+        return result
     
     def load_channel_chunk(self, flight_key: str, channel_key: str,
                           start_idx: int, end_idx: int) -> Tuple[np.ndarray, np.ndarray]:

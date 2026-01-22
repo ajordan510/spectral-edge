@@ -100,6 +100,7 @@ class PSDAnalysisWindow(QMainWindow):
         self.channel_units = []  # Store units for each channel
         self.sample_rate = None
         self.current_file = None
+        self.flight_name = ""  # Flight name for HDF5 data, empty for CSV
         
         # PSD results storage (dictionary keyed by channel name)
         self.frequencies = None
@@ -803,6 +804,7 @@ class PSDAnalysisWindow(QMainWindow):
             self.signal_data_display = signal_data
             
             self.current_file = Path(file_path).name
+            self.flight_name = ""  # CSV data has no flight name
             
             # Extract units from channel names (e.g., "Accelerometer_X (g)" -> "g")
             self.channel_units = []
@@ -905,11 +907,16 @@ class PSDAnalysisWindow(QMainWindow):
                 # Plot the time history
                 color = colors[plot_count % len(colors)]
                 pen = pg.mkPen(color=color, width=1.5)
+                # Create legend label with flight name if available
+                if self.flight_name:
+                    legend_label = f"{self.flight_name} - {channel_name}"
+                else:
+                    legend_label = channel_name
                 self.time_plot_widget.plot(
                     self.time_data_display,
                     signal,
                     pen=pen,
-                    name=channel_name
+                    name=legend_label
                 )
                 
                 plot_count += 1
@@ -1084,28 +1091,46 @@ class PSDAnalysisWindow(QMainWindow):
                         )
                         frequencies_to_plot = frequencies_plot_oct
                         psd_to_plot = psd_oct
-                        # Add octave info to legend
+                        # Add octave info to legend with flight name
                         octave_name = self.octave_combo.currentText()
-                        if unit:
-                            legend_label = f"{channel_name} ({octave_name}): RMS={rms:.4f} {unit}"
+                        if self.flight_name:
+                            if unit:
+                                legend_label = f"{self.flight_name} - {channel_name} ({octave_name}): RMS={rms:.4f} {unit}"
+                            else:
+                                legend_label = f"{self.flight_name} - {channel_name} ({octave_name}): RMS={rms:.4f}"
                         else:
-                            legend_label = f"{channel_name} ({octave_name}): RMS={rms:.4f}"
+                            if unit:
+                                legend_label = f"{channel_name} ({octave_name}): RMS={rms:.4f} {unit}"
+                            else:
+                                legend_label = f"{channel_name} ({octave_name}): RMS={rms:.4f}"
                     except Exception as e:
                         show_warning(self, "Octave Conversion Error", f"Failed to convert to octave bands: {str(e)}\nShowing narrowband data.")
                         frequencies_to_plot = frequencies_plot
                         psd_to_plot = psd
+                        if self.flight_name:
+                            if unit:
+                                legend_label = f"{self.flight_name} - {channel_name}: RMS={rms:.4f} {unit}"
+                            else:
+                                legend_label = f"{self.flight_name} - {channel_name}: RMS={rms:.4f}"
+                        else:
+                            if unit:
+                                legend_label = f"{channel_name}: RMS={rms:.4f} {unit}"
+                            else:
+                                legend_label = f"{channel_name}: RMS={rms:.4f}"
+                else:
+                    frequencies_to_plot = frequencies_plot
+                    psd_to_plot = psd
+                    # Create legend label with RMS and flight name
+                    if self.flight_name:
+                        if unit:
+                            legend_label = f"{self.flight_name} - {channel_name}: RMS={rms:.4f} {unit}"
+                        else:
+                            legend_label = f"{self.flight_name} - {channel_name}: RMS={rms:.4f}"
+                    else:
                         if unit:
                             legend_label = f"{channel_name}: RMS={rms:.4f} {unit}"
                         else:
                             legend_label = f"{channel_name}: RMS={rms:.4f}"
-                else:
-                    frequencies_to_plot = frequencies_plot
-                    psd_to_plot = psd
-                    # Create legend label with RMS
-                    if unit:
-                        legend_label = f"{channel_name}: RMS={rms:.4f} {unit}"
-                    else:
-                        legend_label = f"{channel_name}: RMS={rms:.4f}"
                 
                 # Plot the PSD
                 color = colors[plot_count % len(colors)]
@@ -1214,7 +1239,8 @@ class PSDAnalysisWindow(QMainWindow):
                 overlap_percent=overlap_percent,
                 efficient_fft=efficient_fft,
                 freq_min=freq_min,
-                freq_max=freq_max
+                freq_max=freq_max,
+                flight_name=self.flight_name  # Pass flight name for titles
             )
             window_obj.show()
             self.spectrogram_windows[channels_key] = window_obj
@@ -1741,11 +1767,13 @@ class PSDAnalysisWindow(QMainWindow):
             self.channel_names = all_channel_names
             self.channel_units = all_channel_units
             
-            # Create file label
+            # Create file label and set flight name
             if len(set(flight_info)) == 1:
                 self.current_file = f"{flight_info[0]} ({len(selected_items)} channels)"
+                self.flight_name = flight_info[0]  # Single flight name
             else:
                 self.current_file = f"Multiple flights ({len(selected_items)} channels)"
+                self.flight_name = "Multiple flights"  # Multiple flights
             
             print(f"\nFinal full data shape: {self.signal_data_full.shape}")
             print(f"Final display data shape: {self.signal_data_display.shape}")

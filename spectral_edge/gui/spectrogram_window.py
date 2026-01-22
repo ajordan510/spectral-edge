@@ -62,7 +62,7 @@ class SpectrogramWindow(QMainWindow):
     
     def __init__(self, time_data, channels_data, sample_rate,
                  window_type='hann', df=1.0, overlap_percent=50, efficient_fft=True,
-                 freq_min=10.0, freq_max=2000.0):
+                 freq_min=10.0, freq_max=2000.0, flight_name=""):
         """
         Initialize the spectrogram window.
         
@@ -76,6 +76,7 @@ class SpectrogramWindow(QMainWindow):
             efficient_fft: Use efficient FFT size (power of 2)
             freq_min: Minimum frequency for display
             freq_max: Maximum frequency for display
+            flight_name: Flight name for HDF5 data (empty for CSV)
         """
         super().__init__()
         
@@ -84,6 +85,7 @@ class SpectrogramWindow(QMainWindow):
         self.channels_data = channels_data[:4]  # Limit to 4 channels
         self.n_channels = len(self.channels_data)
         self.sample_rate = sample_rate
+        self.flight_name = flight_name  # Flight name for titles
         
         # Spectrogram data for each channel
         self.spec_data = []  # List of (times, freqs, power_db) tuples
@@ -94,10 +96,16 @@ class SpectrogramWindow(QMainWindow):
         
         # Window properties
         if self.n_channels == 1:
-            self.setWindowTitle(f"SpectralEdge - Spectrogram: {self.channels_data[0][0]}")
+            if flight_name:
+                self.setWindowTitle(f"SpectralEdge - Spectrogram: {flight_name} - {self.channels_data[0][0]}")
+            else:
+                self.setWindowTitle(f"SpectralEdge - Spectrogram: {self.channels_data[0][0]}")
         else:
             channel_names = ", ".join([name for name, _, _ in self.channels_data])
-            self.setWindowTitle(f"SpectralEdge - Spectrogram: {channel_names}")
+            if flight_name:
+                self.setWindowTitle(f"SpectralEdge - Spectrogram: {flight_name} - {channel_names}")
+            else:
+                self.setWindowTitle(f"SpectralEdge - Spectrogram: {channel_names}")
         
         self.setMinimumSize(1400, 900)
         
@@ -631,13 +639,24 @@ class SpectrogramWindow(QMainWindow):
                 plot_widget.addItem(colorbar)
                 self.colorbars[i] = colorbar
             
-            # Update title
-            if unit:
-                plot_widget.setTitle(f"{channel_name} ({unit}) | SNR: {snr_db} dB", 
-                                    color='#e0e0e0', size='12pt')
+            # Update title with flight name if available
+            if self.flight_name:
+                if unit:
+                    plot_widget.setTitle(f"{self.flight_name} - {channel_name} ({unit}) | SNR: {snr_db} dB", 
+                                        color='#e0e0e0', size='12pt')
+                else:
+                    plot_widget.setTitle(f"{self.flight_name} - {channel_name} | SNR: {snr_db} dB", 
+                                        color='#e0e0e0', size='12pt')
             else:
-                plot_widget.setTitle(f"{channel_name} | SNR: {snr_db} dB", 
-                                    color='#e0e0e0', size='12pt')
+                if unit:
+                    plot_widget.setTitle(f"{channel_name} ({unit}) | SNR: {snr_db} dB", 
+                                        color='#e0e0e0', size='12pt')
+                else:
+                    plot_widget.setTitle(f"{channel_name} | SNR: {snr_db} dB", 
+                                        color='#e0e0e0', size='12pt')
+            
+            # Set axis labels
+            plot_widget.setLabel('bottom', 'Time (s)', color='#e0e0e0', size='11pt')
             
             # Set time limits if auto
             if self.auto_limits_checkbox.isChecked():

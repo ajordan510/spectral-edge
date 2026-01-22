@@ -153,7 +153,7 @@ class SpectrogramWindow(QMainWindow):
                 left: 10px;
                 padding: 0 5px 0 5px;
             }
-            QComboBox, QSpinBox, QDoubleSpinBox {
+            QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {
                 background-color: #2d3748;
                 color: #e0e0e0;
                 border: 1px solid #4a5568;
@@ -594,24 +594,20 @@ class SpectrogramWindow(QMainWindow):
             # Set data with SNR-based levels
             img.setImage(Sxx_plot, autoLevels=False, levels=(min_power, max_power))
             
-            # Set position and scale
+            # Set position and scale (always use actual frequency values)
+            img.setRect(pg.QtCore.QRectF(
+                times[0],
+                freqs_plot[0],
+                times[-1] - times[0],
+                freqs_plot[-1] - freqs_plot[0]
+            ))
+            
+            # Set Y-axis scale mode
             if use_log_scale:
-                # For log scale, we need to transform frequencies
-                log_freqs = np.log10(freqs_plot)
-                img.setRect(pg.QtCore.QRectF(
-                    times[0],
-                    log_freqs[0],
-                    times[-1] - times[0],
-                    log_freqs[-1] - log_freqs[0]
-                ))
+                plot_widget.setLogMode(x=False, y=True)
                 plot_widget.setLabel('left', 'Frequency (Hz, log)', color='#e0e0e0', size='11pt')
             else:
-                img.setRect(pg.QtCore.QRectF(
-                    times[0],
-                    freqs_plot[0],
-                    times[-1] - times[0],
-                    freqs_plot[-1] - freqs_plot[0]
-                ))
+                plot_widget.setLogMode(x=False, y=False)
                 plot_widget.setLabel('left', 'Frequency (Hz)', color='#e0e0e0', size='11pt')
             
             # Apply colormap

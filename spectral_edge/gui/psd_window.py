@@ -166,7 +166,7 @@ class PSDAnalysisWindow(QMainWindow):
                 left: 10px;
                 padding: 0 5px 0 5px;
             }
-            QComboBox, QSpinBox, QDoubleSpinBox {
+            QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {
                 background-color: #2d3748;
                 color: #e0e0e0;
                 border: 1px solid #4a5568;

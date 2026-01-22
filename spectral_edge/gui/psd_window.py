@@ -11,7 +11,7 @@ Author: SpectralEdge Development Team
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QFileDialog,
-    QGroupBox, QGridLayout, QMessageBox, QCheckBox, QScrollArea
+    QGroupBox, QGridLayout, QMessageBox, QCheckBox, QScrollArea, QTabWidget
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -238,29 +238,57 @@ class PSDAnalysisWindow(QMainWindow):
         title.setStyleSheet("color: #60a5fa;")
         layout.addWidget(title)
         
-        # File loading group
+        # File loading group (always visible at top)
         file_group = self._create_file_group()
         layout.addWidget(file_group)
         
-        # Channel selection group
+        # Channel selection group (always visible)
         self.channel_group = self._create_channel_group()
         layout.addWidget(self.channel_group)
         
-        # Frequency range group
-        freq_range_group = self._create_frequency_range_group()
-        layout.addWidget(freq_range_group)
+        # Create tabbed interface for parameters and options
+        tab_widget = QTabWidget()
+        tab_widget.setStyleSheet("""
+            QTabWidget::pane {
+                border: 2px solid #4a5568;
+                border-radius: 5px;
+                background-color: #1a1f2e;
+            }
+            QTabBar::tab {
+                background-color: #2d3748;
+                color: #9ca3af;
+                padding: 8px 16px;
+                margin-right: 2px;
+                border-top-left-radius: 5px;
+                border-top-right-radius: 5px;
+            }
+            QTabBar::tab:selected {
+                background-color: #1a1f2e;
+                color: #60a5fa;
+                font-weight: bold;
+            }
+            QTabBar::tab:hover {
+                background-color: #3d4758;
+            }
+        """)
         
-        # Parameter configuration group
-        param_group = self._create_parameter_group()
-        layout.addWidget(param_group)
+        # Tab 1: PSD Parameters
+        params_tab = QWidget()
+        params_layout = QVBoxLayout(params_tab)
+        params_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        params_layout.addWidget(self._create_frequency_range_group())
+        params_layout.addWidget(self._create_parameter_group())
+        tab_widget.addTab(params_tab, "Parameters")
         
-        # Display options group
-        display_group = self._create_display_options_group()
-        layout.addWidget(display_group)
+        # Tab 2: Display & Axes
+        display_tab = QWidget()
+        display_layout = QVBoxLayout(display_tab)
+        display_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        display_layout.addWidget(self._create_display_options_group())
+        display_layout.addWidget(self._create_axis_limits_group())
+        tab_widget.addTab(display_tab, "Display")
         
-        # Axis limits group
-        axis_limits_group = self._create_axis_limits_group()
-        layout.addWidget(axis_limits_group)
+        layout.addWidget(tab_widget)
         
         # Calculate button
         self.calc_button = QPushButton("Calculate PSD")
@@ -1541,7 +1569,7 @@ class PSDAnalysisWindow(QMainWindow):
             # Create checkbox for this channel
             checkbox = QCheckBox(channel_info.get_display_name())
             checkbox.setChecked(True)
-            checkbox.stateChanged.connect(self._update_time_history_plot)
+            checkbox.stateChanged.connect(self._plot_time_history)
             self.channel_layout.addWidget(checkbox)
             self.channel_checkboxes.append(checkbox)
             
@@ -1557,7 +1585,7 @@ class PSDAnalysisWindow(QMainWindow):
             self._clear_psd_plot()
             
             # Update time history plot
-            self._update_time_history_plot()
+            self._plot_time_history()
             
             # Update nperseg display
             self._update_nperseg_from_df()

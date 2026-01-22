@@ -10,11 +10,12 @@ Date: 2025-01-21
 """
 
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-                             QTreeWidget, QTreeWidgetItem, QGroupBox, QMessageBox,
+                             QTreeWidget, QTreeWidgetItem, QGroupBox,
                              QCheckBox, QScrollArea, QWidget)
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from spectral_edge.utils.hdf5_loader import HDF5FlightDataLoader, FlightInfo, ChannelInfo
+from spectral_edge.utils.message_box import show_warning
 from typing import List, Dict, Tuple
 
 
@@ -331,7 +332,7 @@ class FlightNavigator(QDialog):
     def _load_selected(self):
         """Emit signal with selected channels."""
         if not self.selected_items:
-            QMessageBox.warning(self, "No Selection", "Please select at least one channel to load.")
+            show_warning(self, "No Selection", "Please select at least one channel to load.")
             return
         
         # Emit signal with selected items

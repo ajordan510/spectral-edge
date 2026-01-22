@@ -10,8 +10,9 @@ Author: SpectralEdge Development Team
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QTableWidget, QTableWidgetItem, QLineEdit,
-    QDoubleSpinBox, QMessageBox, QFileDialog, QHeaderView, QComboBox
+    QDoubleSpinBox, QFileDialog, QHeaderView, QComboBox
 )
+from spectral_edge.utils.message_box import show_information, show_warning, show_critical
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QColor
 import json
@@ -346,7 +347,7 @@ class EventManagerWindow(QMainWindow):
         if current_row >= 0 and current_row < len(self.events):
             # Don't allow removing the "Full" event if it's the first one
             if current_row == 0 and self.events[0].name == "Full":
-                QMessageBox.warning(self, "Cannot Remove", "The 'Full' event cannot be removed.")
+                show_warning(self, "Cannot Remove", "The 'Full' event cannot be removed.")
                 return
             
             del self.events[current_row]
@@ -478,7 +479,7 @@ class EventManagerWindow(QMainWindow):
             self._update_table()
         
         except ValueError as e:
-            QMessageBox.warning(self, "Invalid Value", str(e))
+            show_warning(self, "Invalid Value", str(e))
             self._update_table()  # Reset to previous values
     
     def _save_events(self):
@@ -501,10 +502,10 @@ class EventManagerWindow(QMainWindow):
             with open(file_path, 'w') as f:
                 json.dump(data, f, indent=2)
             
-            QMessageBox.information(self, "Success", f"Events saved to {Path(file_path).name}")
+            show_information(self, "Success", f"Events saved to {Path(file_path).name}")
         
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save events: {e}")
+            show_critical(self, "Error", f"Failed to save events: {e}")
     
     def _load_events(self):
         """Load events from JSON file."""
@@ -525,10 +526,10 @@ class EventManagerWindow(QMainWindow):
             self.events = [Event.from_dict(e) for e in data['events']]
             self._update_table()
             
-            QMessageBox.information(self, "Success", f"Events loaded from {Path(file_path).name}")
+            show_information(self, "Success", f"Events loaded from {Path(file_path).name}")
         
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load events: {e}")
+            show_critical(self, "Error", f"Failed to load events: {e}")
     
     def _apply_events(self):
         """Apply events and emit signal."""
@@ -540,13 +541,13 @@ class EventManagerWindow(QMainWindow):
                 enabled_events.append(event)
         
         if not enabled_events:
-            QMessageBox.warning(self, "No Events", "Please enable at least one event.")
+            show_warning(self, "No Events", "Please enable at least one event.")
             return
         
         # Emit signal with enabled events
         self.events_updated.emit(enabled_events)
         
-        QMessageBox.information(self, "Success", f"Applied {len(enabled_events)} event(s) for PSD calculation.")
+        show_information(self, "Success", f"Applied {len(enabled_events)} event(s) for PSD calculation.")
     
     def add_event_from_selection(self, start_time, end_time):
         """

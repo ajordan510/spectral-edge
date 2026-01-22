@@ -29,6 +29,7 @@ from spectral_edge.core.psd import (
 from spectral_edge.gui.spectrogram_window import SpectrogramWindow
 from spectral_edge.gui.event_manager import EventManagerWindow, Event
 from spectral_edge.gui.flight_navigator import FlightNavigator
+from spectral_edge.utils.message_box import show_information, show_warning, show_critical
 
 
 class ScientificAxisItem(pg.AxisItem):
@@ -851,9 +852,9 @@ class PSDAnalysisWindow(QMainWindow):
             self._plot_time_history()
             
         except (DataLoadError, FileNotFoundError) as e:
-            QMessageBox.critical(self, "Error Loading File", str(e))
+            show_critical(self, "Error Loading File", str(e))
         except Exception as e:
-            QMessageBox.critical(self, "Unexpected Error", f"An error occurred: {e}")
+            show_critical(self, "Unexpected Error", f"An error occurred: {e}")
     
     def _create_channel_checkboxes(self):
         """Create checkboxes for channel selection."""
@@ -1005,7 +1006,7 @@ class PSDAnalysisWindow(QMainWindow):
             self._update_plot()
             
         except Exception as e:
-            QMessageBox.critical(self, "Calculation Error", f"Failed to calculate PSD: {e}\n\nPlease try adjusting the frequency resolution or frequency range.")
+            show_critical(self, "Calculation Error", f"Failed to calculate PSD: {e}\n\nPlease try adjusting the frequency resolution or frequency range.")
     
     def _set_frequency_ticks(self):
         """Set frequency axis ticks to only show powers of 10."""
@@ -1047,7 +1048,7 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Check if mask has any True values
         if not np.any(freq_mask):
-            QMessageBox.warning(self, "No Data", "No frequency data in the specified range. Please adjust the frequency range.")
+            show_warning(self, "No Data", "No frequency data in the specified range. Please adjust the frequency range.")
             return
         
         frequencies_plot = self.frequencies[freq_mask]
@@ -1092,8 +1093,7 @@ class PSDAnalysisWindow(QMainWindow):
                         else:
                             legend_label = f"{channel_name} ({octave_name}): RMS={rms:.4f}"
                     except Exception as e:
-                        QMessageBox.warning(self, "Octave Conversion Error", 
-                                          f"Failed to convert to octave bands: {str(e)}\nShowing narrowband data.")
+                        show_warning(self, "Octave Conversion Error", f"Failed to convert to octave bands: {str(e)}\nShowing narrowband data.")
                         frequencies_to_plot = frequencies_plot
                         psd_to_plot = psd
                         if unit:
@@ -1164,12 +1164,12 @@ class PSDAnalysisWindow(QMainWindow):
                 selected_channels.append(i)
         
         if len(selected_channels) == 0:
-            QMessageBox.warning(self, "No Channel Selected", "Please select at least one channel to generate spectrogram.")
+            show_warning(self, "No Channel Selected", "Please select at least one channel to generate spectrogram.")
             return
         
         # Warn if more than 4 channels selected
         if len(selected_channels) > 4:
-            QMessageBox.warning(
+            show_warning(
                 self, 
                 "Too Many Channels", 
                 f"You have selected {len(selected_channels)} channels. "
@@ -1437,7 +1437,7 @@ class PSDAnalysisWindow(QMainWindow):
             self._update_plot_with_events()
             
         except Exception as e:
-            QMessageBox.critical(self, "Calculation Error", f"Failed to calculate event PSDs: {e}")
+            show_critical(self, "Calculation Error", f"Failed to calculate event PSDs: {e}")
     
     def _update_plot_with_events(self):
         """Update the PSD plot with event-based PSDs."""
@@ -1455,7 +1455,7 @@ class PSDAnalysisWindow(QMainWindow):
         freq_mask = (self.frequencies >= freq_min) & (self.frequencies <= freq_max)
         
         if not np.any(freq_mask):
-            QMessageBox.warning(self, "No Data", "No frequency data in the specified range.")
+            show_warning(self, "No Data", "No frequency data in the specified range.")
             return
         
         frequencies_plot = self.frequencies[freq_mask]
@@ -1537,11 +1537,11 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Validate limits
         if x_min >= x_max:
-            QMessageBox.warning(self, "Invalid Limits", "X-axis minimum must be less than maximum.")
+            show_warning(self, "Invalid Limits", "X-axis minimum must be less than maximum.")
             return
         
         if y_min >= y_max:
-            QMessageBox.warning(self, "Invalid Limits", "Y-axis minimum must be less than maximum.")
+            show_warning(self, "Invalid Limits", "Y-axis minimum must be less than maximum.")
             return
         
         # Set X-axis range (log scale)
@@ -1559,7 +1559,7 @@ class PSDAnalysisWindow(QMainWindow):
     def _auto_fit_axes(self):
         """Auto-fit axes based on current data."""
         if self.frequencies is None or not self.psd_results:
-            QMessageBox.information(self, "No Data", "Please calculate PSD first before using auto-fit.")
+            show_information(self, "No Data", "Please calculate PSD first before using auto-fit.")
             return
         
         # Get frequency range from data
@@ -1570,7 +1570,7 @@ class PSDAnalysisWindow(QMainWindow):
         freq_mask = (self.frequencies >= freq_min) & (self.frequencies <= freq_max)
         
         if not np.any(freq_mask):
-            QMessageBox.warning(self, "No Data", "No data in the specified frequency range.")
+            show_warning(self, "No Data", "No data in the specified frequency range.")
             return
         
         # Find min/max PSD values across all selected channels
@@ -1607,7 +1607,7 @@ class PSDAnalysisWindow(QMainWindow):
             # Apply the new limits
             self._apply_axis_limits()
         else:
-            QMessageBox.warning(self, "No Valid Data", "No positive PSD values found for auto-fit.")
+            show_warning(self, "No Valid Data", "No positive PSD values found for auto-fit.")
     
     def _load_hdf5_file(self):
         """Load HDF5 file and open flight navigator."""
@@ -1636,7 +1636,7 @@ class PSDAnalysisWindow(QMainWindow):
             self.flight_navigator.show()
             
         except Exception as e:
-            QMessageBox.critical(self, "Load Error", f"Failed to load HDF5 file: {e}")
+            show_critical(self, "Load Error", f"Failed to load HDF5 file: {e}")
     
     def _on_hdf5_data_selected(self, selected_items):
         """
@@ -1789,7 +1789,7 @@ class PSDAnalysisWindow(QMainWindow):
                     f"Samples: {len(self.time_data_full)} (full resolution)"
                 )
             
-            QMessageBox.information(self, "Data Loaded", message)
+            show_information(self, "Data Loaded", message)
             
         except Exception as e:
             import traceback
@@ -1798,8 +1798,7 @@ class PSDAnalysisWindow(QMainWindow):
             print(error_details)
             print(f"Error type: {type(e).__name__}")
             print(f"Error message: {str(e)}")
-            QMessageBox.critical(self, "Load Error", 
-                f"Failed to load HDF5 data: {e}\n\nSee console for full traceback.")
+            show_critical(self, "Load Error", f"Failed to load HDF5 data: {e}\n\nSee console for full traceback.")
     
     def _on_maximax_toggled(self):
         """Handle maximax checkbox toggle."""

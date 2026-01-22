@@ -9,6 +9,8 @@ Functions:
     calculate_psd_welch: Calculate PSD using Welch's method (averaged periodogram)
     calculate_psd_maximax: Calculate maximax PSD (envelope of 1-second PSDs per SMC-S-016)
     calculate_rms_from_psd: Calculate RMS value from PSD using Parseval's theorem
+    psd_to_db: Convert PSD values to decibel (dB) scale for visualization
+    get_window_options: Get available window function options with descriptions
 
 References:
     - Welch, P. (1967). "The use of fast Fourier transform for the estimation of 
@@ -592,3 +594,133 @@ def calculate_rms_from_psd(frequencies: np.ndarray, psd: np.ndarray,
     rms = np.sqrt(variance)
     
     return rms
+
+
+def psd_to_db(psd: np.ndarray, reference: float = 1.0) -> np.ndarray:
+    """
+    Convert PSD values to decibel (dB) scale.
+    
+    The decibel scale is a logarithmic scale that is useful for visualizing
+    PSD data that spans many orders of magnitude. It is defined as:
+    
+        PSD_dB = 10 * log10(PSD / reference)
+    
+    This function is commonly used for plotting PSD results on a logarithmic
+    scale, which makes it easier to see features across a wide dynamic range.
+    
+    Parameters
+    ----------
+    psd : np.ndarray
+        Power spectral density values (linear scale).
+        Shape: (n_frequencies,) for single channel or (n_frequencies, n_channels) for multi-channel.
+        Units: Typically (unit²/Hz) where unit is the signal unit (e.g., g²/Hz for acceleration).
+    
+    reference : float, optional
+        Reference value for dB conversion. Default is 1.0.
+        The reference should have the same units as the PSD.
+        Common references:
+        - 1.0 for normalized data
+        - 1e-6 for microunits (e.g., μg²/Hz)
+    
+    Returns
+    -------
+    psd_db : np.ndarray
+        PSD values in decibel scale.
+        Shape: Same as input psd.
+        Units: dB re reference (e.g., "dB re 1.0 g²/Hz")
+    
+    Notes
+    -----
+    - Zero or negative PSD values are replaced with a small positive value (1e-20)
+      to avoid log(0) errors. This results in very large negative dB values.
+    - The dB scale is logarithmic, so equal dB differences represent equal
+      ratios in linear scale (e.g., +3 dB ≈ 2x power, +10 dB = 10x power).
+    
+    Examples
+    --------
+    >>> frequencies = np.array([0, 1, 2, 3, 4])
+    >>> psd = np.array([1.0, 10.0, 100.0, 1000.0, 10000.0])
+    >>> psd_db = psd_to_db(psd, reference=1.0)
+    >>> print(psd_db)
+    [ 0. 10. 20. 30. 40.]
+    
+    >>> # With different reference
+    >>> psd_db = psd_to_db(psd, reference=10.0)
+    >>> print(psd_db)
+    [-10.   0.  10.  20.  30.]
+    """
+    # Replace zeros and negative values with small positive value
+    psd_safe = np.where(psd > 0, psd, 1e-20)
+    
+    # Convert to dB: 10 * log10(PSD / reference)
+    psd_db = 10 * np.log10(psd_safe / reference)
+    
+    return psd_db
+
+
+def get_window_options() -> dict:
+    """
+    Get available window function options for PSD calculation.
+    
+    Returns a dictionary of window function names and their descriptions.
+    These windows are used to reduce spectral leakage when computing PSDs.
+    
+    Returns
+    -------
+    window_options : dict
+        Dictionary mapping window names (lowercase) to descriptions.
+        Keys are the window names that can be passed to calculate_psd_welch
+        and calculate_psd_maximax.
+    
+    Notes
+    -----
+    Window Selection Guidelines:
+    
+    - **Hann (Hanning)**: Best general-purpose window. Good balance between
+      frequency resolution and sidelobe suppression. Recommended for most
+      applications.
+    
+    - **Hamming**: Similar to Hann but with slightly better sidelobe suppression
+      at the cost of slightly wider main lobe. Good for signals with strong
+      narrowband components.
+    
+    - **Blackman**: Excellent sidelobe suppression (better than Hann/Hamming)
+      but wider main lobe. Use when you need to detect weak signals near
+      strong ones.
+    
+    - **Flattop**: Best amplitude accuracy for sinusoidal signals. Very wide
+      main lobe but minimal scalloping loss. Use for calibration or when
+      accurate amplitude measurement is critical.
+    
+    - **Bartlett (Triangular)**: Simple triangular window. Moderate performance,
+      mainly of historical interest.
+    
+    - **Boxcar (Rectangular)**: No windowing applied. Best frequency resolution
+      but poor sidelobe suppression. Only use if you know your signal has no
+      spectral leakage issues (e.g., integer number of periods in window).
+    
+    All windows are available in scipy.signal.get_window().
+    
+    Examples
+    --------
+    >>> options = get_window_options()
+    >>> print(options.keys())
+    dict_keys(['hann', 'hamming', 'blackman', 'flattop', 'bartlett', 'boxcar'])
+    
+    >>> print(options['hann'])
+    'Hann (Hanning) - Good general purpose, smooth sidelobes'
+    
+    See Also
+    --------
+    calculate_psd_welch : Uses these window options
+    calculate_psd_maximax : Uses these window options
+    scipy.signal.get_window : Underlying window generation function
+    """
+    return {
+        'hann': 'Hann (Hanning) - Good general purpose, smooth sidelobes',
+        'hamming': 'Hamming - Similar to Hann, slightly different sidelobe behavior',
+        'blackman': 'Blackman - Excellent sidelobe suppression, wider main lobe',
+        'flattop': 'Flattop - Best amplitude accuracy, very wide main lobe',
+        'bartlett': 'Bartlett (Triangular) - Simple, moderate performance',
+        'boxcar': 'Boxcar (Rectangular) - No windowing, best frequency resolution but poor sidelobe suppression'
+    }

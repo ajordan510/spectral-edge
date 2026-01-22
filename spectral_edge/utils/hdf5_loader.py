@@ -225,15 +225,40 @@ class HDF5FlightDataLoader:
         data : ndarray
             Signal data
         """
-        # Get channel info
-        channel_info = self.get_channel_info(flight_key, channel_key)
-        if channel_info is None:
-            raise ValueError(f"Channel {channel_key} not found in {flight_key}")
-        
-        # Access datasets
-        channel_group = self.h5file[channel_info.full_path]
-        time_dataset = channel_group['time']
-        data_dataset = channel_group['data']
+        try:
+            # Validate HDF5 file is open
+            if self.h5file is None:
+                raise RuntimeError("HDF5 file is not open. Call load() first.")
+            
+            # Get channel info
+            channel_info = self.get_channel_info(flight_key, channel_key)
+            if channel_info is None:
+                available_flights = list(self.flights.keys())
+                available_channels = list(self.channels.get(flight_key, {}).keys()) if flight_key in self.channels else []
+                raise ValueError(
+                    f"Channel '{channel_key}' not found in flight '{flight_key}'.\n"
+                    f"Available flights: {available_flights}\n"
+                    f"Available channels in {flight_key}: {available_channels}"
+                )
+            
+            # Access datasets with error handling
+            try:
+                channel_group = self.h5file[channel_info.full_path]
+            except KeyError as e:
+                raise KeyError(f"Cannot access path '{channel_info.full_path}' in HDF5 file: {e}")
+            
+            # Verify required datasets exist
+            if 'time' not in channel_group:
+                raise ValueError(f"Missing 'time' dataset in {channel_info.full_path}")
+            if 'data' not in channel_group:
+                raise ValueError(f"Missing 'data' dataset in {channel_info.full_path}")
+            
+            time_dataset = channel_group['time']
+            data_dataset = channel_group['data']
+            
+        except Exception as e:
+            # Re-raise with context
+            raise RuntimeError(f"Error accessing HDF5 data: {str(e)}") from e
         
         # Determine indices for time range
         if start_time is not None or end_time is not None:

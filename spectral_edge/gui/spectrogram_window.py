@@ -4,13 +4,21 @@ Spectrogram GUI window for SpectralEdge.
 This module provides a window for displaying spectrograms (time-frequency
 representations) of signal data. Supports up to 4 channels simultaneously.
 
+Features:
+- SNR-based color scale control
+- Actual df display when efficient FFT is used
+- Custom axis limits with auto/manual toggle
+- Colorbar visibility toggle
+- Parameter and display panel separation
+- Vertical carousel navigation
+
 Author: SpectralEdge Development Team
 """
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
-    QGroupBox, QGridLayout, QRadioButton, QButtonGroup, QCheckBox
+    QGroupBox, QGridLayout, QRadioButton, QButtonGroup, QCheckBox, QScrollArea
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -22,28 +30,23 @@ import matplotlib.cm as cm
 from spectral_edge.core.psd import get_window_options
 
 
-class LogAxisItem(pg.AxisItem):
+class ColorBarItem(pg.GraphicsObject):
     """
-    Custom axis item for logarithmic scale with Hz labels.
+    Custom colorbar for spectrogram display.
     """
     
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-    
-    def tickStrings(self, values, scale, spacing):
-        """Override tick string generation to show only Hz values at powers of 10."""
-        strings = []
-        for v in values:
-            actual_value = 10 ** v
-            
-            # Only show values that are close to powers of 10
-            log_value = np.log10(actual_value)
-            if abs(log_value - round(log_value)) < 0.1:
-                strings.append(f"{int(round(actual_value))}")
-            else:
-                strings.append("")
+    def __init__(self, colormap, vmin, vmax, label="Power (dB)"):
+        super().__init__()
+        self.colormap = colormap
+        self.vmin = vmin
+        self.vmax = vmax
+        self.label = label
         
-        return strings
+    def paint(self, p, *args):
+        pass
+    
+    def boundingRect(self):
+        return pg.QtCore.QRectF(0, 0, 1, 1)
 
 
 class SpectrogramWindow(QMainWindow):
@@ -68,7 +71,7 @@ class SpectrogramWindow(QMainWindow):
             channels_data: List of (channel_name, signal_data, unit) tuples (up to 4)
             sample_rate: Sampling rate in Hz
             window_type: Window function type
-            df: Frequency resolution in Hz
+            df: Desired frequency resolution in Hz
             overlap_percent: Overlap percentage
             efficient_fft: Use efficient FFT size (power of 2)
             freq_min: Minimum frequency for display
@@ -83,7 +86,11 @@ class SpectrogramWindow(QMainWindow):
         self.sample_rate = sample_rate
         
         # Spectrogram data for each channel
-        self.spec_data = []  # List of (times, freqs, power) tuples
+        self.spec_data = []  # List of (times, freqs, power_db) tuples
+        
+        # Store actual parameters used
+        self.actual_df = None
+        self.actual_nperseg = None
         
         # Window properties
         if self.n_channels == 1:
@@ -92,10 +99,20 @@ class SpectrogramWindow(QMainWindow):
             channel_names = ", ".join([name for name, _, _ in self.channels_data])
             self.setWindowTitle(f"SpectralEdge - Spectrogram: {channel_names}")
         
-        self.setMinimumSize(1200, 800)
+        self.setMinimumSize(1400, 900)
         
         # Apply styling
         self._apply_styling()
+        
+        # Store initial parameters
+        self.initial_params = {
+            'window_type': window_type,
+            'df': df,
+            'overlap_percent': overlap_percent,
+            'efficient_fft': efficient_fft,
+            'freq_min': freq_min,
+            'freq_max': freq_max
+        }
         
         # Create UI
         self._create_ui(window_type, df, overlap_percent, efficient_fft, freq_min, freq_max)
@@ -153,6 +170,10 @@ class SpectrogramWindow(QMainWindow):
                 color: #e0e0e0;
                 padding: 5px;
             }
+            QScrollArea {
+                border: none;
+                background-color: #1a1f2e;
+            }
         """)
     
     def _create_ui(self, window_type, df, overlap_percent, efficient_fft, freq_min, freq_max):
@@ -161,14 +182,50 @@ class SpectrogramWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
         
-        # Left panel - spectrograms
+        # Left panel - spectrograms (larger)
         spec_panel = self._create_spectrogram_panel()
         main_layout.addWidget(spec_panel, stretch=4)
         
-        # Right panel - controls
-        control_panel = self._create_control_panel(window_type, df, overlap_percent, 
-                                                   efficient_fft, freq_min, freq_max)
-        main_layout.addWidget(control_panel, stretch=1)
+        # Right panel - controls (scrollable)
+        control_scroll = QScrollArea()
+        control_scroll.setWidgetResizable(True)
+        control_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        control_widget = QWidget()
+        control_layout = QVBoxLayout(control_widget)
+        
+        # Parameters group
+        params_group = self._create_parameters_group(window_type, df, overlap_percent, efficient_fft)
+        control_layout.addWidget(params_group)
+        
+        # Display options group
+        display_group = self._create_display_options_group(freq_min, freq_max)
+        control_layout.addWidget(display_group)
+        
+        # Axis limits group
+        axis_group = self._create_axis_limits_group()
+        control_layout.addWidget(axis_group)
+        
+        # Recalculate button
+        recalc_button = QPushButton("Recalculate")
+        recalc_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2563eb;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 10px;
+            }
+            QPushButton:hover {
+                background-color: #3b82f6;
+            }
+        """)
+        recalc_button.clicked.connect(self._calculate_spectrograms)
+        control_layout.addWidget(recalc_button)
+        
+        control_layout.addStretch()
+        
+        control_scroll.setWidget(control_widget)
+        main_layout.addWidget(control_scroll, stretch=1)
     
     def _create_spectrogram_panel(self):
         """Create the spectrogram display panel with adaptive layout."""
@@ -179,32 +236,46 @@ class SpectrogramWindow(QMainWindow):
             # Single plot
             layout = QVBoxLayout(panel)
             self.plot_widgets = [self._create_plot_widget(0)]
+            self.image_items = [None]
+            self.colorbars = [None]
             layout.addWidget(self.plot_widgets[0])
         elif self.n_channels == 2:
             # Vertical stack (2 rows, 1 column)
             layout = QVBoxLayout(panel)
             self.plot_widgets = []
+            self.image_items = []
+            self.colorbars = []
             for i in range(2):
                 widget = self._create_plot_widget(i)
                 self.plot_widgets.append(widget)
+                self.image_items.append(None)
+                self.colorbars.append(None)
                 layout.addWidget(widget)
         elif self.n_channels == 3:
             # 2x2 grid with empty bottom-right
             layout = QGridLayout(panel)
             self.plot_widgets = []
+            self.image_items = []
+            self.colorbars = []
             positions = [(0, 0), (0, 1), (1, 0)]
             for i, (row, col) in enumerate(positions):
                 widget = self._create_plot_widget(i)
                 self.plot_widgets.append(widget)
+                self.image_items.append(None)
+                self.colorbars.append(None)
                 layout.addWidget(widget, row, col)
         else:  # 4 channels
             # 2x2 grid
             layout = QGridLayout(panel)
             self.plot_widgets = []
+            self.image_items = []
+            self.colorbars = []
             positions = [(0, 0), (0, 1), (1, 0), (1, 1)]
             for i, (row, col) in enumerate(positions):
                 widget = self._create_plot_widget(i)
                 self.plot_widgets.append(widget)
+                self.image_items.append(None)
+                self.colorbars.append(None)
                 layout.addWidget(widget, row, col)
         
         return panel
@@ -225,32 +296,6 @@ class SpectrogramWindow(QMainWindow):
         
         return plot_widget
     
-    def _create_control_panel(self, window_type, df, overlap_percent, efficient_fft, freq_min, freq_max):
-        """Create the control panel."""
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        
-        # Parameters group
-        params_group = self._create_parameters_group(window_type, df, overlap_percent, efficient_fft)
-        layout.addWidget(params_group)
-        
-        # Frequency range group
-        freq_group = self._create_frequency_range_group(freq_min, freq_max)
-        layout.addWidget(freq_group)
-        
-        # Display options group
-        display_group = self._create_display_options_group()
-        layout.addWidget(display_group)
-        
-        # Recalculate button
-        recalc_button = QPushButton("Recalculate")
-        recalc_button.clicked.connect(self._calculate_spectrograms)
-        layout.addWidget(recalc_button)
-        
-        layout.addStretch()
-        
-        return panel
-    
     def _create_parameters_group(self, window_type, df, overlap_percent, efficient_fft):
         """Create parameters group."""
         group = QGroupBox("Parameters")
@@ -268,13 +313,20 @@ class SpectrogramWindow(QMainWindow):
         layout.addWidget(self.window_combo, row, 1)
         row += 1
         
-        # Frequency resolution
-        layout.addWidget(QLabel("Δf (Hz):"), row, 0)
+        # Desired frequency resolution
+        layout.addWidget(QLabel("Desired Δf (Hz):"), row, 0)
         self.df_spin = QDoubleSpinBox()
         self.df_spin.setRange(0.1, 100)
         self.df_spin.setValue(df)
         self.df_spin.setDecimals(1)
         layout.addWidget(self.df_spin, row, 1)
+        row += 1
+        
+        # Actual df display (read-only)
+        layout.addWidget(QLabel("Actual Δf (Hz):"), row, 0)
+        self.actual_df_label = QLabel("--")
+        self.actual_df_label.setStyleSheet("color: #60a5fa; font-weight: bold;")
+        layout.addWidget(self.actual_df_label, row, 1)
         row += 1
         
         # Overlap
@@ -286,7 +338,7 @@ class SpectrogramWindow(QMainWindow):
         row += 1
         
         # Efficient FFT
-        self.efficient_fft_checkbox = QCheckBox("Efficient FFT")
+        self.efficient_fft_checkbox = QCheckBox("Efficient FFT (power of 2)")
         self.efficient_fft_checkbox.setChecked(efficient_fft)
         layout.addWidget(self.efficient_fft_checkbox, row, 0, 1, 2)
         row += 1
@@ -294,38 +346,38 @@ class SpectrogramWindow(QMainWindow):
         group.setLayout(layout)
         return group
     
-    def _create_frequency_range_group(self, freq_min, freq_max):
-        """Create frequency range group."""
-        group = QGroupBox("Frequency Range")
+    def _create_display_options_group(self, freq_min, freq_max):
+        """Create display options group."""
+        group = QGroupBox("Display Options")
         layout = QGridLayout()
         
-        # Min frequency
-        layout.addWidget(QLabel("Min (Hz):"), 0, 0)
+        row = 0
+        
+        # Frequency range
+        layout.addWidget(QLabel("Freq Range:"), row, 0, 1, 2)
+        row += 1
+        
+        layout.addWidget(QLabel("Min (Hz):"), row, 0)
         self.freq_min_spin = QDoubleSpinBox()
         self.freq_min_spin.setRange(0.1, 100000)
         self.freq_min_spin.setValue(freq_min)
         self.freq_min_spin.setDecimals(1)
-        layout.addWidget(self.freq_min_spin, 0, 1)
+        self.freq_min_spin.valueChanged.connect(self._update_plots)
+        layout.addWidget(self.freq_min_spin, row, 1)
+        row += 1
         
-        # Max frequency
-        layout.addWidget(QLabel("Max (Hz):"), 1, 0)
+        layout.addWidget(QLabel("Max (Hz):"), row, 0)
         self.freq_max_spin = QDoubleSpinBox()
         self.freq_max_spin.setRange(1, 100000)
         self.freq_max_spin.setValue(freq_max)
         self.freq_max_spin.setDecimals(1)
-        layout.addWidget(self.freq_max_spin, 1, 1)
-        
-        group.setLayout(layout)
-        return group
-    
-    def _create_display_options_group(self):
-        """Create display options group."""
-        group = QGroupBox("Display")
-        layout = QVBoxLayout()
+        self.freq_max_spin.valueChanged.connect(self._update_plots)
+        layout.addWidget(self.freq_max_spin, row, 1)
+        row += 1
         
         # Frequency scale
+        layout.addWidget(QLabel("Y-Scale:"), row, 0)
         scale_layout = QHBoxLayout()
-        scale_layout.addWidget(QLabel("Y-Scale:"))
         self.scale_group = QButtonGroup()
         
         self.linear_radio = QRadioButton("Linear")
@@ -335,22 +387,114 @@ class SpectrogramWindow(QMainWindow):
         self.scale_group.addButton(self.linear_radio)
         self.scale_group.addButton(self.log_radio)
         
+        self.linear_radio.toggled.connect(self._update_plots)
+        
         scale_layout.addWidget(self.linear_radio)
         scale_layout.addWidget(self.log_radio)
-        layout.addLayout(scale_layout)
+        layout.addLayout(scale_layout, row, 1)
+        row += 1
         
         # Color map
-        cmap_layout = QHBoxLayout()
-        cmap_layout.addWidget(QLabel("Colormap:"))
+        layout.addWidget(QLabel("Colormap:"), row, 0)
         self.colormap_combo = QComboBox()
-        self.colormap_combo.addItems(['viridis', 'plasma', 'inferno', 'magma', 'jet', 'hot'])
+        self.colormap_combo.addItems(['viridis', 'plasma', 'inferno', 'magma', 'jet', 'hot', 'cool'])
         self.colormap_combo.setCurrentText('viridis')
-        cmap_layout.addWidget(self.colormap_combo)
-        layout.addLayout(cmap_layout)
+        self.colormap_combo.currentTextChanged.connect(self._update_plots)
+        layout.addWidget(self.colormap_combo, row, 1)
+        row += 1
+        
+        # SNR (dB) for color scale
+        layout.addWidget(QLabel("SNR (dB):"), row, 0)
+        self.snr_spin = QSpinBox()
+        self.snr_spin.setRange(10, 100)
+        self.snr_spin.setValue(60)
+        self.snr_spin.setSingleStep(5)
+        self.snr_spin.setToolTip("Signal-to-noise ratio for color scale dynamic range")
+        self.snr_spin.valueChanged.connect(self._update_plots)
+        layout.addWidget(self.snr_spin, row, 1)
+        row += 1
+        
+        # Show colorbar
+        self.show_colorbar_checkbox = QCheckBox("Show Colorbar")
+        self.show_colorbar_checkbox.setChecked(True)
+        self.show_colorbar_checkbox.toggled.connect(self._update_plots)
+        layout.addWidget(self.show_colorbar_checkbox, row, 0, 1, 2)
+        row += 1
         
         group.setLayout(layout)
         return group
     
+    def _create_axis_limits_group(self):
+        """Create axis limits control group."""
+        group = QGroupBox("Axis Limits")
+        layout = QGridLayout()
+        
+        row = 0
+        
+        # Auto/Manual toggle
+        self.auto_limits_checkbox = QCheckBox("Auto Limits")
+        self.auto_limits_checkbox.setChecked(True)
+        self.auto_limits_checkbox.toggled.connect(self._on_auto_limits_toggled)
+        layout.addWidget(self.auto_limits_checkbox, row, 0, 1, 2)
+        row += 1
+        
+        # Time limits
+        layout.addWidget(QLabel("Time (s):"), row, 0, 1, 2)
+        row += 1
+        
+        layout.addWidget(QLabel("Min:"), row, 0)
+        self.time_min_spin = QDoubleSpinBox()
+        self.time_min_spin.setRange(0, 1e6)
+        self.time_min_spin.setValue(0)
+        self.time_min_spin.setDecimals(3)
+        self.time_min_spin.setEnabled(False)
+        layout.addWidget(self.time_min_spin, row, 1)
+        row += 1
+        
+        layout.addWidget(QLabel("Max:"), row, 0)
+        self.time_max_spin = QDoubleSpinBox()
+        self.time_max_spin.setRange(0, 1e6)
+        self.time_max_spin.setValue(100)
+        self.time_max_spin.setDecimals(3)
+        self.time_max_spin.setEnabled(False)
+        layout.addWidget(self.time_max_spin, row, 1)
+        row += 1
+        
+        # Apply limits button
+        self.apply_limits_button = QPushButton("Apply Limits")
+        self.apply_limits_button.setEnabled(False)
+        self.apply_limits_button.clicked.connect(self._apply_custom_limits)
+        layout.addWidget(self.apply_limits_button, row, 0, 1, 2)
+        row += 1
+        
+        group.setLayout(layout)
+        return group
+    
+    def _on_auto_limits_toggled(self, checked):
+        """Handle auto limits checkbox toggle."""
+        # Enable/disable manual limit controls
+        self.time_min_spin.setEnabled(not checked)
+        self.time_max_spin.setEnabled(not checked)
+        self.apply_limits_button.setEnabled(not checked)
+        
+        if checked:
+            # Revert to auto limits
+            self._update_plots()
+    
+    def _apply_custom_limits(self):
+        """Apply custom axis limits to all plots."""
+        time_min = self.time_min_spin.value()
+        time_max = self.time_max_spin.value()
+        
+        if time_min >= time_max:
+            from spectral_edge.utils.message_box import show_warning
+            show_warning(self, "Invalid Limits", "Time minimum must be less than maximum.")
+            return
+        
+        # Apply to all plots
+        for plot_widget in self.plot_widgets:
+            plot_widget.setXRange(time_min, time_max, padding=0)
+        
     def _calculate_spectrograms(self):
         """Calculate spectrograms for all channels."""
         # Get parameters
@@ -358,8 +502,6 @@ class SpectrogramWindow(QMainWindow):
         df = self.df_spin.value()
         overlap_percent = self.overlap_spin.value()
         efficient_fft = self.efficient_fft_checkbox.isChecked()
-        freq_min = self.freq_min_spin.value()
-        freq_max = self.freq_max_spin.value()
         
         # Calculate nperseg from df
         nperseg = int(self.sample_rate / df)
@@ -367,6 +509,15 @@ class SpectrogramWindow(QMainWindow):
         # Use efficient FFT size if requested
         if efficient_fft:
             nperseg = 2 ** int(np.ceil(np.log2(nperseg)))
+        
+        # Store actual nperseg
+        self.actual_nperseg = nperseg
+        
+        # Calculate actual df
+        self.actual_df = self.sample_rate / nperseg
+        
+        # Update actual df display
+        self.actual_df_label.setText(f"{self.actual_df:.3f}")
         
         # Calculate noverlap
         noverlap = int(nperseg * overlap_percent / 100)
@@ -397,10 +548,15 @@ class SpectrogramWindow(QMainWindow):
     
     def _update_plots(self):
         """Update all spectrogram plots."""
+        if not self.spec_data:
+            return
+        
         freq_min = self.freq_min_spin.value()
         freq_max = self.freq_max_spin.value()
         colormap_name = self.colormap_combo.currentText()
         use_log_scale = self.log_radio.isChecked()
+        snr_db = self.snr_spin.value()
+        show_colorbar = self.show_colorbar_checkbox.isChecked()
         
         # Get colormap
         cmap = cm.get_cmap(colormap_name)
@@ -420,12 +576,16 @@ class SpectrogramWindow(QMainWindow):
             if len(freqs_plot) == 0:
                 continue
             
+            # Calculate color scale based on SNR
+            max_power = np.max(Sxx_plot)
+            min_power = max_power - snr_db
+            
             # Create image item
             img = pg.ImageItem()
             plot_widget.addItem(img)
             
-            # Set data
-            img.setImage(Sxx_plot, autoLevels=True)
+            # Set data with SNR-based levels
+            img.setImage(Sxx_plot, autoLevels=False, levels=(min_power, max_power))
             
             # Set position and scale
             if use_log_scale:
@@ -437,7 +597,6 @@ class SpectrogramWindow(QMainWindow):
                     times[-1] - times[0],
                     log_freqs[-1] - log_freqs[0]
                 ))
-                # Use custom log axis
                 plot_widget.setLabel('left', 'Frequency (Hz, log)', color='#e0e0e0', size='11pt')
             else:
                 img.setRect(pg.QtCore.QRectF(
@@ -457,8 +616,29 @@ class SpectrogramWindow(QMainWindow):
             lut = np.array(colors, dtype=np.ubyte)
             img.setLookupTable(lut)
             
+            # Store image item
+            self.image_items[i] = img
+            
+            # Add colorbar if requested
+            if show_colorbar:
+                # Create colorbar using GradientLegend
+                colorbar = pg.GradientLegend((20, 150), (-10, -10))
+                colorbar.setGradient(img.getHistogram()[1])
+                colorbar.setLabels({str(int(min_power)): 0, str(int(max_power)): 1})
+                plot_widget.addItem(colorbar)
+                self.colorbars[i] = colorbar
+            
             # Update title
             if unit:
-                plot_widget.setTitle(f"{channel_name} ({unit})", color='#e0e0e0', size='12pt')
+                plot_widget.setTitle(f"{channel_name} ({unit}) | SNR: {snr_db} dB", 
+                                    color='#e0e0e0', size='12pt')
             else:
-                plot_widget.setTitle(f"{channel_name}", color='#e0e0e0', size='12pt')
+                plot_widget.setTitle(f"{channel_name} | SNR: {snr_db} dB", 
+                                    color='#e0e0e0', size='12pt')
+            
+            # Set time limits if auto
+            if self.auto_limits_checkbox.isChecked():
+                plot_widget.setXRange(times[0], times[-1], padding=0.02)
+                # Update spinboxes for reference
+                self.time_min_spin.setValue(times[0])
+                self.time_max_spin.setValue(times[-1])

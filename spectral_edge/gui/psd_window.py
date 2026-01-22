@@ -1528,19 +1528,29 @@ class PSDAnalysisWindow(QMainWindow):
             List of (flight_key, channel_key, channel_info) tuples
         """
         try:
+            print("\n=== HDF5 DATA LOADING DEBUG ===")
+            print(f"Selected items: {len(selected_items)}")
+            
             if not selected_items:
+                print("No items selected")
                 return
             
             # For now, load only the first selected channel
             # Future enhancement: support multiple channels from different flights
             flight_key, channel_key, channel_info = selected_items[0]
+            print(f"Flight key: {flight_key}")
+            print(f"Channel key: {channel_key}")
+            print(f"Channel info: {channel_info}")
+            print(f"HDF5 loader exists: {self.hdf5_loader is not None}")
             
             # Load data with decimation for display
+            print("Calling load_channel_data...")
             time, signal = self.hdf5_loader.load_channel_data(
                 flight_key,
                 channel_key,
                 decimate_factor=None  # Auto-decimate to ~10k points
             )
+            print(f"Data loaded: time shape={time.shape}, signal shape={signal.shape}")
             
             # Store data
             self.signal_data = signal.reshape(1, -1)  # Make 2D (1 channel)
@@ -1601,7 +1611,14 @@ class PSDAnalysisWindow(QMainWindow):
             )
             
         except Exception as e:
-            QMessageBox.critical(self, "Load Error", f"Failed to load HDF5 data: {e}")
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"\n=== ERROR IN HDF5 LOADING ===")
+            print(error_details)
+            print(f"Error type: {type(e).__name__}")
+            print(f"Error message: {str(e)}")
+            QMessageBox.critical(self, "Load Error", 
+                f"Failed to load HDF5 data: {e}\n\nSee console for full traceback.")
     
     def _on_maximax_toggled(self):
         """Handle maximax checkbox toggle."""

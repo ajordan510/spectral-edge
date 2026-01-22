@@ -1554,7 +1554,7 @@ class PSDAnalysisWindow(QMainWindow):
             
             # Store data
             self.signal_data = signal.reshape(1, -1)  # Make 2D (1 channel)
-            self.time_vector = time
+            self.time_data = time  # Fixed: use time_data for consistency with CSV loading
             self.sample_rate = channel_info.sample_rate
             self.channel_names = [channel_key]
             self.channel_units = [channel_info.units]

@@ -977,11 +977,15 @@ class PSDAnalysisWindow(QMainWindow):
                     )
                 else:
                     # Use traditional averaged PSD
+                    # Calculate nperseg from df for overlap calculation
+                    nperseg = int(self.sample_rate / df)
+                    noverlap = int(nperseg * overlap_percent / 100.0)
+                    
                     frequencies, psd = calculate_psd_welch(
                         signal,
                         self.sample_rate,
                         df=df,
-                        overlap_percent=overlap_percent,
+                        noverlap=noverlap,
                         window=window
                     )
                 
@@ -1405,11 +1409,15 @@ class PSDAnalysisWindow(QMainWindow):
                         signal_segment = self.signal_data_full[start_idx:end_idx, channel_idx]
                     
                     # Calculate PSD using updated function signature
+                    # Calculate nperseg from df for overlap calculation
+                    nperseg = int(self.sample_rate / df)
+                    noverlap = int(nperseg * overlap_percent / 100.0)
+                    
                     frequencies, psd = calculate_psd_welch(
                         signal_segment,
                         self.sample_rate,
                         df=df,
-                        overlap_percent=overlap_percent,
+                        noverlap=noverlap,
                         window=window
                     )
                     
@@ -1544,11 +1552,40 @@ class PSDAnalysisWindow(QMainWindow):
             show_warning(self, "Invalid Limits", "Y-axis minimum must be less than maximum.")
             return
         
+        # Validate positive values for log scale
+        if x_min <= 0 or x_max <= 0:
+            show_warning(self, "Invalid Limits", "X-axis limits must be positive for log scale.")
+            return
+        
+        if y_min <= 0 or y_max <= 0:
+            show_warning(self, "Invalid Limits", "Y-axis limits must be positive for log scale.")
+            return
+        
         # Set X-axis range (log scale)
-        self.plot_widget.setXRange(np.log10(x_min), np.log10(x_max))
+        try:
+            log_x_min = np.log10(x_min)
+            log_x_max = np.log10(x_max)
+            if np.isfinite(log_x_min) and np.isfinite(log_x_max):
+                self.plot_widget.setXRange(log_x_min, log_x_max)
+            else:
+                show_warning(self, "Invalid Range", "X-axis range resulted in invalid log values.")
+                return
+        except Exception as e:
+            show_warning(self, "Error", f"Failed to set X-axis range: {e}")
+            return
         
         # Set Y-axis range (log scale)
-        self.plot_widget.setYRange(np.log10(y_min), np.log10(y_max))
+        try:
+            log_y_min = np.log10(y_min)
+            log_y_max = np.log10(y_max)
+            if np.isfinite(log_y_min) and np.isfinite(log_y_max):
+                self.plot_widget.setYRange(log_y_min, log_y_max)
+            else:
+                show_warning(self, "Invalid Range", "Y-axis range resulted in invalid log values.")
+                return
+        except Exception as e:
+            show_warning(self, "Error", f"Failed to set Y-axis range: {e}")
+            return
         
         # Update frequency ticks
         self._set_frequency_ticks()

@@ -364,7 +364,8 @@ class PSDAnalysisWindow(QMainWindow):
         # Scroll area for channel checkboxes
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMaximumHeight(150)
+        scroll.setMinimumHeight(80)  # Minimum height for at least 2-3 channels
+        scroll.setMaximumHeight(250)  # Increased from 150 to 250 for better visibility
         
         self.channel_widget = QWidget()
         self.channel_widget.setObjectName("channelWidget")  # For styling
@@ -1535,37 +1536,65 @@ class PSDAnalysisWindow(QMainWindow):
                 print("No items selected")
                 return
             
-            # For now, load only the first selected channel
-            # Future enhancement: support multiple channels from different flights
-            flight_key, channel_key, channel_info = selected_items[0]
-            print(f"Flight key: {flight_key}")
-            print(f"Channel key: {channel_key}")
-            print(f"Channel info: {channel_info}")
-            print(f"HDF5 loader exists: {self.hdf5_loader is not None}")
+            # Load all selected channels
+            print(f"Loading {len(selected_items)} channel(s)...")
             
-            # Load data with decimation for display
-            print("Calling load_channel_data...")
-            time, signal = self.hdf5_loader.load_channel_data(
-                flight_key,
-                channel_key,
-                decimate_factor=None  # Auto-decimate to ~10k points
-            )
-            print(f"Data loaded: time shape={time.shape}, signal shape={signal.shape}")
+            all_signals = []
+            all_channel_names = []
+            all_channel_units = []
+            time_data = None
+            sample_rate = None
+            flight_info = []
             
-            # Store data
-            self.signal_data = signal.reshape(1, -1)  # Make 2D (1 channel)
-            self.time_data = time  # Fixed: use time_data for consistency with CSV loading
-            self.sample_rate = channel_info.sample_rate
-            self.channel_names = [channel_key]
-            self.channel_units = [channel_info.units]
-            self.current_file = f"{flight_key}/{channel_key}"
+            for idx, (flight_key, channel_key, channel_info) in enumerate(selected_items):
+                print(f"\nChannel {idx+1}/{len(selected_items)}:")
+                print(f"  Flight key: {flight_key}")
+                print(f"  Channel key: {channel_key}")
+                print(f"  Sample rate: {channel_info.sample_rate} Hz")
+                
+                # Load data with decimation for display
+                time, signal = self.hdf5_loader.load_channel_data(
+                    flight_key,
+                    channel_key,
+                    decimate_factor=None  # Auto-decimate to ~10k points
+                )
+                print(f"  Data loaded: time shape={time.shape}, signal shape={signal.shape}")
+                
+                # Store first channel's time and sample rate as reference
+                if time_data is None:
+                    time_data = time
+                    sample_rate = channel_info.sample_rate
+                elif channel_info.sample_rate != sample_rate:
+                    # Warn if sample rates differ
+                    print(f"  WARNING: Sample rate mismatch! Expected {sample_rate}, got {channel_info.sample_rate}")
+                
+                all_signals.append(signal)
+                all_channel_names.append(channel_key)
+                all_channel_units.append(channel_info.units)
+                flight_info.append(flight_key)
+            
+            # Stack signals into 2D array (channels x samples)
+            self.signal_data = np.vstack(all_signals)
+            self.time_data = time_data
+            self.sample_rate = sample_rate
+            self.channel_names = all_channel_names
+            self.channel_units = all_channel_units
+            
+            # Create file label
+            if len(set(flight_info)) == 1:
+                self.current_file = f"{flight_info[0]} ({len(selected_items)} channels)"
+            else:
+                self.current_file = f"Multiple flights ({len(selected_items)} channels)"
+            
+            print(f"\nFinal data shape: {self.signal_data.shape}")
+            print(f"Time data shape: {self.time_data.shape}")
             
             # Update UI
             self.file_label.setText(f"Loaded: {self.current_file}")
             self.info_label.setText(
                 f"Sample Rate: {self.sample_rate:.0f} Hz | "
-                f"Duration: {time[-1]:.2f} s | "
-                f"Channels: 1"
+                f"Duration: {self.time_data[-1]:.2f} s | "
+                f"Channels: {len(self.channel_names)}"
             )
             
             # Show channel selection group
@@ -1576,12 +1605,14 @@ class PSDAnalysisWindow(QMainWindow):
                 checkbox.deleteLater()
             self.channel_checkboxes.clear()
             
-            # Create checkbox for this channel
-            checkbox = QCheckBox(channel_info.get_display_name())
-            checkbox.setChecked(True)
-            checkbox.stateChanged.connect(self._plot_time_history)
-            self.channel_layout.addWidget(checkbox)
-            self.channel_checkboxes.append(checkbox)
+            # Create checkboxes for all channels
+            for i, (name, unit) in enumerate(zip(self.channel_names, self.channel_units)):
+                display_name = f"{name} ({unit})" if unit else name
+                checkbox = QCheckBox(display_name)
+                checkbox.setChecked(True)
+                checkbox.stateChanged.connect(self._plot_time_history)
+                self.channel_layout.addWidget(checkbox)
+                self.channel_checkboxes.append(checkbox)
             
             # Enable buttons
             self.calc_button.setEnabled(True)
@@ -1603,10 +1634,10 @@ class PSDAnalysisWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Data Loaded",
-                f"Successfully loaded channel: {channel_key}\n"
-                f"Flight: {flight_key}\n"
+                f"Successfully loaded {len(self.channel_names)} channel(s)\n"
+                f"Channels: {', '.join(self.channel_names)}\n"
                 f"Sample Rate: {self.sample_rate:.0f} Hz\n"
-                f"Duration: {time[-1]:.2f} seconds\n\n"
+                f"Duration: {self.time_data[-1]:.2f} seconds\n\n"
                 f"Note: Data was decimated for display. Full resolution will be used for PSD calculation."
             )
             

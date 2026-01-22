@@ -11,7 +11,7 @@ Author: SpectralEdge Development Team
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QFileDialog,
-    QGroupBox, QGridLayout, QMessageBox, QCheckBox, QScrollArea, QTabWidget
+    QGroupBox, QGridLayout, QMessageBox, QCheckBox, QScrollArea, QTabWidget, QLineEdit
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -553,21 +553,19 @@ class PSDAnalysisWindow(QMainWindow):
         row += 1
         
         layout.addWidget(QLabel("Min:"), row, 0)
-        self.x_min_spin = QDoubleSpinBox()
-        self.x_min_spin.setRange(0.001, 100000)
-        self.x_min_spin.setValue(10.0)  # Default 10 Hz
-        self.x_min_spin.setDecimals(3)
-        self.x_min_spin.setSingleStep(10)
-        layout.addWidget(self.x_min_spin, row, 1)
+        self.x_min_edit = QLineEdit()
+        self.x_min_edit.setText("10.0")
+        self.x_min_edit.setPlaceholderText("e.g., 10 or 1e1")
+        self.x_min_edit.setToolTip("Enter frequency in Hz (standard or scientific notation)")
+        layout.addWidget(self.x_min_edit, row, 1)
         row += 1
         
         layout.addWidget(QLabel("Max:"), row, 0)
-        self.x_max_spin = QDoubleSpinBox()
-        self.x_max_spin.setRange(0.001, 100000)
-        self.x_max_spin.setValue(3000.0)  # Default 3000 Hz
-        self.x_max_spin.setDecimals(3)
-        self.x_max_spin.setSingleStep(100)
-        layout.addWidget(self.x_max_spin, row, 1)
+        self.x_max_edit = QLineEdit()
+        self.x_max_edit.setText("3000.0")
+        self.x_max_edit.setPlaceholderText("e.g., 3000 or 3e3")
+        self.x_max_edit.setToolTip("Enter frequency in Hz (standard or scientific notation)")
+        layout.addWidget(self.x_max_edit, row, 1)
         row += 1
         
         # Y-axis limits (PSD)
@@ -575,23 +573,19 @@ class PSDAnalysisWindow(QMainWindow):
         row += 1
         
         layout.addWidget(QLabel("Min:"), row, 0)
-        self.y_min_spin = QDoubleSpinBox()
-        self.y_min_spin.setRange(1e-20, 1e10)
-        self.y_min_spin.setValue(1e-7)  # Default 1E-7
-        self.y_min_spin.setDecimals(10)
-        self.y_min_spin.setSingleStep(1e-7)
-        # Use scientific notation for display
-        self.y_min_spin.setSpecialValueText("1e-7")
-        layout.addWidget(self.y_min_spin, row, 1)
+        self.y_min_edit = QLineEdit()
+        self.y_min_edit.setText("1e-7")
+        self.y_min_edit.setPlaceholderText("e.g., 1e-7 or 0.0000001")
+        self.y_min_edit.setToolTip("Enter PSD value (standard or scientific notation)")
+        layout.addWidget(self.y_min_edit, row, 1)
         row += 1
         
         layout.addWidget(QLabel("Max:"), row, 0)
-        self.y_max_spin = QDoubleSpinBox()
-        self.y_max_spin.setRange(1e-20, 1e10)
-        self.y_max_spin.setValue(10.0)  # Default 10
-        self.y_max_spin.setDecimals(10)
-        self.y_max_spin.setSingleStep(1.0)
-        layout.addWidget(self.y_max_spin, row, 1)
+        self.y_max_edit = QLineEdit()
+        self.y_max_edit.setText("10.0")
+        self.y_max_edit.setPlaceholderText("e.g., 10 or 1e1")
+        self.y_max_edit.setToolTip("Enter PSD value (standard or scientific notation)")
+        layout.addWidget(self.y_max_edit, row, 1)
         row += 1
         
         # Buttons
@@ -1537,11 +1531,16 @@ class PSDAnalysisWindow(QMainWindow):
     
     def _apply_axis_limits(self):
         """Apply user-specified axis limits to the PSD plot."""
-        # Get limits from spinboxes
-        x_min = self.x_min_spin.value()
-        x_max = self.x_max_spin.value()
-        y_min = self.y_min_spin.value()
-        y_max = self.y_max_spin.value()
+        # Get limits from text fields and parse
+        try:
+            x_min = float(self.x_min_edit.text())
+            x_max = float(self.x_max_edit.text())
+            y_min = float(self.y_min_edit.text())
+            y_max = float(self.y_max_edit.text())
+        except ValueError as e:
+            show_warning(self, "Invalid Input", 
+                        f"Please enter valid numbers (standard or scientific notation).\nError: {e}")
+            return
         
         # Validate limits
         if x_min >= x_max:
@@ -1637,9 +1636,9 @@ class PSDAnalysisWindow(QMainWindow):
             y_min_auto = 10 ** (np.log10(psd_min) - margin)
             y_max_auto = 10 ** (np.log10(psd_max) + margin)
             
-            # Update spinboxes
-            self.y_min_spin.setValue(y_min_auto)
-            self.y_max_spin.setValue(y_max_auto)
+            # Update text fields
+            self.y_min_edit.setText(f"{y_min_auto:.2e}")
+            self.y_max_edit.setText(f"{y_max_auto:.2e}")
             
             # Apply the new limits
             self._apply_axis_limits()

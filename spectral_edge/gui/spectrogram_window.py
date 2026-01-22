@@ -443,21 +443,21 @@ class SpectrogramWindow(QMainWindow):
         row += 1
         
         layout.addWidget(QLabel("Min:"), row, 0)
-        self.time_min_spin = QDoubleSpinBox()
-        self.time_min_spin.setRange(0, 1e6)
-        self.time_min_spin.setValue(0)
-        self.time_min_spin.setDecimals(3)
-        self.time_min_spin.setEnabled(False)
-        layout.addWidget(self.time_min_spin, row, 1)
+        self.time_min_edit = QLineEdit()
+        self.time_min_edit.setText("0.0")
+        self.time_min_edit.setPlaceholderText("e.g., 0 or 0.0")
+        self.time_min_edit.setToolTip("Enter time in seconds (standard or scientific notation)")
+        self.time_min_edit.setEnabled(False)
+        layout.addWidget(self.time_min_edit, row, 1)
         row += 1
         
         layout.addWidget(QLabel("Max:"), row, 0)
-        self.time_max_spin = QDoubleSpinBox()
-        self.time_max_spin.setRange(0, 1e6)
-        self.time_max_spin.setValue(100)
-        self.time_max_spin.setDecimals(3)
-        self.time_max_spin.setEnabled(False)
-        layout.addWidget(self.time_max_spin, row, 1)
+        self.time_max_edit = QLineEdit()
+        self.time_max_edit.setText("100.0")
+        self.time_max_edit.setPlaceholderText("e.g., 100 or 1e2")
+        self.time_max_edit.setToolTip("Enter time in seconds (standard or scientific notation)")
+        self.time_max_edit.setEnabled(False)
+        layout.addWidget(self.time_max_edit, row, 1)
         row += 1
         
         # Apply limits button
@@ -473,8 +473,8 @@ class SpectrogramWindow(QMainWindow):
     def _on_auto_limits_toggled(self, checked):
         """Handle auto limits checkbox toggle."""
         # Enable/disable manual limit controls
-        self.time_min_spin.setEnabled(not checked)
-        self.time_max_spin.setEnabled(not checked)
+        self.time_min_edit.setEnabled(not checked)
+        self.time_max_edit.setEnabled(not checked)
         self.apply_limits_button.setEnabled(not checked)
         
         if checked:
@@ -483,8 +483,15 @@ class SpectrogramWindow(QMainWindow):
     
     def _apply_custom_limits(self):
         """Apply custom axis limits to all plots."""
-        time_min = self.time_min_spin.value()
-        time_max = self.time_max_spin.value()
+        # Parse time limits from text fields
+        try:
+            time_min = float(self.time_min_edit.text())
+            time_max = float(self.time_max_edit.text())
+        except ValueError as e:
+            from spectral_edge.utils.message_box import show_warning
+            show_warning(self, "Invalid Input", 
+                        f"Please enter valid numbers (standard or scientific notation).\nError: {e}")
+            return
         
         if time_min >= time_max:
             from spectral_edge.utils.message_box import show_warning
@@ -639,6 +646,6 @@ class SpectrogramWindow(QMainWindow):
             # Set time limits if auto
             if self.auto_limits_checkbox.isChecked():
                 plot_widget.setXRange(times[0], times[-1], padding=0.02)
-                # Update spinboxes for reference
-                self.time_min_spin.setValue(times[0])
-                self.time_max_spin.setValue(times[-1])
+                # Update text fields for reference
+                self.time_min_edit.setText(f"{times[0]:.3f}")
+                self.time_max_edit.setText(f"{times[-1]:.3f}")

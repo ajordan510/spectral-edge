@@ -213,7 +213,7 @@ class EventManagerWindow(QMainWindow):
         table.setColumnWidth(4, 100)
         
         # Enable editing
-        table.setEditTriggers(QTableWidget.EditTrigger.DoubleClick)
+        table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked)
         
         # Connect cell changed signal
         table.cellChanged.connect(self._on_cell_changed)

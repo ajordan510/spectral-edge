@@ -256,8 +256,62 @@ def diagnose_channel(channels_group, channel_key, flight_key):
     
     # Check data type
     dtype = channel.dtype
+    
+    # Check for problematic data types
+    dtype_str = str(dtype)
+    is_problematic = False
+    problem_description = None
+    
+    # Check for object dtype (often strings or mixed types)
+    if dtype == np.object_:
+        is_problematic = True
+        problem_description = "Object dtype (likely strings or mixed types)"
+    
+    # Check for structured/compound dtypes
+    elif dtype.names is not None:
+        is_problematic = True
+        problem_description = f"Structured dtype with fields: {dtype.names}"
+    
+    # Check for string dtypes
+    elif np.issubdtype(dtype, np.str_) or np.issubdtype(dtype, np.bytes_):
+        is_problematic = True
+        problem_description = "String/bytes dtype"
+    
+    # Check for datetime dtypes
+    elif np.issubdtype(dtype, np.datetime64) or np.issubdtype(dtype, np.timedelta64):
+        is_problematic = True
+        problem_description = "Datetime/timedelta dtype"
+    
+    # Check for void dtype
+    elif dtype == np.void:
+        is_problematic = True
+        problem_description = "Void dtype (raw binary data)"
+    
+    if is_problematic:
+        print_error(f"    Data type: {dtype} (PROBLEMATIC!)")
+        print_error(f"    Issue: {problem_description}")
+        print_info("    This will cause: 'unsupported format string passed to numpy.ndarray'", indent=1)
+        print_info("    Required: Numeric data (int or float)", indent=1)
+        print_info("    ", indent=1)
+        print_info("    FIX: Convert data to numeric type in MATLAB:", indent=1)
+        print_info("      data = double(your_data);  % Convert to float64", indent=2)
+        print_info("      channel = channels.create_dataset('name', data=data);", indent=2)
+        print_info("    ", indent=1)
+        print_info("    Or in Python:", indent=1)
+        print_info("      data = np.array(your_data, dtype=np.float64)", indent=2)
+        print_info("      channel = channels.create_dataset('name', data=data)", indent=2)
+        return
+    
+    # Check if numeric
     if np.issubdtype(dtype, np.number):
         print_success(f"    Data type: {dtype} (numeric)")
+        
+        # Show sample values to help identify issues
+        try:
+            sample_data = channel[:min(5, n_samples)]
+            print_info(f"    Sample values: {sample_data}", indent=1)
+        except Exception as e:
+            print_warning(f"    Could not read sample data: {e}")
     else:
         print_error(f"    Data type: {dtype} (NOT numeric!)")
         print_info("    Required: Numeric data (int or float)", indent=1)

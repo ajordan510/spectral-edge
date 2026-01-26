@@ -516,6 +516,13 @@ class PSDAnalysisWindow(QMainWindow):
         self.show_crosshair_checkbox.stateChanged.connect(self._toggle_crosshair)
         layout.addWidget(self.show_crosshair_checkbox)
         
+        # Remove running mean checkbox
+        self.remove_mean_checkbox = QCheckBox("Remove 1s Running Mean")
+        self.remove_mean_checkbox.setChecked(False)
+        self.remove_mean_checkbox.setToolTip("Remove 1-second running mean from time history to view vibration about mean")
+        self.remove_mean_checkbox.stateChanged.connect(self._on_remove_mean_changed)
+        layout.addWidget(self.remove_mean_checkbox)
+        
         # Octave band display
         octave_layout = QHBoxLayout()
         self.octave_checkbox = QCheckBox("Octave Band Display")
@@ -900,9 +907,13 @@ class PSDAnalysisWindow(QMainWindow):
                 channel_name = self.channel_names[i]
                 # Use DISPLAY data (decimated) for plotting performance
                 if self.signal_data_display.ndim == 1:
-                    signal = self.signal_data_display
+                    signal = self.signal_data_display.copy()
                 else:
-                    signal = self.signal_data_display[:, i]
+                    signal = self.signal_data_display[:, i].copy()
+                
+                # Apply running mean removal if checkbox is checked
+                if self.remove_mean_checkbox.isChecked():
+                    signal = self._remove_running_mean(signal, window_seconds=1.0)
                 
                 # Plot the time history
                 color = colors[plot_count % len(colors)]
@@ -912,6 +923,11 @@ class PSDAnalysisWindow(QMainWindow):
                     legend_label = f"{self.flight_name} - {channel_name}"
                 else:
                     legend_label = channel_name
+                
+                # Add suffix to legend if running mean removed
+                if self.remove_mean_checkbox.isChecked():
+                    legend_label += " (mean removed)"
+                
                 self.time_plot_widget.plot(
                     self.time_data_display,
                     signal,
@@ -1921,3 +1937,77 @@ class PSDAnalysisWindow(QMainWindow):
         # Re-plot if we have data and octave display is enabled
         if self.octave_checkbox.isChecked() and self.frequencies is not None and self.psd_results:
             self._update_plot()
+
+    def _remove_running_mean(self, signal, window_seconds=1.0):
+        """
+        Remove running mean from signal using a moving average filter.
+        
+        This function computes a running mean over a specified window duration
+        and subtracts it from the signal, making it easier to visualize the
+        vibration content about the mean.
+        
+        Parameters
+        ----------
+        signal : np.ndarray
+            Input signal array (1D).
+            Type: float64 array
+            Units: Same as input signal (e.g., g for acceleration)
+            
+        window_seconds : float, optional
+            Duration of the running mean window in seconds.
+            Type: float
+            Units: seconds
+            Default: 1.0 (1 second window)
+            Typical range: 0.1 to 5.0 seconds
+            
+        Returns
+        -------
+        signal_detrended : np.ndarray
+            Signal with running mean removed.
+            Type: float64 array
+            Shape: Same as input signal
+            Units: Same as input signal
+            
+        Notes
+        -----
+        - Uses uniform (boxcar) filter for running mean calculation
+        - Window size in samples = window_seconds * sample_rate
+        - Edge effects handled using 'same' mode (pads edges)
+        - Does NOT affect PSD calculation (only for visualization)
+        - Running mean is calculated on DISPLAY data (decimated)
+        
+        Examples
+        --------
+        >>> # Remove 1-second running mean from accelerometer data
+        >>> signal_with_mean = np.array([1.0, 1.1, 0.9, 1.0, 1.1])  # 1 g + noise
+        >>> signal_detrended = self._remove_running_mean(signal_with_mean, window_seconds=1.0)
+        >>> # Result: [-0.02, 0.08, -0.12, -0.02, 0.08] (vibration about mean)
+        
+        References
+        ----------
+        - scipy.ndimage.uniform_filter1d: https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.uniform_filter1d.html
+        """
+        from scipy.ndimage import uniform_filter1d
+        
+        # Calculate window size in samples
+        # Use display sample rate (may be decimated)
+        display_sample_rate = len(self.time_data_display) / (self.time_data_display[-1] - self.time_data_display[0])
+        window_samples = int(window_seconds * display_sample_rate)
+        
+        # Ensure window size is at least 3 samples and odd
+        window_samples = max(3, window_samples)
+        if window_samples % 2 == 0:
+            window_samples += 1
+        
+        # Compute running mean using uniform filter
+        running_mean = uniform_filter1d(signal, size=window_samples, mode='nearest')
+        
+        # Subtract running mean from signal
+        signal_detrended = signal - running_mean
+        
+        return signal_detrended
+    
+    def _on_remove_mean_changed(self):
+        """Handle running mean removal checkbox state change."""
+        # Simply re-plot the time history with or without running mean removal
+        self._plot_time_history()

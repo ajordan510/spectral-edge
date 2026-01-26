@@ -23,10 +23,18 @@ QMessageBox {
 QMessageBox QLabel {
     color: #000000;
     font-size: 13px;
-    min-width: 250px;
+    min-width: 200px;
     max-width: 500px;
     padding: 0px;
     margin: 0px;
+}
+QMessageBox QLabel#qt_msgbox_label {
+    margin-left: 0px;
+    padding-left: 0px;
+}
+QMessageBox QLabel#qt_msgboxinformativelabel {
+    margin-left: 0px;
+    padding-left: 0px;
 }
 QMessageBox QPushButton {
     background-color: #0078d4;
@@ -60,6 +68,11 @@ def show_information(parent: Optional[QWidget], title: str, message: str) -> Non
     msg_box.setWindowTitle(title)
     msg_box.setText(message)
     msg_box.setStyleSheet(MESSAGE_BOX_STYLE)
+    
+    # Set smaller icon size to reduce left column width
+    from PyQt6.QtCore import QSize
+    msg_box.setIconPixmap(msg_box.iconPixmap().scaled(QSize(32, 32)))
+    
     msg_box.exec()
 
 
@@ -77,6 +90,11 @@ def show_warning(parent: Optional[QWidget], title: str, message: str) -> None:
     msg_box.setWindowTitle(title)
     msg_box.setText(message)
     msg_box.setStyleSheet(MESSAGE_BOX_STYLE)
+    
+    # Set smaller icon size to reduce left column width
+    from PyQt6.QtCore import QSize
+    msg_box.setIconPixmap(msg_box.iconPixmap().scaled(QSize(32, 32)))
+    
     msg_box.exec()
 
 
@@ -94,6 +112,11 @@ def show_critical(parent: Optional[QWidget], title: str, message: str) -> None:
     msg_box.setWindowTitle(title)
     msg_box.setText(message)
     msg_box.setStyleSheet(MESSAGE_BOX_STYLE)
+    
+    # Set smaller icon size to reduce left column width
+    from PyQt6.QtCore import QSize
+    msg_box.setIconPixmap(msg_box.iconPixmap().scaled(QSize(32, 32)))
+    
     msg_box.exec()
 
 
@@ -116,6 +139,10 @@ def show_question(parent: Optional[QWidget], title: str, message: str) -> bool:
     msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
     msg_box.setDefaultButton(QMessageBox.StandardButton.No)
     msg_box.setStyleSheet(MESSAGE_BOX_STYLE)
+    
+    # Set smaller icon size to reduce left column width
+    from PyQt6.QtCore import QSize
+    msg_box.setIconPixmap(msg_box.iconPixmap().scaled(QSize(32, 32)))
     
     result = msg_box.exec()
     return result == QMessageBox.StandardButton.Yes

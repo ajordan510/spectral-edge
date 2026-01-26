@@ -332,7 +332,7 @@ class FlightNavigator(QDialog):
     def _load_selected(self):
         """Emit signal with selected channels."""
         if not self.selected_items:
-            QMessageBox.warning(self, "No Selection", "Please select at least one channel to load.")
+            show_warning(self, "No Selection", "Please select at least one channel to load.")
             return
         
         # Emit signal with selected items

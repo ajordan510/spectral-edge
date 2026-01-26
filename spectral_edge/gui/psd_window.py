@@ -1689,64 +1689,8 @@ class PSDAnalysisWindow(QMainWindow):
             if self.hdf5_loader is not None:
                 self.hdf5_loader.close()
             
-            # Create new loader with validation
-            try:
-                self.hdf5_loader = HDF5FlightDataLoader(file_path, verbose=False)
-                
-                # Get validation messages
-                validation_msgs = self.hdf5_loader.get_validation_messages()
-                
-                # Check for errors in validation
-                has_errors = any('[ERROR]' in msg for msg in validation_msgs)
-                
-                if has_errors:
-                    # Show detailed error report
-                    error_report = "\n".join(validation_msgs)
-                    show_critical(
-                        self, 
-                        "HDF5 Format Error", 
-                        f"File format validation failed:\n\n{error_report}\n\n"
-                        f"Please check the MATLAB conversion documentation in matlab/README_MATLAB_CONVERSION.md"
-                    )
-                    self.hdf5_loader = None
-                    return
-                
-                # Show success with summary
-                flights = self.hdf5_loader.get_flights()
-                total_channels = sum(len(self.hdf5_loader.get_channels(f.flight_key)) for f in flights)
-                
-                show_information(
-                    self,
-                    "HDF5 Loaded Successfully",
-                    f"File: {Path(file_path).name}\n"
-                    f"Flights: {len(flights)}\n"
-                    f"Total channels: {total_channels}\n\n"
-                    f"Select flights and channels from the navigator."
-                )
-                
-            except Exception as load_error:
-                # Show detailed error with validation messages if available
-                error_msg = str(load_error)
-                if hasattr(self, 'hdf5_loader') and self.hdf5_loader is not None:
-                    validation_msgs = self.hdf5_loader.get_validation_messages()
-                    if validation_msgs:
-                        error_msg = "\n".join(validation_msgs)
-                
-                show_critical(
-                    self,
-                    "HDF5 Load Error",
-                    f"Failed to load HDF5 file:\n\n{error_msg}\n\n"
-                    f"Common issues:\n"
-                    f"1. File must have groups named 'flight_001', 'flight_002', etc.\n"
-                    f"2. Each flight must have a 'channels' subgroup\n"
-                    f"3. Each channel must be a 1D dataset with attributes:\n"
-                    f"   - units (string)\n"
-                    f"   - sample_rate (float, > 0)\n"
-                    f"   - start_time (float)\n\n"
-                    f"See matlab/README_MATLAB_CONVERSION.md for details."
-                )
-                self.hdf5_loader = None
-                return
+            # Create new loader
+            self.hdf5_loader = HDF5FlightDataLoader(file_path)
             
             # Open flight navigator
             self.flight_navigator = FlightNavigator(self.hdf5_loader, self)
@@ -1754,12 +1698,7 @@ class PSDAnalysisWindow(QMainWindow):
             self.flight_navigator.show()
             
         except Exception as e:
-            show_critical(
-                self, 
-                "Unexpected Error", 
-                f"An unexpected error occurred:\n\n{str(e)}\n\n"
-                f"Please check that the file is a valid HDF5 file."
-            )
+            show_critical(self, "Load Error", f"Failed to load HDF5 file: {e}")
     
     def _on_hdf5_data_selected(self, selected_items):
         """

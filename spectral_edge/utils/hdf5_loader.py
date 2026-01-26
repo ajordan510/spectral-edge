@@ -1,30 +1,24 @@
 """
-HDF5 Data Loader Utility with Comprehensive Validation
+HDF5 Data Loader Utility
 
-This module provides memory-efficient loading and management of large HDF5 flight test data files
-with detailed format validation and diagnostic messages to help debug loading issues.
+This module provides memory-efficient loading and management of large HDF5 flight test data files.
+It supports lazy loading, chunked reading, and metadata extraction without loading entire datasets
+into memory.
 
 Key Features:
 - Lazy loading: Only metadata is read initially
 - Chunked reading: Data loaded in segments as needed
 - Decimation: Automatic downsampling for display
 - Cross-flight support: Identify common channels across flights
-- Comprehensive validation: Detailed error messages for format issues
-- Diagnostic output: Shows what was found vs. what was expected
 
 Author: SpectralEdge Development Team
-Date: 2025-01-23
+Date: 2025-01-21
 """
 
 import h5py
 import numpy as np
+import json
 from typing import Dict, List, Tuple, Optional
-from pathlib import Path
-
-
-class HDF5ValidationError(Exception):
-    """Custom exception for HDF5 format validation errors."""
-    pass
 
 
 class FlightInfo:
@@ -34,8 +28,8 @@ class FlightInfo:
         """
         Initialize flight information.
         
-        Parameters
-        ----------
+        Parameters:
+        -----------
         flight_key : str
             HDF5 group key (e.g., 'flight_001')
         metadata : dict
@@ -59,8 +53,8 @@ class ChannelInfo:
         """
         Initialize channel information.
         
-        Parameters
-        ----------
+        Parameters:
+        -----------
         channel_key : str
             Channel name (e.g., 'accelerometer_x')
         flight_key : str
@@ -96,317 +90,70 @@ class ChannelInfo:
 
 class HDF5FlightDataLoader:
     """
-    Memory-efficient loader for HDF5 flight test data with comprehensive validation.
+    Memory-efficient loader for HDF5 flight test data.
     
     This class provides methods to:
     - Load metadata without reading data
     - Read data in chunks
     - Decimate data for display
     - Manage multiple flights and channels
-    - Validate file format and provide detailed diagnostics
-    
-    Expected HDF5 Structure
-    -----------------------
-    /
-    ├── flight_001/
-    │   ├── metadata/
-    │   │   └── attributes: flight_id, date, duration, description
-    │   └── channels/
-    │       ├── channel_name (dataset: 1D array)
-    │       │   └── attributes: units, sample_rate, start_time
-    │       └── ...
-    ├── flight_002/
-    │   └── ...
-    └── ...
-    
-    Required Attributes
-    -------------------
-    Channel level (required):
-    - units: string (e.g., 'g', 'm/s^2')
-    - sample_rate: float (Hz, must be > 0)
-    - start_time: float (seconds)
-    
-    Flight level (optional but recommended):
-    - flight_id: string
-    - date: string
-    - duration: float (seconds)
-    - description: string
     """
     
-    def __init__(self, file_path: str, verbose: bool = True):
+    def __init__(self, file_path: str):
         """
-        Initialize HDF5 data loader with validation.
+        Initialize HDF5 data loader.
         
-        Parameters
-        ----------
+        Parameters:
+        -----------
         file_path : str
             Path to HDF5 file
-        verbose : bool, optional
-            If True, print detailed diagnostic messages (default: True)
-        
-        Raises
-        ------
-        FileNotFoundError
-            If file does not exist
-        HDF5ValidationError
-            If file format is invalid
         """
         self.file_path = file_path
-        self.verbose = verbose
         self.h5file = None
         self.flights = {}  # Dict of flight_key -> FlightInfo
         self.channels = {}  # Dict of flight_key -> Dict of channel_key -> ChannelInfo
         self.file_metadata = {}
-        self.validation_messages = []  # Store validation messages
         
-        # Validate file exists
-        if not Path(file_path).exists():
-            raise FileNotFoundError(f"HDF5 file not found: {file_path}")
-        
-        # Open file and load metadata with validation
-        self._load_and_validate_metadata()
+        # Open file and load metadata
+        self._load_metadata()
     
-    def _log(self, message: str, level: str = "INFO"):
-        """
-        Log validation/diagnostic message.
+    def _load_metadata(self):
+        """Load file and flight metadata without reading data arrays."""
+        self.h5file = h5py.File(self.file_path, 'r')
         
-        Parameters
-        ----------
-        message : str
-            Message to log
-        level : str
-            Message level: INFO, WARNING, ERROR
-        """
-        formatted_msg = f"[{level}] {message}"
-        self.validation_messages.append(formatted_msg)
-        if self.verbose:
-            print(formatted_msg)
-    
-    def _load_and_validate_metadata(self):
-        """
-        Load file and flight metadata with comprehensive validation.
-        
-        Raises
-        ------
-        HDF5ValidationError
-            If file format is invalid
-        """
-        self._log("="*60)
-        self._log(f"Validating HDF5 file: {Path(self.file_path).name}")
-        self._log("="*60)
-        
-        try:
-            self.h5file = h5py.File(self.file_path, 'r')
-            self._log(f"✓ File opened successfully")
-        except Exception as e:
-            raise HDF5ValidationError(f"Failed to open HDF5 file: {e}")
-        
-        # Load file-level metadata (optional)
+        # Load file-level metadata
         if 'metadata' in self.h5file:
             meta_group = self.h5file['metadata']
             self.file_metadata = dict(meta_group.attrs)
-            self._log(f"✓ Found file-level metadata: {list(self.file_metadata.keys())}")
-        else:
-            self._log("  No file-level metadata (optional)", "WARNING")
         
         # Find all flight groups
-        all_keys = list(self.h5file.keys())
-        self._log(f"\nTop-level groups found: {all_keys}")
-        
-        flight_keys = [key for key in all_keys if key.startswith('flight_')]
-        
-        if not flight_keys:
-            error_msg = (
-                f"\n❌ ERROR: No flight groups found!\n"
-                f"Expected: Groups named 'flight_001', 'flight_002', etc.\n"
-                f"Found: {all_keys}\n"
-                f"\nYour HDF5 file must have groups starting with 'flight_'.\n"
-                f"Example structure:\n"
-                f"  /flight_001/\n"
-                f"    /channels/\n"
-                f"      /channel_name (dataset)\n"
-            )
-            self._log(error_msg, "ERROR")
-            raise HDF5ValidationError(error_msg)
-        
-        self._log(f"\n✓ Found {len(flight_keys)} flight group(s): {flight_keys}")
-        
-        # Validate each flight
-        for flight_key in flight_keys:
-            self._log(f"\n--- Validating {flight_key} ---")
-            self._validate_flight_group(flight_key)
-        
-        # Summary
-        total_channels = sum(len(channels) for channels in self.channels.values())
-        self._log("\n" + "="*60)
-        self._log(f"✓ VALIDATION COMPLETE")
-        self._log(f"  Flights: {len(self.flights)}")
-        self._log(f"  Total channels: {total_channels}")
-        self._log("="*60 + "\n")
-    
-    def _validate_flight_group(self, flight_key: str):
-        """
-        Validate a single flight group structure.
-        
-        Parameters
-        ----------
-        flight_key : str
-            Flight group key (e.g., 'flight_001')
-        
-        Raises
-        ------
-        HDF5ValidationError
-            If flight group structure is invalid
-        """
-        flight_group = self.h5file[flight_key]
-        
-        # Check for metadata group (optional but recommended)
-        if 'metadata' in flight_group:
-            meta_dict = dict(flight_group['metadata'].attrs)
-            self.flights[flight_key] = FlightInfo(flight_key, meta_dict)
-            self._log(f"  ✓ Metadata found:")
-            for key, value in meta_dict.items():
-                self._log(f"      {key}: {value}")
-        else:
-            self._log(f"  ⚠ No metadata group (optional but recommended)", "WARNING")
-            self.flights[flight_key] = FlightInfo(flight_key, {})
-        
-        # Check for channels group (REQUIRED)
-        if 'channels' not in flight_group:
-            error_msg = (
-                f"\n❌ ERROR: No 'channels' group in {flight_key}!\n"
-                f"Expected: {flight_key}/channels/\n"
-                f"Found: {list(flight_group.keys())}\n"
-                f"\nEach flight group must contain a 'channels' subgroup.\n"
-            )
-            self._log(error_msg, "ERROR")
-            raise HDF5ValidationError(error_msg)
-        
-        channels_group = flight_group['channels']
-        channel_keys = list(channels_group.keys())
-        
-        if not channel_keys:
-            error_msg = (
-                f"\n❌ ERROR: No channels found in {flight_key}/channels/!\n"
-                f"Each flight must have at least one channel dataset.\n"
-            )
-            self._log(error_msg, "ERROR")
-            raise HDF5ValidationError(error_msg)
-        
-        self._log(f"  ✓ Found {len(channel_keys)} channel(s): {channel_keys}")
-        
-        # Validate each channel
-        self.channels[flight_key] = {}
-        for channel_key in channel_keys:
-            self._validate_channel(flight_key, channel_key, channels_group[channel_key])
-    
-    def _validate_channel(self, flight_key: str, channel_key: str, channel_dataset):
-        """
-        Validate a single channel dataset.
-        
-        Parameters
-        ----------
-        flight_key : str
-            Parent flight key
-        channel_key : str
-            Channel name
-        channel_dataset : h5py.Dataset
-            HDF5 dataset object
-        
-        Raises
-        ------
-        HDF5ValidationError
-            If channel format is invalid
-        """
-        self._log(f"\n    Validating channel: {channel_key}")
-        
-        # Check it's a dataset
-        if not isinstance(channel_dataset, h5py.Dataset):
-            error_msg = (
-                f"\n❌ ERROR: {channel_key} is not a dataset!\n"
-                f"Type: {type(channel_dataset)}\n"
-                f"Channels must be HDF5 datasets containing 1D arrays.\n"
-            )
-            self._log(error_msg, "ERROR")
-            raise HDF5ValidationError(error_msg)
-        
-        # Check data shape (must be 1D)
-        shape = channel_dataset.shape
-        if len(shape) != 1:
-            error_msg = (
-                f"\n❌ ERROR: {channel_key} data is not 1D!\n"
-                f"Expected: 1D array (shape: (N,))\n"
-                f"Found: {len(shape)}D array (shape: {shape})\n"
-                f"\nEach channel must be a 1D array of signal values.\n"
-                f"If you have multi-axis data, create separate channels:\n"
-                f"  - accel_x, accel_y, accel_z (not accel with shape (N, 3))\n"
-            )
-            self._log(error_msg, "ERROR")
-            raise HDF5ValidationError(error_msg)
-        
-        n_samples = shape[0]
-        self._log(f"      ✓ Data shape: {shape} ({n_samples:,} samples)")
-        
-        # Check required attributes
-        attrs = dict(channel_dataset.attrs)
-        required_attrs = ['units', 'sample_rate', 'start_time']
-        missing_attrs = [attr for attr in required_attrs if attr not in attrs]
-        
-        if missing_attrs:
-            error_msg = (
-                f"\n❌ ERROR: {channel_key} missing required attributes!\n"
-                f"Required: {required_attrs}\n"
-                f"Found: {list(attrs.keys())}\n"
-                f"Missing: {missing_attrs}\n"
-                f"\nEach channel must have these attributes:\n"
-                f"  - units: string (e.g., 'g', 'm/s^2', 'V')\n"
-                f"  - sample_rate: float (Hz, must be > 0)\n"
-                f"  - start_time: float (seconds, typically 0.0)\n"
-            )
-            self._log(error_msg, "ERROR")
-            raise HDF5ValidationError(error_msg)
-        
-        # Validate attribute values
-        units = attrs['units']
-        sample_rate = attrs['sample_rate']
-        start_time = attrs['start_time']
-        
-        self._log(f"      ✓ units: '{units}'")
-        self._log(f"      ✓ sample_rate: {sample_rate} Hz")
-        self._log(f"      ✓ start_time: {start_time} s")
-        
-        # Validate sample rate is positive
-        if sample_rate <= 0:
-            error_msg = (
-                f"\n❌ ERROR: {channel_key} has invalid sample_rate!\n"
-                f"Expected: Positive number (> 0)\n"
-                f"Found: {sample_rate}\n"
-                f"\nSample rate must be a positive number in Hz.\n"
-            )
-            self._log(error_msg, "ERROR")
-            raise HDF5ValidationError(error_msg)
-        
-        # Calculate duration
-        duration = n_samples / sample_rate
-        self._log(f"      ✓ duration: {duration:.2f} s")
-        
-        # Log optional attributes if present
-        optional_attrs = ['description', 'sensor_id', 'location', 'range_min', 'range_max']
-        for attr in optional_attrs:
-            if attr in attrs:
-                self._log(f"      • {attr}: {attrs[attr]}")
-        
-        # Store channel info
-        self.channels[flight_key][channel_key] = ChannelInfo(
-            channel_key, flight_key, attrs
-        )
+        for key in self.h5file.keys():
+            if key.startswith('flight_'):
+                # Load flight metadata
+                flight_group = self.h5file[key]
+                
+                if 'metadata' in flight_group:
+                    meta_dict = dict(flight_group['metadata'].attrs)
+                    self.flights[key] = FlightInfo(key, meta_dict)
+                
+                # Load channel metadata for this flight
+                if 'channels' in flight_group:
+                    channels_group = flight_group['channels']
+                    self.channels[key] = {}
+                    
+                    for channel_key in channels_group.keys():
+                        channel_group = channels_group[channel_key]
+                        channel_attrs = dict(channel_group.attrs)
+                        self.channels[key][channel_key] = ChannelInfo(
+                            channel_key, key, channel_attrs
+                        )
     
     def get_flights(self) -> List[FlightInfo]:
         """
         Get list of all flights in the file.
         
-        Returns
-        -------
+        Returns:
+        --------
         list of FlightInfo
             List of flight information objects
         """
@@ -416,13 +163,13 @@ class HDF5FlightDataLoader:
         """
         Get list of channels for a specific flight.
         
-        Parameters
-        ----------
+        Parameters:
+        -----------
         flight_key : str
             Flight key (e.g., 'flight_001')
         
-        Returns
-        -------
+        Returns:
+        --------
         list of ChannelInfo
             List of channel information objects
         """
@@ -434,15 +181,15 @@ class HDF5FlightDataLoader:
         """
         Get information for a specific channel.
         
-        Parameters
-        ----------
+        Parameters:
+        -----------
         flight_key : str
             Flight key
         channel_key : str
             Channel key
         
-        Returns
-        -------
+        Returns:
+        --------
         ChannelInfo or None
             Channel information object, or None if not found
         """
@@ -461,8 +208,8 @@ class HDF5FlightDataLoader:
         decimated data (for display). This ensures PSD calculations always
         use full resolution data while plots remain responsive.
         
-        Parameters
-        ----------
+        Parameters:
+        -----------
         flight_key : str
             Flight key (e.g., 'flight_001')
         channel_key : str
@@ -475,106 +222,212 @@ class HDF5FlightDataLoader:
             If True, also returns decimated data for plotting (default: True)
             Decimation targets ~10,000 points for responsive plotting
         
-        Returns
-        -------
-        dict
-            Dictionary with keys:
-            - 'time_full': ndarray, full resolution time vector
-            - 'data_full': ndarray, full resolution signal data
-            - 'time_display': ndarray, decimated time vector (if decimate_for_display=True)
-            - 'data_display': ndarray, decimated signal data (if decimate_for_display=True)
-            - 'sample_rate': float, original sample rate in Hz
-            - 'decimation_factor': int, decimation factor used (1 = no decimation)
-        
-        Raises
-        ------
-        ValueError
-            If flight or channel not found
+        Returns:
+        --------
+        dict with keys:
+            'time_full' : ndarray
+                Full resolution time vector
+            'data_full' : ndarray
+                Full resolution signal data
+            'time_display' : ndarray
+                Decimated time vector for plotting (if decimate_for_display=True)
+            'data_display' : ndarray
+                Decimated signal data for plotting (if decimate_for_display=True)
+            'sample_rate' : float
+                Original sample rate in Hz
+            'decimation_factor' : int
+                Decimation factor used (1 = no decimation)
         """
-        # Get channel info
+        try:
+            # Validate HDF5 file is open
+            if self.h5file is None:
+                raise RuntimeError("HDF5 file is not open. Call load() first.")
+            
+            # Get channel info
+            channel_info = self.get_channel_info(flight_key, channel_key)
+            if channel_info is None:
+                available_flights = list(self.flights.keys())
+                available_channels = list(self.channels.get(flight_key, {}).keys()) if flight_key in self.channels else []
+                raise ValueError(
+                    f"Channel '{channel_key}' not found in flight '{flight_key}'.\n"
+                    f"Available flights: {available_flights}\n"
+                    f"Available channels in {flight_key}: {available_channels}"
+                )
+            
+            # Access datasets with error handling
+            try:
+                channel_group = self.h5file[channel_info.full_path]
+            except KeyError as e:
+                raise KeyError(f"Cannot access path '{channel_info.full_path}' in HDF5 file: {e}")
+            
+            # Verify required datasets exist
+            if 'time' not in channel_group:
+                raise ValueError(f"Missing 'time' dataset in {channel_info.full_path}")
+            if 'data' not in channel_group:
+                raise ValueError(f"Missing 'data' dataset in {channel_info.full_path}")
+            
+            time_dataset = channel_group['time']
+            data_dataset = channel_group['data']
+            
+        except Exception as e:
+            # Re-raise with context
+            raise RuntimeError(f"Error accessing HDF5 data: {str(e)}") from e
+        
+        # Determine indices for time range
+        if start_time is not None or end_time is not None:
+            # Load time vector to find indices
+            # For large files, we could optimize this by storing time range in metadata
+            time_full = time_dataset[:]
+            
+            start_idx = 0
+            if start_time is not None:
+                start_idx = np.searchsorted(time_full, start_time)
+            
+            end_idx = len(time_full)
+            if end_time is not None:
+                end_idx = np.searchsorted(time_full, end_time)
+            
+            # Load data slice
+            time = time_full[start_idx:end_idx]
+            data = data_dataset[start_idx:end_idx]
+        else:
+            # Load full data
+            time_full = time_dataset[:]
+            data_full = data_dataset[:]
+        
+        # Get sample rate from channel info
         channel_info = self.get_channel_info(flight_key, channel_key)
-        if channel_info is None:
-            available_flights = list(self.flights.keys())
-            available_channels = list(self.channels.get(flight_key, {}).keys())
-            raise ValueError(
-                f"Channel not found: {flight_key}/{channel_key}\n"
-                f"Available flights: {available_flights}\n"
-                f"Available channels in {flight_key}: {available_channels}"
-            )
-        
-        # Get dataset
-        dataset_path = f"{flight_key}/channels/{channel_key}"
-        dataset = self.h5file[dataset_path]
-        
-        # Get sample rate
         sample_rate = channel_info.sample_rate
         
-        # Calculate time indices
-        n_samples = dataset.shape[0]
-        start_idx = 0
-        end_idx = n_samples
-        
-        if start_time is not None:
-            start_idx = int(start_time * sample_rate)
-            start_idx = max(0, min(start_idx, n_samples - 1))
-        
-        if end_time is not None:
-            end_idx = int(end_time * sample_rate)
-            end_idx = max(start_idx + 1, min(end_idx, n_samples))
-        
-        # Load full resolution data
-        data_full = dataset[start_idx:end_idx]
-        time_full = np.arange(len(data_full)) / sample_rate + (start_idx / sample_rate)
-        
-        # Calculate decimation factor for display
-        decimation_factor = 1
-        if decimate_for_display:
-            target_points = 10000
-            if len(data_full) > target_points:
-                decimation_factor = int(np.ceil(len(data_full) / target_points))
-        
-        # Decimate for display if needed
-        if decimation_factor > 1:
-            data_display = data_full[::decimation_factor]
-            time_display = time_full[::decimation_factor]
-        else:
-            data_display = data_full
-            time_display = time_full
-        
-        return {
+        # Prepare result dictionary with full resolution data
+        result = {
             'time_full': time_full,
             'data_full': data_full,
-            'time_display': time_display,
-            'data_display': data_display,
             'sample_rate': sample_rate,
-            'decimation_factor': decimation_factor
+            'decimation_factor': 1
         }
-    
-    def get_validation_messages(self) -> List[str]:
-        """
-        Get all validation messages generated during loading.
         
-        Returns
-        -------
-        list of str
-            List of validation messages
-        """
-        return self.validation_messages.copy()
+        # Calculate decimated data for display if requested
+        if decimate_for_display and len(data_full) > 10000:
+            # Auto-decimate to ~10k points for responsive plotting
+            decimate_factor = max(1, len(data_full) // 10000)
+            time_display = time_full[::decimate_factor]
+            data_display = data_full[::decimate_factor]
+            
+            result['time_display'] = time_display
+            result['data_display'] = data_display
+            result['decimation_factor'] = decimate_factor
+        else:
+            # No decimation needed or not requested
+            result['time_display'] = time_full
+            result['data_display'] = data_full
+        
+        return result
     
-    def print_validation_report(self):
-        """Print complete validation report."""
-        print("\n" + "="*60)
-        print("HDF5 VALIDATION REPORT")
-        print("="*60)
-        for msg in self.validation_messages:
-            print(msg)
-        print("="*60 + "\n")
+    def load_channel_chunk(self, flight_key: str, channel_key: str,
+                          start_idx: int, end_idx: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Load a chunk of channel data by index.
+        
+        This is more efficient than time-based loading when you know the indices.
+        
+        Parameters:
+        -----------
+        flight_key : str
+            Flight key
+        channel_key : str
+            Channel key
+        start_idx : int
+            Starting index
+        end_idx : int
+            Ending index
+        
+        Returns:
+        --------
+        time : ndarray
+            Time vector chunk
+        data : ndarray
+            Signal data chunk
+        """
+        channel_info = self.get_channel_info(flight_key, channel_key)
+        if channel_info is None:
+            raise ValueError(f"Channel {channel_key} not found in {flight_key}")
+        
+        channel_group = self.h5file[channel_info.full_path]
+        time = channel_group['time'][start_idx:end_idx]
+        data = channel_group['data'][start_idx:end_idx]
+        
+        return time, data
+    
+    def get_channel_length(self, flight_key: str, channel_key: str) -> int:
+        """
+        Get the number of samples in a channel without loading data.
+        
+        Parameters:
+        -----------
+        flight_key : str
+            Flight key
+        channel_key : str
+            Channel key
+        
+        Returns:
+        --------
+        int
+            Number of samples
+        """
+        channel_info = self.get_channel_info(flight_key, channel_key)
+        if channel_info is None:
+            raise ValueError(f"Channel {channel_key} not found in {flight_key}")
+        
+        channel_group = self.h5file[channel_info.full_path]
+        return len(channel_group['data'])
+    
+    def get_common_channels(self) -> Dict[str, List[str]]:
+        """
+        Identify channels that are common across multiple flights.
+        
+        Returns:
+        --------
+        dict
+            Dictionary mapping channel names to list of full paths
+            Example: {'accelerometer_x': ['flight_001/channels/accelerometer_x', 
+                                          'flight_002/channels/accelerometer_x']}
+        """
+        # Check if common channels mapping exists in file
+        if 'common_channels_mapping' in self.h5file:
+            mapping_str = self.h5file['common_channels_mapping'][()]
+            if isinstance(mapping_str, bytes):
+                mapping_str = mapping_str.decode('utf-8')
+            return json.loads(mapping_str)
+        
+        # Otherwise, compute it
+        common = {}
+        
+        # Collect all channel names across flights
+        for flight_key, channels in self.channels.items():
+            for channel_key in channels.keys():
+                if channel_key not in common:
+                    common[channel_key] = []
+                common[channel_key].append(f"{flight_key}/channels/{channel_key}")
+        
+        # Filter to only channels present in multiple flights
+        common = {k: v for k, v in common.items() if len(v) > 1}
+        
+        return common
     
     def close(self):
         """Close the HDF5 file."""
         if self.h5file is not None:
             self.h5file.close()
             self.h5file = None
+    
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        self.close()
     
     def __del__(self):
         """Destructor to ensure file is closed."""

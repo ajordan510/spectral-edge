@@ -623,7 +623,7 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Add legend for time plot with styled background
         self.time_legend = self.time_plot_widget.addLegend(offset=(10, 10))
-        self.time_legend.setBrush(pg.mkBrush(26, 31, 46, 200))  # Semi-transparent GUI background
+        self.time_legend.setBrush(pg.mkBrush(26, 31, 46, 255))  # Solid GUI background
         self.time_legend.setPen(pg.mkPen(74, 85, 104, 255))  # Subtle border
         
         # Connect click event for interactive event selection
@@ -648,7 +648,7 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Add legend for PSD with styled background
         self.legend = self.plot_widget.addLegend(offset=(10, 10))
-        self.legend.setBrush(pg.mkBrush(26, 31, 46, 200))  # Semi-transparent GUI background
+        self.legend.setBrush(pg.mkBrush(26, 31, 46, 255))  # Solid GUI background
         self.legend.setPen(pg.mkPen(74, 85, 104, 255))  # Subtle border
         
         # Configure axis appearance for full box border
@@ -752,7 +752,7 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Re-add legend with styling
         self.legend = self.plot_widget.addLegend(offset=(10, 10))
-        self.legend.setBrush(pg.mkBrush(26, 31, 46, 200))
+        self.legend.setBrush(pg.mkBrush(26, 31, 46, 255))  # Solid GUI background
         self.legend.setPen(pg.mkPen(74, 85, 104, 255))
     
     def _update_nperseg_from_df(self):
@@ -887,7 +887,7 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Re-add legend with styling
         self.time_legend = self.time_plot_widget.addLegend(offset=(10, 10))
-        self.time_legend.setBrush(pg.mkBrush(26, 31, 46, 200))
+        self.time_legend.setBrush(pg.mkBrush(26, 31, 46, 255))  # Solid GUI background
         self.time_legend.setPen(pg.mkPen(74, 85, 104, 255))
         
         # Define colors for different channels
@@ -942,6 +942,18 @@ class PSDAnalysisWindow(QMainWindow):
             # Get frequency range for RMS calculation
             freq_min = self.freq_min_spin.value()
             freq_max = self.freq_max_spin.value()
+            
+            # Limit freq_max to Nyquist frequency (sample_rate / 2)
+            nyquist_freq = self.sample_rate / 2.0
+            if freq_max > nyquist_freq:
+                freq_max = nyquist_freq
+                # Update the spinbox to show the limited value
+                self.freq_max_spin.setValue(freq_max)
+                show_information(self, "Frequency Range Adjusted", 
+                    f"Maximum frequency adjusted to Nyquist limit: {nyquist_freq:.2f} Hz\n\n"
+                    f"Sample rate: {self.sample_rate} Hz\n"
+                    f"Nyquist frequency: {nyquist_freq:.2f} Hz\n\n"
+                    f"PSD will be calculated up to {nyquist_freq:.2f} Hz.")
             
             # Determine number of channels and shape
             if self.signal_data_full.ndim == 1:
@@ -1397,6 +1409,18 @@ class PSDAnalysisWindow(QMainWindow):
             # Get frequency range for RMS calculation
             freq_min = self.freq_min_spin.value()
             freq_max = self.freq_max_spin.value()
+            
+            # Limit freq_max to Nyquist frequency (sample_rate / 2)
+            nyquist_freq = self.sample_rate / 2.0
+            if freq_max > nyquist_freq:
+                freq_max = nyquist_freq
+                # Update the spinbox to show the limited value
+                self.freq_max_spin.setValue(freq_max)
+                show_information(self, "Frequency Range Adjusted", 
+                    f"Maximum frequency adjusted to Nyquist limit: {nyquist_freq:.2f} Hz\n\n"
+                    f"Sample rate: {self.sample_rate} Hz\n"
+                    f"Nyquist frequency: {nyquist_freq:.2f} Hz\n\n"
+                    f"PSD will be calculated up to {nyquist_freq:.2f} Hz.")
             
             # Determine number of channels
             if self.signal_data_full.ndim == 1:

@@ -23,7 +23,10 @@ QMessageBox {
 QMessageBox QLabel {
     color: #000000;
     font-size: 13px;
-    min-width: 300px;
+    min-width: 250px;
+    max-width: 500px;
+    padding: 0px;
+    margin: 0px;
 }
 QMessageBox QPushButton {
     background-color: #0078d4;

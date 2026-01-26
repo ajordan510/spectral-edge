@@ -17,7 +17,7 @@ Author: SpectralEdge Development Team
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
+    QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit,
     QGroupBox, QGridLayout, QRadioButton, QButtonGroup, QCheckBox, QScrollArea
 )
 from PyQt6.QtCore import Qt

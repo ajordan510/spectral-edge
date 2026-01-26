@@ -198,8 +198,10 @@ class SpectrogramWindow(QMainWindow):
         control_scroll = QScrollArea()
         control_scroll.setWidgetResizable(True)
         control_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        control_scroll.setStyleSheet("QScrollArea { background-color: #1a1f2e; border: none; }")
         
         control_widget = QWidget()
+        control_widget.setStyleSheet("QWidget { background-color: #1a1f2e; }")
         control_layout = QVBoxLayout(control_widget)
         
         # Parameters group
@@ -390,7 +392,7 @@ class SpectrogramWindow(QMainWindow):
         
         self.linear_radio = QRadioButton("Linear")
         self.log_radio = QRadioButton("Log")
-        self.log_radio.setChecked(True)
+        self.linear_radio.setChecked(True)  # Default to linear
         
         self.scale_group.addButton(self.linear_radio)
         self.scale_group.addButton(self.log_radio)
@@ -632,10 +634,15 @@ class SpectrogramWindow(QMainWindow):
             
             # Add colorbar if requested
             if show_colorbar:
-                # Create colorbar using GradientLegend
-                colorbar = pg.GradientLegend((20, 150), (-10, -10))
-                colorbar.setGradient(img.getHistogram()[1])
-                colorbar.setLabels({str(int(min_power)): 0, str(int(max_power)): 1})
+                # Create colorbar using ColorBarItem
+                colorbar = pg.ColorBarItem(
+                    values=(min_power, max_power),
+                    colorMap=cmap,
+                    label='Power (dB)',
+                    limits=(min_power, max_power),
+                    rounding=0.1
+                )
+                colorbar.setImageItem(img)
                 plot_widget.addItem(colorbar)
                 self.colorbars[i] = colorbar
             

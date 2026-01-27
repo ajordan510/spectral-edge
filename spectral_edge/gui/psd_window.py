@@ -1277,7 +1277,7 @@ class PSDAnalysisWindow(QMainWindow):
         freq_max = self.freq_max_spin.value()
         
         # Create unique key for this channel combination
-        channels_key = "_".join([name for name, _, _ in channels_data])
+        channels_key = "_".join([name for name, _, _, _ in channels_data])
         
         # Create or show spectrogram window
         if channels_key in self.spectrogram_windows:

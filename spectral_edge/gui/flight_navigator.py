@@ -440,14 +440,13 @@ class FlightNavigator(QDialog):
                         try:
                             channel_info = self.loader.get_channel_info(flight_key, channel_key)
                             
-                            # Get time range (skip if fails)
-                            try:
-                                time_data = self.loader.get_time_data(flight_key, channel_key)
-                                if time_data is not None and len(time_data) > 0:
-                                    time_range = f"{time_data[0]:.1f}s - {time_data[-1]:.1f}s"
-                                else:
-                                    time_range = "N/A"
-                            except Exception:
+                            # Time range from metadata (avoid loading actual data for speed)
+                            # Use start_time and duration from channel/flight metadata if available
+                            start_time = getattr(channel_info, 'start_time', 0.0)
+                            duration = getattr(flight_info, 'duration', None) if flight_info else None
+                            if duration is not None:
+                                time_range = f"{start_time:.1f}s - {start_time + duration:.1f}s"
+                            else:
                                 time_range = "N/A"
                             
                             # Infer sensor type from channel name
@@ -520,7 +519,12 @@ class FlightNavigator(QDialog):
     def _populate_tree(self):
         """Populate tree widget based on current view mode and filters"""
         self.tree.clear()
-        self.tree.itemChanged.disconnect(self._on_item_changed)
+        
+        # Safely disconnect signal (may not be connected on first call)
+        try:
+            self.tree.itemChanged.disconnect(self._on_item_changed)
+        except (TypeError, RuntimeError):
+            pass  # Signal was not connected
         
         if self.current_view_mode == ViewMode.BY_FLIGHT:
             self._populate_by_flight()
@@ -751,7 +755,10 @@ class FlightNavigator(QDialog):
     
     def _select_all(self):
         """Select all visible channels"""
-        self.tree.itemChanged.disconnect(self._on_item_changed)
+        try:
+            self.tree.itemChanged.disconnect(self._on_item_changed)
+        except (TypeError, RuntimeError):
+            pass
         
         iterator = QTreeWidgetItemIterator(self.tree)
         while iterator.value():
@@ -766,7 +773,10 @@ class FlightNavigator(QDialog):
     
     def _deselect_all(self):
         """Deselect all channels"""
-        self.tree.itemChanged.disconnect(self._on_item_changed)
+        try:
+            self.tree.itemChanged.disconnect(self._on_item_changed)
+        except (TypeError, RuntimeError):
+            pass
         
         iterator = QTreeWidgetItemIterator(self.tree)
         while iterator.value():
@@ -842,15 +852,22 @@ class FlightNavigator(QDialog):
         if name == "Recent Selections...":
             return
         
-        selection_data = self.selection_manager.load_selection(name)
-        if selection_data:
-            self._load_selection_data(selection_data)
+        # Find the selection in recent list by name
+        recent = self.selection_manager.get_recent_selections()
+        for selection in recent:
+            if selection.get('name') == name:
+                selection_data = selection.get('data', {})
+                if selection_data:
+                    self._load_selection_data(selection_data)
+                break
     
     def _load_selection_data(self, selection_data: dict):
         """Load selection data and update UI"""
         self._deselect_all()
         
-        items_to_select = set(selection_data.get('items', []))
+        # Convert items list to set of tuples for fast lookup
+        items_list = selection_data.get('items', [])
+        items_to_select = set(tuple(item) if isinstance(item, list) else item for item in items_list)
         
         iterator = QTreeWidgetItemIterator(self.tree)
         while iterator.value():

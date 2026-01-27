@@ -10,12 +10,31 @@ Date: 2026-01-27
 
 import json
 import os
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Any
 from pathlib import Path
+from datetime import datetime
 
 
 class SelectionManager:
-    """Manages saved and recent channel selections."""
+    """
+    Manages saved and recent channel selections for the Flight Navigator.
+    
+    This class provides functionality to:
+    - Save named selections for later use
+    - Track recent selections automatically
+    - Persist selections across sessions using JSON files
+    
+    Attributes:
+    -----------
+    config_dir : Path
+        Directory for configuration files
+    recent_file : Path
+        Path to recent selections JSON file
+    saved_file : Path
+        Path to saved selections JSON file
+    max_recent : int
+        Maximum number of recent selections to keep
+    """
     
     def __init__(self, config_dir: Optional[str] = None):
         """
@@ -37,28 +56,66 @@ class SelectionManager:
         
         self.max_recent = 10
     
-    def add_recent_selection(self, selection: List[Tuple[str, str]], description: str = ""):
+    def save_selection(self, name: str, selection_data: Any) -> None:
+        """
+        Save a named selection.
+        
+        Parameters:
+        -----------
+        name : str
+            Name for the selection
+        selection_data : Any
+            Selection data (dict with 'items' and optional 'view_mode')
+        """
+        saved = self._load_saved()
+        
+        # Create/update entry
+        saved[name] = {
+            'data': selection_data,
+            'timestamp': self._get_timestamp()
+        }
+        
+        # Save
+        self._save_saved(saved)
+    
+    def load_selection(self, name: str) -> Optional[Dict]:
+        """
+        Load a saved selection by name.
+        
+        Parameters:
+        -----------
+        name : str
+            Name of the selection to load
+        
+        Returns:
+        --------
+        dict or None
+            Selection data if found, None otherwise
+        """
+        saved = self._load_saved()
+        if name in saved:
+            return saved[name].get('data', saved[name])
+        return None
+    
+    def add_recent_selection(self, description: str, selection_data: Any) -> None:
         """
         Add a selection to recent history.
         
         Parameters:
         -----------
-        selection : list of tuples
-            List of (flight_key, channel_key) tuples
-        description : str, optional
+        description : str
             Description of the selection
+        selection_data : Any
+            Selection data (dict with 'items' and optional 'view_mode')
         """
         recent = self._load_recent()
         
         # Create selection entry
         entry = {
-            'selection': [(f, c) for f, c in selection],
-            'description': description or f"{len(selection)} channels",
+            'name': description,
+            'data': selection_data,
             'timestamp': self._get_timestamp()
         }
-        
-        # Remove duplicates (same channels)
-        recent = [r for r in recent if r['selection'] != entry['selection']]
         
         # Add to front
         recent.insert(0, entry)
@@ -76,34 +133,9 @@ class SelectionManager:
         Returns:
         --------
         list of dict
-            List of selection dictionaries with 'selection', 'description', 'timestamp'
+            List of selection dictionaries with 'name', 'data', 'timestamp'
         """
         return self._load_recent()
-    
-    def save_selection(self, name: str, selection: List[Tuple[str, str]], description: str = ""):
-        """
-        Save a named selection.
-        
-        Parameters:
-        -----------
-        name : str
-            Name for the selection
-        selection : list of tuples
-            List of (flight_key, channel_key) tuples
-        description : str, optional
-            Description of the selection
-        """
-        saved = self._load_saved()
-        
-        # Create/update entry
-        saved[name] = {
-            'selection': [(f, c) for f, c in selection],
-            'description': description,
-            'timestamp': self._get_timestamp()
-        }
-        
-        # Save
-        self._save_saved(saved)
     
     def get_saved_selections(self) -> Dict[str, Dict]:
         """
@@ -116,7 +148,7 @@ class SelectionManager:
         """
         return self._load_saved()
     
-    def delete_saved_selection(self, name: str):
+    def delete_saved_selection(self, name: str) -> None:
         """
         Delete a saved selection.
         
@@ -130,47 +162,6 @@ class SelectionManager:
             del saved[name]
             self._save_saved(saved)
     
-    def export_selection(self, name: str, filepath: str):
-        """
-        Export a saved selection to a JSON file.
-        
-        Parameters:
-        -----------
-        name : str
-            Name of the selection to export
-        filepath : str
-            Path to export file
-        """
-        saved = self._load_saved()
-        if name not in saved:
-            raise ValueError(f"Selection '{name}' not found")
-        
-        with open(filepath, 'w') as f:
-            json.dump(saved[name], f, indent=2)
-    
-    def import_selection(self, name: str, filepath: str):
-        """
-        Import a selection from a JSON file.
-        
-        Parameters:
-        -----------
-        name : str
-            Name for the imported selection
-        filepath : str
-            Path to import file
-        """
-        with open(filepath, 'r') as f:
-            selection_data = json.load(f)
-        
-        # Validate format
-        if 'selection' not in selection_data:
-            raise ValueError("Invalid selection file format")
-        
-        # Save with new name
-        saved = self._load_saved()
-        saved[name] = selection_data
-        self._save_saved(saved)
-    
     def _load_recent(self) -> List[Dict]:
         """Load recent selections from file."""
         if not self.recent_file.exists():
@@ -179,13 +170,16 @@ class SelectionManager:
         try:
             with open(self.recent_file, 'r') as f:
                 return json.load(f)
-        except:
+        except Exception:
             return []
     
-    def _save_recent(self, recent: List[Dict]):
+    def _save_recent(self, recent: List[Dict]) -> None:
         """Save recent selections to file."""
-        with open(self.recent_file, 'w') as f:
-            json.dump(recent, f, indent=2)
+        try:
+            with open(self.recent_file, 'w') as f:
+                json.dump(recent, f, indent=2)
+        except Exception:
+            pass  # Silently fail if can't save
     
     def _load_saved(self) -> Dict[str, Dict]:
         """Load saved selections from file."""
@@ -195,15 +189,17 @@ class SelectionManager:
         try:
             with open(self.saved_file, 'r') as f:
                 return json.load(f)
-        except:
+        except Exception:
             return {}
     
-    def _save_saved(self, saved: Dict[str, Dict]):
+    def _save_saved(self, saved: Dict[str, Dict]) -> None:
         """Save saved selections to file."""
-        with open(self.saved_file, 'w') as f:
-            json.dump(saved, f, indent=2)
+        try:
+            with open(self.saved_file, 'w') as f:
+                json.dump(saved, f, indent=2)
+        except Exception:
+            pass  # Silently fail if can't save
     
     def _get_timestamp(self) -> str:
         """Get current timestamp string."""
-        from datetime import datetime
         return datetime.now().isoformat()

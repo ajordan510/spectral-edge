@@ -98,6 +98,7 @@ class PSDAnalysisWindow(QMainWindow):
         # Sample rate (always represents full resolution rate)
         self.channel_names = None
         self.channel_units = []  # Store units for each channel
+        self.channel_flight_names = []  # Store flight name for each channel (for multi-flight HDF5)
         self.sample_rate = None
         self.current_file = None
         self.flight_name = ""  # Flight name for HDF5 data, empty for CSV
@@ -332,6 +333,30 @@ class PSDAnalysisWindow(QMainWindow):
         self.event_button.setEnabled(False)
         self.event_button.clicked.connect(self._open_event_manager)
         layout.addWidget(self.event_button)
+        
+        # Clear Events button
+        self.clear_events_button = QPushButton("Clear Events")
+        self.clear_events_button.setEnabled(False)
+        self.clear_events_button.setToolTip("Remove all events and reset to full data")
+        self.clear_events_button.clicked.connect(self._clear_events)
+        self.clear_events_button.setStyleSheet("""
+            QPushButton {
+                background-color: #dc2626;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #b91c1c;
+            }
+            QPushButton:disabled {
+                background-color: #4a5568;
+                color: #9ca3af;
+            }
+        """)
+        layout.addWidget(self.clear_events_button)
         
         layout.addStretch()
         
@@ -812,6 +837,7 @@ class PSDAnalysisWindow(QMainWindow):
             
             self.current_file = Path(file_path).name
             self.flight_name = ""  # CSV data has no flight name
+            self.channel_flight_names = []  # CSV data has no flight names
             
             # Extract units from channel names (e.g., "Accelerometer_X (g)" -> "g")
             self.channel_units = []
@@ -905,6 +931,9 @@ class PSDAnalysisWindow(QMainWindow):
         for i, checkbox in enumerate(self.channel_checkboxes):
             if checkbox.isChecked():
                 channel_name = self.channel_names[i]
+                # Get individual flight name for this channel
+                flight_name = self.channel_flight_names[i] if i < len(self.channel_flight_names) else None
+                
                 # Use DISPLAY data (decimated) for plotting performance
                 if self.signal_data_display.ndim == 1:
                     signal = self.signal_data_display.copy()
@@ -918,9 +947,9 @@ class PSDAnalysisWindow(QMainWindow):
                 # Plot the time history
                 color = colors[plot_count % len(colors)]
                 pen = pg.mkPen(color=color, width=1.5)
-                # Create legend label with flight name if available
-                if self.flight_name:
-                    legend_label = f"{self.flight_name} - {channel_name}"
+                # Create legend label with individual flight name if available
+                if flight_name:
+                    legend_label = f"{flight_name} - {channel_name}"
                 else:
                     legend_label = channel_name
                 
@@ -1106,6 +1135,8 @@ class PSDAnalysisWindow(QMainWindow):
                 psd = self.psd_results[channel_name][freq_mask]
                 rms = self.rms_values[channel_name]
                 unit = self.channel_units[i] if i < len(self.channel_units) else ''
+                # Get individual flight name for this channel
+                flight_name = self.channel_flight_names[i] if i < len(self.channel_flight_names) else None
                 
                 # Convert to octave bands if requested
                 if use_octave and octave_fraction is not None:
@@ -1119,13 +1150,13 @@ class PSDAnalysisWindow(QMainWindow):
                         )
                         frequencies_to_plot = frequencies_plot_oct
                         psd_to_plot = psd_oct
-                        # Add octave info to legend with flight name
+                        # Add octave info to legend with individual flight name
                         octave_name = self.octave_combo.currentText()
-                        if self.flight_name:
+                        if flight_name:
                             if unit:
-                                legend_label = f"{self.flight_name} - {channel_name} ({octave_name}): RMS={rms:.4f} {unit}"
+                                legend_label = f"{flight_name} - {channel_name} ({octave_name}): RMS={rms:.4f} {unit}"
                             else:
-                                legend_label = f"{self.flight_name} - {channel_name} ({octave_name}): RMS={rms:.4f}"
+                                legend_label = f"{flight_name} - {channel_name} ({octave_name}): RMS={rms:.4f}"
                         else:
                             if unit:
                                 legend_label = f"{channel_name} ({octave_name}): RMS={rms:.4f} {unit}"
@@ -1135,11 +1166,11 @@ class PSDAnalysisWindow(QMainWindow):
                         show_warning(self, "Octave Conversion Error", f"Failed to convert to octave bands: {str(e)}\nShowing narrowband data.")
                         frequencies_to_plot = frequencies_plot
                         psd_to_plot = psd
-                        if self.flight_name:
+                        if flight_name:
                             if unit:
-                                legend_label = f"{self.flight_name} - {channel_name}: RMS={rms:.4f} {unit}"
+                                legend_label = f"{flight_name} - {channel_name}: RMS={rms:.4f} {unit}"
                             else:
-                                legend_label = f"{self.flight_name} - {channel_name}: RMS={rms:.4f}"
+                                legend_label = f"{flight_name} - {channel_name}: RMS={rms:.4f}"
                         else:
                             if unit:
                                 legend_label = f"{channel_name}: RMS={rms:.4f} {unit}"
@@ -1148,12 +1179,12 @@ class PSDAnalysisWindow(QMainWindow):
                 else:
                     frequencies_to_plot = frequencies_plot
                     psd_to_plot = psd
-                    # Create legend label with RMS and flight name
-                    if self.flight_name:
+                    # Create legend label with RMS and individual flight name
+                    if flight_name:
                         if unit:
-                            legend_label = f"{self.flight_name} - {channel_name}: RMS={rms:.4f} {unit}"
+                            legend_label = f"{flight_name} - {channel_name}: RMS={rms:.4f} {unit}"
                         else:
-                            legend_label = f"{self.flight_name} - {channel_name}: RMS={rms:.4f}"
+                            legend_label = f"{flight_name} - {channel_name}: RMS={rms:.4f}"
                     else:
                         if unit:
                             legend_label = f"{channel_name}: RMS={rms:.4f} {unit}"
@@ -1166,22 +1197,17 @@ class PSDAnalysisWindow(QMainWindow):
                 
                 # Use bar plot for octave bands, line plot for narrowband
                 if use_octave:
-                    # Use scatter plot with larger symbols for octave bands
+                    # Use combined markers and lines for octave bands
+                    # This ensures connectivity even with sparse data points
                     self.plot_widget.plot(
                         frequencies_to_plot,
                         psd_to_plot,
-                        pen=None,
+                        pen=pg.mkPen(color=color, width=1.5),  # Solid line connecting points
                         symbol='o',
                         symbolSize=8,
                         symbolBrush=color,
                         symbolPen=pg.mkPen(color=color, width=1),
                         name=legend_label
-                    )
-                    # Connect with lines
-                    self.plot_widget.plot(
-                        frequencies_to_plot,
-                        psd_to_plot,
-                        pen=pg.mkPen(color=color, width=1.5, style=pg.QtCore.Qt.PenStyle.DashLine)
                     )
                 else:
                     self.plot_widget.plot(
@@ -1238,7 +1264,9 @@ class PSDAnalysisWindow(QMainWindow):
             else:
                 signal = self.signal_data_full[:, idx]
             unit = self.channel_units[idx] if idx < len(self.channel_units) else ''
-            channels_data.append((channel_name, signal, unit))
+            # Get flight name for this specific channel (empty for CSV)
+            flight_name = self.channel_flight_names[idx] if idx < len(self.channel_flight_names) else ''
+            channels_data.append((channel_name, signal, unit, flight_name))
         
         # Get current PSD parameters to pass to spectrogram
         window = self.window_combo.currentText().lower()
@@ -1260,15 +1288,14 @@ class PSDAnalysisWindow(QMainWindow):
         else:
             window_obj = SpectrogramWindow(
                 self.time_data_full,
-                channels_data,  # Pass list of (name, signal, unit) tuples
+                channels_data,  # Pass list of (name, signal, unit, flight_name) tuples
                 self.sample_rate,
                 window_type=window,
                 df=df,
                 overlap_percent=overlap_percent,
                 efficient_fft=efficient_fft,
                 freq_min=freq_min,
-                freq_max=freq_max,
-                flight_name=self.flight_name  # Pass flight name for titles
+                freq_max=freq_max
             )
             window_obj.show()
             self.spectrogram_windows[channels_key] = window_obj
@@ -1300,6 +1327,11 @@ class PSDAnalysisWindow(QMainWindow):
             events: List of Event objects
         """
         self.events = events
+        
+        # Enable/disable clear events button based on whether events exist
+        # Don't count the "Full" event as it's always present
+        non_full_events = [e for e in events if e.name != "Full"]
+        self.clear_events_button.setEnabled(len(non_full_events) > 0)
         
         # Update visualization
         self._update_event_regions()
@@ -1806,6 +1838,7 @@ class PSDAnalysisWindow(QMainWindow):
             self.sample_rate = sample_rate
             self.channel_names = all_channel_names
             self.channel_units = all_channel_units
+            self.channel_flight_names = flight_info  # Store flight name for each channel
             
             # Create file label and set flight name
             if len(set(flight_info)) == 1:
@@ -2011,3 +2044,38 @@ class PSDAnalysisWindow(QMainWindow):
         """Handle running mean removal checkbox state change."""
         # Simply re-plot the time history with or without running mean removal
         self._plot_time_history()
+
+    def _clear_events(self):
+        """Clear all events and reset plots to full data."""
+        # Clear events list (keep only "Full" event if it exists)
+        self.events = [e for e in self.events if e.name == "Full"]
+        
+        # Clear event regions from time plot
+        for region in self.event_regions:
+            self.time_plot_widget.removeItem(region)
+        self.event_regions.clear()
+        
+        # Disable clear events button
+        self.clear_events_button.setEnabled(False)
+        
+        # Update event manager if it exists
+        if self.event_manager is not None:
+            self.event_manager.clear_all_events()
+        
+        # Reset interactive selection mode
+        self.interactive_selection_mode = False
+        self.selection_start = None
+        if self.temp_selection_line is not None:
+            self.time_plot_widget.removeItem(self.temp_selection_line)
+            self.temp_selection_line = None
+        
+        # Clear event-based PSD results
+        self.psd_results = {}
+        self.rms_values = {}
+        self.frequencies = None
+        
+        # Clear PSD plot
+        self._clear_psd_plot()
+        
+        # Show information message
+        show_information(self, "Events Cleared", "All events have been removed. Click 'Calculate PSD' to recalculate with full data.")

@@ -581,3 +581,14 @@ class EventManagerWindow(QMainWindow):
         if self.events and self.events[0].name == "Full":
             self.events[0].end_time = max_time
             self._update_table()
+
+    def clear_all_events(self):
+        """Clear all events except the 'Full' event."""
+        # Keep only the "Full" event if it exists
+        self.events = [e for e in self.events if e.name == "Full"]
+        
+        # Update table
+        self._update_table()
+        
+        # Emit events updated signal
+        self.events_updated.emit(self.events)

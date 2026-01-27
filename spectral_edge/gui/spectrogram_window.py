@@ -60,9 +60,9 @@ class SpectrogramWindow(QMainWindow):
     Supports up to 4 channels displayed simultaneously in adaptive layout.
     """
     
-    def __init__(self, time_data, channels_data, sample_rate,
-                 window_type='hann', df=1.0, overlap_percent=50, efficient_fft=True,
-                 freq_min=10.0, freq_max=2000.0, flight_name=""):
+    def __init__(self, time_data, channels_data, sample_rate, 
+                 window_type='hann', df=1.0, overlap_percent=50, 
+                 efficient_fft=True, freq_min=10, freq_max=2000):
         """
         Initialize the spectrogram window.
         
@@ -82,10 +82,10 @@ class SpectrogramWindow(QMainWindow):
         
         # Store data
         self.time_data = time_data
+        # channels_data is list of (name, signal, unit, flight_name) tuples
         self.channels_data = channels_data[:4]  # Limit to 4 channels
         self.n_channels = len(self.channels_data)
         self.sample_rate = sample_rate
-        self.flight_name = flight_name  # Flight name for titles
         
         # Spectrogram data for each channel
         self.spec_data = []  # List of (times, freqs, power_db) tuples
@@ -96,15 +96,26 @@ class SpectrogramWindow(QMainWindow):
         
         # Window properties
         if self.n_channels == 1:
-            if flight_name:
-                self.setWindowTitle(f"SpectralEdge - Spectrogram: {flight_name} - {self.channels_data[0][0]}")
+            name, _, _, flight = self.channels_data[0]
+            if flight:
+                self.setWindowTitle(f"SpectralEdge - Spectrogram: {flight} - {name}")
             else:
-                self.setWindowTitle(f"SpectralEdge - Spectrogram: {self.channels_data[0][0]}")
+                self.setWindowTitle(f"SpectralEdge - Spectrogram: {name}")
         else:
-            channel_names = ", ".join([name for name, _, _ in self.channels_data])
-            if flight_name:
-                self.setWindowTitle(f"SpectralEdge - Spectrogram: {flight_name} - {channel_names}")
+            # Check if all channels from same flight
+            flights = [f for _, _, _, f in self.channels_data if f]
+            if flights and len(set(flights)) == 1:
+                # All from same flight
+                flight = flights[0]
+                channel_names = ", ".join([name for name, _, _, _ in self.channels_data])
+                self.setWindowTitle(f"SpectralEdge - Spectrogram: {flight} - {channel_names}")
+            elif flights:
+                # Multiple flights
+                channel_names = ", ".join([name for name, _, _, _ in self.channels_data])
+                self.setWindowTitle(f"SpectralEdge - Spectrogram: Multiple Flights - {channel_names}")
             else:
+                # No flight names (CSV)
+                channel_names = ", ".join([name for name, _, _, _ in self.channels_data])
                 self.setWindowTitle(f"SpectralEdge - Spectrogram: {channel_names}")
         
         self.setMinimumSize(1400, 900)
@@ -292,7 +303,7 @@ class SpectrogramWindow(QMainWindow):
     
     def _create_plot_widget(self, channel_idx):
         """Create a single spectrogram plot widget."""
-        channel_name, _, unit = self.channels_data[channel_idx]
+        channel_name, _, unit, _ = self.channels_data[channel_idx]
         
         # Create plot widget
         plot_widget = pg.PlotWidget()
@@ -543,7 +554,7 @@ class SpectrogramWindow(QMainWindow):
         self.spec_data = []
         
         # Calculate spectrogram for each channel
-        for i, (channel_name, signal_data, unit) in enumerate(self.channels_data):
+        for i, (channel_name, signal_data, unit, flight_name) in enumerate(self.channels_data):
             # Calculate spectrogram
             freqs, times, Sxx = scipy_signal.spectrogram(
                 signal_data,
@@ -587,7 +598,7 @@ class SpectrogramWindow(QMainWindow):
         
         for i, (times, freqs, Sxx_db) in enumerate(self.spec_data):
             plot_widget = self.plot_widgets[i]
-            channel_name, _, unit = self.channels_data[i]
+            channel_name, _, unit, flight_name = self.channels_data[i]
             
             # Clear previous plot
             plot_widget.clear()
@@ -641,25 +652,38 @@ class SpectrogramWindow(QMainWindow):
             
             # Add colorbar if requested
             if show_colorbar:
-                # Create colorbar using ColorBarItem
+                # Create colorbar using ColorBarItem with improved styling
                 colorbar = pg.ColorBarItem(
                     values=(min_power, max_power),
                     colorMap=pg_colormap,  # Use PyQtGraph ColorMap
                     label='Power (dB)',
                     limits=(min_power, max_power),
-                    rounding=0.1
+                    rounding=0.1,
+                    width=20,  # Width of colorbar in pixels
+                    interactive=False,  # Disable interactive handles for cleaner look
+                    pen='#e0e0e0',  # Border color
+                    hoverPen='#ffffff',  # Hover border color
+                    hoverBrush='#2d3748'  # Hover background color
                 )
-                colorbar.setImageItem(img)
-                plot_widget.addItem(colorbar)
+                
+                # Use insert_in parameter to properly position colorbar outside plot area
+                # This automatically positions it on the right side for vertical orientation
+                colorbar.setImageItem(img, insert_in=plot_widget.plotItem)
+                
+                # Style the colorbar axis
+                colorbar.axis.setStyle(tickFont=pg.QtGui.QFont('Arial', 9))
+                colorbar.axis.setPen('#e0e0e0')
+                colorbar.axis.setTextPen('#e0e0e0')
+                
                 self.colorbars[i] = colorbar
             
-            # Update title with flight name if available
-            if self.flight_name:
+            # Update title with individual flight name if available
+            if flight_name:
                 if unit:
-                    plot_widget.setTitle(f"{self.flight_name} - {channel_name} ({unit}) | SNR: {snr_db} dB", 
+                    plot_widget.setTitle(f"{flight_name} - {channel_name} ({unit}) | SNR: {snr_db} dB", 
                                         color='#e0e0e0', size='12pt')
                 else:
-                    plot_widget.setTitle(f"{self.flight_name} - {channel_name} | SNR: {snr_db} dB", 
+                    plot_widget.setTitle(f"{flight_name} - {channel_name} | SNR: {snr_db} dB", 
                                         color='#e0e0e0', size='12pt')
             else:
                 if unit:

@@ -177,6 +177,51 @@ class HDF5FlightDataLoader:
             return list(self.channels[flight_key].values())
         return []
     
+    def get_flight_keys(self) -> List[str]:
+        """
+        Get list of all flight keys in the file.
+        
+        Returns:
+        --------
+        list of str
+            List of flight key strings (e.g., ['flight_001', 'flight_002'])
+        """
+        return list(self.flights.keys())
+    
+    def get_channel_keys(self, flight_key: str) -> List[str]:
+        """
+        Get list of channel keys for a specific flight.
+        
+        Parameters:
+        -----------
+        flight_key : str
+            Flight key (e.g., 'flight_001')
+        
+        Returns:
+        --------
+        list of str
+            List of channel key strings
+        """
+        if flight_key in self.channels:
+            return list(self.channels[flight_key].keys())
+        return []
+    
+    def get_flight_info(self, flight_key: str) -> Optional[FlightInfo]:
+        """
+        Get information for a specific flight.
+        
+        Parameters:
+        -----------
+        flight_key : str
+            Flight key (e.g., 'flight_001')
+        
+        Returns:
+        --------
+        FlightInfo or None
+            Flight information object, or None if not found
+        """
+        return self.flights.get(flight_key, None)
+    
     def get_channel_info(self, flight_key: str, channel_key: str) -> Optional[ChannelInfo]:
         """
         Get information for a specific channel.

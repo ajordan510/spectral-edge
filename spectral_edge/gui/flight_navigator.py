@@ -18,7 +18,7 @@ Date: 2026-01-27
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTreeWidget, QTreeWidgetItem, QGroupBox, QLineEdit,
+    QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator, QGroupBox, QLineEdit,
     QCheckBox, QScrollArea, QWidget, QRadioButton, QComboBox,
     QMessageBox, QInputDialog, QMenu
 )
@@ -409,38 +409,82 @@ class FlightNavigator(QDialog):
 
     
     def _load_all_channels(self):
-        """Load all channels from the HDF5 file into memory for filtering"""
+        """
+        Load all channels from the HDF5 file into memory for filtering.
+        
+        This method iterates through all flights and channels, extracting
+        metadata for display in the navigator. Time data is loaded to
+        determine time ranges for each channel.
+        
+        Raises:
+        -------
+        Exception
+            If there's an error loading channel data, it's caught and
+            the channel is skipped with a warning.
+        """
         self.all_channels = []
         locations = set()
+        errors = []
         
-        for flight_key in self.loader.get_flight_keys():
-            flight_info = self.loader.get_flight_info(flight_key)
-            for channel_key in self.loader.get_channel_keys(flight_key):
-                channel_info = self.loader.get_channel_info(flight_key, channel_key)
-                
-                # Get time range
-                time_data = self.loader.get_time_data(flight_key, channel_key)
-                if time_data is not None and len(time_data) > 0:
-                    time_range = f"{time_data[0]:.1f}s - {time_data[-1]:.1f}s"
-                else:
-                    time_range = "N/A"
-                
-                # Infer sensor type from channel name
-                sensor_type = self._infer_sensor_type(channel_key)
-                
-                # Store channel data
-                self.all_channels.append({
-                    'flight_key': flight_key,
-                    'channel_key': channel_key,
-                    'channel_info': channel_info,
-                    'flight_info': flight_info,
-                    'time_range': time_range,
-                    'sensor_type': sensor_type
-                })
-                
-                # Collect unique locations
-                if hasattr(channel_info, 'location') and channel_info.location:
-                    locations.add(channel_info.location)
+        try:
+            flight_keys = self.loader.get_flight_keys()
+            print(f"Loading {len(flight_keys)} flights...")
+            
+            for flight_key in flight_keys:
+                try:
+                    flight_info = self.loader.get_flight_info(flight_key)
+                    channel_keys = self.loader.get_channel_keys(flight_key)
+                    print(f"  Flight {flight_key}: {len(channel_keys)} channels")
+                    
+                    for channel_key in channel_keys:
+                        try:
+                            channel_info = self.loader.get_channel_info(flight_key, channel_key)
+                            
+                            # Get time range (skip if fails)
+                            try:
+                                time_data = self.loader.get_time_data(flight_key, channel_key)
+                                if time_data is not None and len(time_data) > 0:
+                                    time_range = f"{time_data[0]:.1f}s - {time_data[-1]:.1f}s"
+                                else:
+                                    time_range = "N/A"
+                            except Exception:
+                                time_range = "N/A"
+                            
+                            # Infer sensor type from channel name
+                            sensor_type = self._infer_sensor_type(channel_key)
+                            
+                            # Store channel data
+                            self.all_channels.append({
+                                'flight_key': flight_key,
+                                'channel_key': channel_key,
+                                'channel_info': channel_info,
+                                'flight_info': flight_info,
+                                'time_range': time_range,
+                                'sensor_type': sensor_type
+                            })
+                            
+                            # Collect unique locations
+                            if hasattr(channel_info, 'location') and channel_info.location:
+                                locations.add(channel_info.location)
+                                
+                        except Exception as e:
+                            errors.append(f"{flight_key}/{channel_key}: {e}")
+                            continue
+                            
+                except Exception as e:
+                    errors.append(f"Flight {flight_key}: {e}")
+                    continue
+            
+            print(f"Loaded {len(self.all_channels)} channels total")
+            
+            if errors:
+                print(f"Warnings during load: {len(errors)} errors")
+                for err in errors[:5]:  # Show first 5 errors
+                    print(f"  - {err}")
+                    
+        except Exception as e:
+            print(f"Critical error loading channels: {e}")
+            show_warning(self, "Load Warning", f"Error loading some channels: {e}")
         
         # Populate location filter
         for location in sorted(locations):

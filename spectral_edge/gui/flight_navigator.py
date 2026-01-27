@@ -344,10 +344,21 @@ class FlightNavigator(QDialog):
         
         filter_layout.addLayout(location_layout)
         
-        # Result count
+        # Result count and options
+        options_layout = QHBoxLayout()
         self.result_label = QLabel("Showing all channels")
         self.result_label.setStyleSheet("color: #9ca3af; font-size: 9pt;")
-        filter_layout.addWidget(self.result_label)
+        options_layout.addWidget(self.result_label)
+        
+        options_layout.addStretch()
+        
+        # Keep tree expanded checkbox
+        self.keep_expanded_check = QCheckBox("Keep Tree Expanded")
+        self.keep_expanded_check.setChecked(True)  # Default to expanded
+        self.keep_expanded_check.setToolTip("Automatically expand all tree items after filtering/searching")
+        options_layout.addWidget(self.keep_expanded_check)
+        
+        filter_layout.addLayout(options_layout)
         
         return filter_group
     
@@ -535,6 +546,10 @@ class FlightNavigator(QDialog):
         
         self.tree.itemChanged.connect(self._on_item_changed)
         self._update_result_label()
+        
+        # Expand all items if option is enabled
+        if self.keep_expanded_check.isChecked():
+            self.tree.expandAll()
     
     def _populate_by_flight(self):
         """Populate tree in 'By Flight' view mode"""

@@ -902,7 +902,9 @@ class FlightNavigator(QDialog):
         
         recent = self.selection_manager.get_recent_selections()
         for selection in recent:
-            self.recent_combo.addItem(selection['name'])
+            # Safety check for 'name' key
+            if isinstance(selection, dict) and 'name' in selection:
+                self.recent_combo.addItem(selection['name'])
     
     def _on_load_clicked(self):
         """Handle Load Selected button click"""

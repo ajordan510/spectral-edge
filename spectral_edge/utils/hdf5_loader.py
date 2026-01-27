@@ -415,6 +415,38 @@ class HDF5FlightDataLoader:
         
         return common
     
+    def get_time_data(self, flight_key: str, channel_key: str) -> Optional[np.ndarray]:
+        """
+        Get time data for a specific channel.
+        
+        Parameters:
+        -----------
+        flight_key : str
+            Flight key (e.g., 'flight_001')
+        channel_key : str
+            Channel key (e.g., 'accelerometer_x')
+        
+        Returns:
+        --------
+        ndarray or None
+            Time vector for the channel, or None if not found
+        """
+        try:
+            if self.h5file is None:
+                return None
+            
+            channel_info = self.get_channel_info(flight_key, channel_key)
+            if channel_info is None:
+                return None
+            
+            channel_group = self.h5file[channel_info.full_path]
+            if 'time' not in channel_group:
+                return None
+            
+            return channel_group['time'][:]
+        except Exception:
+            return None
+    
     def close(self):
         """Close the HDF5 file."""
         if self.h5file is not None:

@@ -575,8 +575,15 @@ class SpectrogramWindow(QMainWindow):
         snr_db = self.snr_spin.value()
         show_colorbar = self.show_colorbar_checkbox.isChecked()
         
-        # Get colormap
-        cmap = cm.get_cmap(colormap_name)
+        # Get colormap from matplotlib
+        mpl_cmap = cm.get_cmap(colormap_name)
+        
+        # Create PyQtGraph ColorMap for colorbar
+        # Sample matplotlib colormap at 256 points
+        colors_normalized = mpl_cmap(np.linspace(0, 1, 256))  # RGBA values 0-1
+        colors_255 = (colors_normalized * 255).astype(np.ubyte)  # Convert to 0-255
+        positions = np.linspace(0, 1, 256)
+        pg_colormap = pg.ColorMap(positions, colors_255)
         
         for i, (times, freqs, Sxx_db) in enumerate(self.spec_data):
             plot_widget = self.plot_widgets[i]
@@ -620,10 +627,10 @@ class SpectrogramWindow(QMainWindow):
                 plot_widget.setLogMode(x=False, y=False)
                 plot_widget.setLabel('left', 'Frequency (Hz)', color='#e0e0e0', size='11pt')
             
-            # Apply colormap
+            # Apply colormap using matplotlib colormap
             colors = []
             for j in range(256):
-                rgba = cmap(j / 255.0)
+                rgba = mpl_cmap(j / 255.0)
                 colors.append((int(rgba[0] * 255), int(rgba[1] * 255), int(rgba[2] * 255), 255))
             
             lut = np.array(colors, dtype=np.ubyte)
@@ -637,7 +644,7 @@ class SpectrogramWindow(QMainWindow):
                 # Create colorbar using ColorBarItem
                 colorbar = pg.ColorBarItem(
                     values=(min_power, max_power),
-                    colorMap=cmap,
+                    colorMap=pg_colormap,  # Use PyQtGraph ColorMap
                     label='Power (dB)',
                     limits=(min_power, max_power),
                     rounding=0.1

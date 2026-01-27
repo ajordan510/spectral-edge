@@ -49,7 +49,7 @@ def load_csv_data(
     Returns:
         Tuple containing:
             - time (np.ndarray): Time values in seconds (1D array).
-            - data (np.ndarray): Data values. Shape is (num_channels, num_samples).
+            - data (np.ndarray): Data values. Shape is (num_samples, num_channels).
             - channel_names (List[str]): Names of the data channels.
             - sample_rate (float): Detected sample rate in Hz.
     
@@ -127,14 +127,14 @@ def load_csv_data(
     
     # Extract data as numpy array
     # Shape: (num_samples, num_channels)
-    data_raw = df[data_columns].values
+    data = df[data_columns].values
     
     # Check for non-finite values
-    if not np.all(np.isfinite(data_raw)):
+    if not np.all(np.isfinite(data)):
         raise DataLoadError("Data contains non-finite values (NaN or Inf)")
     
-    # Transpose to shape (num_channels, num_samples) for consistency
-    data = data_raw.T
+    # Keep data in shape (num_samples, num_channels) to match HDF5 format
+    # This is the standard format expected by the GUI
     
     # Get channel names
     channel_names = data_columns
@@ -163,7 +163,7 @@ def load_csv_data_simple(
     
     Returns:
         Tuple containing:
-            - data (np.ndarray): Data values. Shape is (num_channels, num_samples).
+            - data (np.ndarray): Data values. Shape is (num_samples, num_channels).
             - channel_names (List[str]): Names of the channels (or generic names
               if no header).
     
@@ -182,8 +182,8 @@ def load_csv_data_simple(
             df = pd.read_csv(file_path, delimiter=delimiter, header=None)
             channel_names = [f"Channel_{i+1}" for i in range(df.shape[1])]
         
-        # Extract data and transpose
-        data = df.values.T
+        # Extract data in shape (num_samples, num_channels)
+        data = df.values
         
         # Validate
         if not np.all(np.isfinite(data)):

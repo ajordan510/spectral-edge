@@ -375,30 +375,33 @@ class SpectrogramWindow(QMainWindow):
         row = 0
         
         # Frequency range
-        layout.addWidget(QLabel("Freq Range:"), row, 0, 1, 2)
+        layout.addWidget(QLabel("Frequency Range (Hz):"), row, 0, 1, 2)
         row += 1
         
-        layout.addWidget(QLabel("Min (Hz):"), row, 0)
-        self.freq_min_spin = QDoubleSpinBox()
-        self.freq_min_spin.setRange(0.1, 100000)
-        self.freq_min_spin.setValue(freq_min)
-        self.freq_min_spin.setDecimals(1)
-        self.freq_min_spin.valueChanged.connect(self._update_plots)
-        layout.addWidget(self.freq_min_spin, row, 1)
+        layout.addWidget(QLabel("Min:"), row, 0)
+        self.freq_min_edit = QLineEdit()
+        self.freq_min_edit.setText(str(freq_min))
+        self.freq_min_edit.setPlaceholderText("e.g., 10 or 1e1")
+        self.freq_min_edit.setToolTip("Enter frequency in Hz (standard or scientific notation)")
+        layout.addWidget(self.freq_min_edit, row, 1)
         row += 1
         
-        layout.addWidget(QLabel("Max (Hz):"), row, 0)
-        self.freq_max_spin = QDoubleSpinBox()
-        self.freq_max_spin.setRange(1, 100000)
-        self.freq_max_spin.setValue(freq_max)
-        self.freq_max_spin.setDecimals(1)
-        self.freq_max_spin.valueChanged.connect(self._update_plots)
-        layout.addWidget(self.freq_max_spin, row, 1)
+        layout.addWidget(QLabel("Max:"), row, 0)
+        self.freq_max_edit = QLineEdit()
+        self.freq_max_edit.setText(str(freq_max))
+        self.freq_max_edit.setPlaceholderText("e.g., 2000 or 2e3")
+        self.freq_max_edit.setToolTip("Enter frequency in Hz (standard or scientific notation)")
+        layout.addWidget(self.freq_max_edit, row, 1)
+        row += 1
+        
+        # Apply frequency range button
+        self.apply_freq_button = QPushButton("Apply Frequency Range")
+        self.apply_freq_button.clicked.connect(self._apply_frequency_range)
+        layout.addWidget(self.apply_freq_button, row, 0, 1, 2)
         row += 1
         
         # Frequency scale
-        layout.addWidget(QLabel("Y-Scale:"), row, 0)
-        scale_layout = QHBoxLayout()
+        layout.addWidget(QLabel("Y-Scale:"), row, 0, 2, 1)  # Span 2 rows
         self.scale_group = QButtonGroup()
         
         self.linear_radio = QRadioButton("Linear")
@@ -410,9 +413,10 @@ class SpectrogramWindow(QMainWindow):
         
         self.linear_radio.toggled.connect(self._update_plots)
         
-        scale_layout.addWidget(self.linear_radio)
-        scale_layout.addWidget(self.log_radio)
-        layout.addLayout(scale_layout, row, 1)
+        # Vertical layout for radio buttons
+        layout.addWidget(self.linear_radio, row, 1)
+        row += 1
+        layout.addWidget(self.log_radio, row, 1)
         row += 1
         
         # Color map
@@ -579,8 +583,14 @@ class SpectrogramWindow(QMainWindow):
         if not self.spec_data:
             return
         
-        freq_min = self.freq_min_spin.value()
-        freq_max = self.freq_max_spin.value()
+        # Parse frequency values from text fields
+        try:
+            freq_min = float(self.freq_min_edit.text())
+            freq_max = float(self.freq_max_edit.text())
+        except ValueError:
+            # If parsing fails, use default values
+            freq_min = 10.0
+            freq_max = 2000.0
         colormap_name = self.colormap_combo.currentText()
         use_log_scale = self.log_radio.isChecked()
         snr_db = self.snr_spin.value()
@@ -634,9 +644,30 @@ class SpectrogramWindow(QMainWindow):
             if use_log_scale:
                 plot_widget.setLogMode(x=False, y=True)
                 plot_widget.setLabel('left', 'Frequency (Hz, log)', color='#e0e0e0', size='11pt')
+                
+                # Set custom ticks for octave-based spacing (powers of 10)
+                min_power = int(np.floor(np.log10(freq_min)))
+                max_power = int(np.ceil(np.log10(freq_max)))
+                
+                tick_values = []
+                tick_labels = []
+                
+                for power in range(min_power, max_power + 1):
+                    freq = 10 ** power
+                    if freq >= freq_min and freq <= freq_max:
+                        tick_values.append(freq)  # Use actual frequency value (PyQtGraph handles log conversion)
+                        tick_labels.append(str(int(freq)))
+                
+                # Set the ticks on the left axis
+                left_axis = plot_widget.getPlotItem().getAxis('left')
+                left_axis.setTicks([[(val, label) for val, label in zip(tick_values, tick_labels)]])
             else:
                 plot_widget.setLogMode(x=False, y=False)
                 plot_widget.setLabel('left', 'Frequency (Hz)', color='#e0e0e0', size='11pt')
+                
+                # Reset to automatic ticks for linear scale
+                left_axis = plot_widget.getPlotItem().getAxis('left')
+                left_axis.setTicks(None)
             
             # Apply colormap using matplotlib colormap
             colors = []
@@ -649,6 +680,14 @@ class SpectrogramWindow(QMainWindow):
             
             # Store image item
             self.image_items[i] = img
+            
+            # Remove existing colorbar if present
+            if self.colorbars[i] is not None:
+                try:
+                    plot_widget.plotItem.layout.removeItem(self.colorbars[i])
+                    self.colorbars[i] = None
+                except:
+                    pass
             
             # Add colorbar if requested
             if show_colorbar:
@@ -702,3 +741,28 @@ class SpectrogramWindow(QMainWindow):
                 # Update text fields for reference
                 self.time_min_edit.setText(f"{times[0]:.3f}")
                 self.time_max_edit.setText(f"{times[-1]:.3f}")
+
+    def _apply_frequency_range(self):
+        """Apply custom frequency range and update plots."""
+        # Parse frequency limits from text fields
+        try:
+            freq_min = float(self.freq_min_edit.text())
+            freq_max = float(self.freq_max_edit.text())
+        except ValueError as e:
+            from spectral_edge.utils.message_box import show_warning
+            show_warning(self, "Invalid Input", 
+                        f"Please enter valid numbers (standard or scientific notation).\nError: {e}")
+            return
+        
+        if freq_min >= freq_max:
+            from spectral_edge.utils.message_box import show_warning
+            show_warning(self, "Invalid Limits", "Frequency minimum must be less than maximum.")
+            return
+        
+        if freq_min < 0:
+            from spectral_edge.utils.message_box import show_warning
+            show_warning(self, "Invalid Limits", "Frequency values must be positive.")
+            return
+        
+        # Update plots with new frequency range
+        self._update_plots()

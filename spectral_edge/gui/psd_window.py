@@ -772,7 +772,7 @@ class PSDAnalysisWindow(QMainWindow):
     def _on_parameter_changed(self):
         """Handle parameter changes - clear PSD results to force recalculation."""
         # Clear PSD results
-        self.frequencies = None
+        self.frequencies = {}
         self.psd_results = {}
         self.rms_values = {}
         
@@ -881,7 +881,7 @@ class PSDAnalysisWindow(QMainWindow):
             self.event_button.setEnabled(True)
             
             # Clear previous results
-            self.frequencies = None
+            self.frequencies = {}
             self.psd_results = {}
             self.rms_values = {}
             
@@ -1978,7 +1978,7 @@ class PSDAnalysisWindow(QMainWindow):
             self.event_button.setEnabled(True)
             
             # Clear previous results
-            self.frequencies = None
+            self.frequencies = {}
             self.psd_results = {}
             self.rms_values = {}
             self._clear_psd_plot()
@@ -2155,7 +2155,7 @@ class PSDAnalysisWindow(QMainWindow):
         # Clear event-based PSD results
         self.psd_results = {}
         self.rms_values = {}
-        self.frequencies = None
+        self.frequencies = {}
         
         # Clear PSD plot
         self._clear_psd_plot()

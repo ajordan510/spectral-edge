@@ -401,14 +401,28 @@ class SpectrogramWindow(QMainWindow):
         layout.addWidget(self.freq_max_edit, row, 1)
         row += 1
         
-        # Apply frequency range button
+        # Apply frequency range button (larger, easier to press)
         self.apply_freq_button = QPushButton("Apply Frequency Range")
+        self.apply_freq_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2563eb;
+                font-size: 13px;
+                font-weight: bold;
+                padding: 12px;
+                min-height: 40px;
+            }
+            QPushButton:hover {
+                background-color: #3b82f6;
+            }
+        """)
         self.apply_freq_button.clicked.connect(self._apply_frequency_range)
         layout.addWidget(self.apply_freq_button, row, 0, 1, 2)
         row += 1
         
-        # Frequency scale
-        layout.addWidget(QLabel("Y-Scale:"), row, 0, 2, 1)  # Span 2 rows
+        # Frequency scale (vertical stack)
+        layout.addWidget(QLabel("Y-Scale:"), row, 0, 1, 2)
+        row += 1
+        
         self.scale_group = QButtonGroup()
         
         self.linear_radio = QRadioButton("Linear")
@@ -420,17 +434,28 @@ class SpectrogramWindow(QMainWindow):
         
         self.linear_radio.toggled.connect(self._update_plots)
         
-        # Vertical layout for radio buttons
-        layout.addWidget(self.linear_radio, row, 1)
+        # Vertical stack for radio buttons
+        layout.addWidget(self.linear_radio, row, 0, 1, 2)
         row += 1
-        layout.addWidget(self.log_radio, row, 1)
+        layout.addWidget(self.log_radio, row, 0, 1, 2)
         row += 1
         
-        # Color map
+        # Color map (fix dropdown text color)
         layout.addWidget(QLabel("Colormap:"), row, 0)
         self.colormap_combo = QComboBox()
         self.colormap_combo.addItems(['viridis', 'plasma', 'inferno', 'magma', 'jet', 'hot', 'cool'])
         self.colormap_combo.setCurrentText('viridis')
+        # Fix dropdown text color to white
+        self.colormap_combo.setStyleSheet("""
+            QComboBox {
+                color: white;
+            }
+            QComboBox QAbstractItemView {
+                color: white;
+                background-color: #2d3748;
+                selection-background-color: #4a5568;
+            }
+        """)
         self.colormap_combo.currentTextChanged.connect(self._update_plots)
         layout.addWidget(self.colormap_combo, row, 1)
         row += 1
@@ -492,8 +517,45 @@ class SpectrogramWindow(QMainWindow):
         layout.addWidget(self.time_max_edit, row, 1)
         row += 1
         
-        # Apply limits button
+        # Frequency limits
+        layout.addWidget(QLabel("Frequency (Hz):"), row, 0, 1, 2)
+        row += 1
+        
+        layout.addWidget(QLabel("Min:"), row, 0)
+        self.freq_axis_min_edit = QLineEdit()
+        self.freq_axis_min_edit.setText("10")
+        self.freq_axis_min_edit.setPlaceholderText("e.g., 10 or 1e1")
+        self.freq_axis_min_edit.setToolTip("Enter frequency in Hz (standard or scientific notation)")
+        self.freq_axis_min_edit.setEnabled(False)
+        layout.addWidget(self.freq_axis_min_edit, row, 1)
+        row += 1
+        
+        layout.addWidget(QLabel("Max:"), row, 0)
+        self.freq_axis_max_edit = QLineEdit()
+        self.freq_axis_max_edit.setText("2000")
+        self.freq_axis_max_edit.setPlaceholderText("e.g., 2000 or 2e3")
+        self.freq_axis_max_edit.setToolTip("Enter frequency in Hz (standard or scientific notation)")
+        self.freq_axis_max_edit.setEnabled(False)
+        layout.addWidget(self.freq_axis_max_edit, row, 1)
+        row += 1
+        
+        # Apply limits button (larger, easier to press)
         self.apply_limits_button = QPushButton("Apply Limits")
+        self.apply_limits_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2563eb;
+                font-size: 13px;
+                font-weight: bold;
+                padding: 12px;
+                min-height: 40px;
+            }
+            QPushButton:hover {
+                background-color: #3b82f6;
+            }
+            QPushButton:disabled {
+                background-color: #4a5568;
+            }
+        """)
         self.apply_limits_button.setEnabled(False)
         self.apply_limits_button.clicked.connect(self._apply_custom_limits)
         layout.addWidget(self.apply_limits_button, row, 0, 1, 2)
@@ -507,6 +569,8 @@ class SpectrogramWindow(QMainWindow):
         # Enable/disable manual limit controls
         self.time_min_edit.setEnabled(not checked)
         self.time_max_edit.setEnabled(not checked)
+        self.freq_axis_min_edit.setEnabled(not checked)
+        self.freq_axis_max_edit.setEnabled(not checked)
         self.apply_limits_button.setEnabled(not checked)
         
         if checked:
@@ -515,10 +579,12 @@ class SpectrogramWindow(QMainWindow):
     
     def _apply_custom_limits(self):
         """Apply custom axis limits to all plots."""
-        # Parse time limits from text fields
+        # Parse time and frequency limits from text fields
         try:
             time_min = float(self.time_min_edit.text())
             time_max = float(self.time_max_edit.text())
+            freq_min = float(self.freq_axis_min_edit.text())
+            freq_max = float(self.freq_axis_max_edit.text())
         except ValueError as e:
             from spectral_edge.utils.message_box import show_warning
             show_warning(self, "Invalid Input", 
@@ -530,9 +596,15 @@ class SpectrogramWindow(QMainWindow):
             show_warning(self, "Invalid Limits", "Time minimum must be less than maximum.")
             return
         
+        if freq_min >= freq_max:
+            from spectral_edge.utils.message_box import show_warning
+            show_warning(self, "Invalid Limits", "Frequency minimum must be less than maximum.")
+            return
+        
         # Apply to all plots
         for plot_widget in self.plot_widgets:
             plot_widget.setXRange(time_min, time_max, padding=0)
+            plot_widget.setYRange(freq_min, freq_max, padding=0)
         
     def _calculate_spectrograms(self):
         """Calculate spectrograms for all channels."""

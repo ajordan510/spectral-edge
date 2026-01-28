@@ -1867,9 +1867,39 @@ class PSDAnalysisWindow(QMainWindow):
                 all_sample_rates.append(result['sample_rate'])  # Store each channel's sample rate
                 flight_info.append(ch_data['flight_key'])
             
-            # Stack signals into 2D array (samples x channels)
-            self.signal_data_full = np.column_stack(all_signals_full) if len(all_signals_full) > 1 else all_signals_full[0].reshape(-1, 1)
-            self.signal_data_display = np.column_stack(all_signals_display) if len(all_signals_display) > 1 else all_signals_display[0].reshape(-1, 1)
+            # Align signal lengths with zero-padding if needed
+            if len(all_signals_full) > 1:
+                # Find maximum length
+                max_len_full = max(len(sig) for sig in all_signals_full)
+                max_len_display = max(len(sig) for sig in all_signals_display)
+                
+                # Zero-pad shorter signals to match longest
+                all_signals_full_padded = []
+                all_signals_display_padded = []
+                
+                for i, (sig_full, sig_display) in enumerate(zip(all_signals_full, all_signals_display)):
+                    if len(sig_full) < max_len_full:
+                        # Pad with zeros at the end
+                        padded_full = np.pad(sig_full, (0, max_len_full - len(sig_full)), mode='constant', constant_values=0)
+                        print(f"    Channel {i+1}: Padded from {len(sig_full)} to {max_len_full} samples")
+                    else:
+                        padded_full = sig_full
+                    
+                    if len(sig_display) < max_len_display:
+                        padded_display = np.pad(sig_display, (0, max_len_display - len(sig_display)), mode='constant', constant_values=0)
+                    else:
+                        padded_display = sig_display
+                    
+                    all_signals_full_padded.append(padded_full)
+                    all_signals_display_padded.append(padded_display)
+                
+                # Stack signals into 2D array (samples x channels)
+                self.signal_data_full = np.column_stack(all_signals_full_padded)
+                self.signal_data_display = np.column_stack(all_signals_display_padded)
+            else:
+                # Single channel - no padding needed
+                self.signal_data_full = all_signals_full[0].reshape(-1, 1)
+                self.signal_data_display = all_signals_display[0].reshape(-1, 1)
             self.time_data_full = time_data_full
             self.time_data_display = time_data_display
             self.sample_rate = sample_rate  # Reference sample rate (max)

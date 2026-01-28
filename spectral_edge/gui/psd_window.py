@@ -106,7 +106,7 @@ class PSDAnalysisWindow(QMainWindow):
         self.flight_name = ""  # Flight name for HDF5 data, empty for CSV
         
         # PSD results storage (dictionary keyed by channel name)
-        self.frequencies = None
+        self.frequencies = {}  # Changed to dict for per-channel frequencies
         self.psd_results = {}
         self.rms_values = {}
         
@@ -472,19 +472,23 @@ class PSDAnalysisWindow(QMainWindow):
         layout.addWidget(self.df_spin, row, 1)
         row += 1
         
-        # Segment length (nperseg) - calculated from df
-        layout.addWidget(QLabel("Segment Length:"), row, 0)
-        self.nperseg_label = QLabel("256")
-        self.nperseg_label.setStyleSheet("color: #9ca3af;")
-        layout.addWidget(self.nperseg_label, row, 1)
-        row += 1
-        
-        # Use efficient FFT size checkbox
+        # Use efficient FFT size checkbox with df display
+        fft_layout = QHBoxLayout()
         self.efficient_fft_checkbox = QCheckBox("Use efficient FFT size")
         self.efficient_fft_checkbox.setChecked(True)
+        self.efficient_fft_checkbox.setToolTip("Round segment length to nearest power of 2 for faster FFT computation")
         self.efficient_fft_checkbox.stateChanged.connect(self._update_nperseg_from_df)
         self.efficient_fft_checkbox.stateChanged.connect(self._on_parameter_changed)
-        layout.addWidget(self.efficient_fft_checkbox, row, 0, 1, 2)
+        fft_layout.addWidget(self.efficient_fft_checkbox)
+        
+        # Add df display label next to checkbox
+        self.actual_df_label = QLabel("(df = 1.0 Hz)")
+        self.actual_df_label.setStyleSheet("color: #9ca3af; font-size: 10pt;")
+        self.actual_df_label.setToolTip("Actual frequency resolution after FFT size adjustment")
+        fft_layout.addWidget(self.actual_df_label)
+        fft_layout.addStretch()
+        
+        layout.addLayout(fft_layout, row, 0, 1, 2)
         row += 1
         
         # Overlap percentage
@@ -791,12 +795,13 @@ class PSDAnalysisWindow(QMainWindow):
     
     def _update_nperseg_from_df(self):
         """
-        Update nperseg based on desired frequency resolution (df).
+        Update actual df label based on desired frequency resolution and FFT size option.
         
         The relationship is: df = sample_rate / nperseg
         Therefore: nperseg = sample_rate / df
         
         If "Use efficient FFT size" is checked, round to the nearest power of 2.
+        This updates the displayed actual df value that will be achieved.
         """
         if self.sample_rate is None:
             return
@@ -808,9 +813,10 @@ class PSDAnalysisWindow(QMainWindow):
             # Round to nearest power of 2 (preferring larger for better resolution)
             nperseg = 2 ** int(np.ceil(np.log2(nperseg)))
         
-        # Update label
+        # Update actual df label
         actual_df = self.sample_rate / nperseg
-        self.nperseg_label.setText(f"{nperseg} (Δf={actual_df:.3f} Hz)")
+        self.actual_df_label.setText(f"(df = {actual_df:.3f} Hz)")
+        self.actual_df_label.setToolTip(f"Actual frequency resolution: {actual_df:.3f} Hz (nperseg = {nperseg})")
     
     def _load_file(self):
         """Handle file loading button click."""
@@ -1055,9 +1061,8 @@ class PSDAnalysisWindow(QMainWindow):
                         window=window
                     )
                 
-                # Store full frequency range (same for all channels)
-                if self.frequencies is None:
-                    self.frequencies = frequencies
+                # Store frequency array for this channel (may differ with different sample rates)
+                self.frequencies[channel_name] = frequencies
                 
                 # Store PSD for this channel
                 self.psd_results[channel_name] = psd
@@ -1103,7 +1108,7 @@ class PSDAnalysisWindow(QMainWindow):
     
     def _update_plot(self):
         """Update the PSD plot with selected channels."""
-        if self.frequencies is None or not self.psd_results:
+        if not self.frequencies or not self.psd_results:
             return
         
         # Clear previous plot
@@ -1113,15 +1118,8 @@ class PSDAnalysisWindow(QMainWindow):
         freq_min = self.freq_min_spin.value()
         freq_max = self.freq_max_spin.value()
         
-        # Filter frequencies for plotting
-        freq_mask = (self.frequencies >= freq_min) & (self.frequencies <= freq_max)
-        
-        # Check if mask has any True values
-        if not np.any(freq_mask):
-            show_warning(self, "No Data", "No frequency data in the specified range. Please adjust the frequency range.")
-            return
-        
-        frequencies_plot = self.frequencies[freq_mask]
+        # Note: With multi-rate channels, each channel has its own frequency array
+        # We'll apply freq_mask per channel in the loop below
         
         # Define colors for different channels
         colors = ['#60a5fa', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
@@ -1140,6 +1138,16 @@ class PSDAnalysisWindow(QMainWindow):
                 if channel_name not in self.psd_results:
                     continue
                 
+                # Get frequency array for this channel
+                frequencies = self.frequencies[channel_name]
+                
+                # Apply frequency mask for this channel's frequency array
+                freq_mask = (frequencies >= freq_min) & (frequencies <= freq_max)
+                
+                if not np.any(freq_mask):
+                    continue  # Skip this channel if no data in range
+                
+                frequencies_plot = frequencies[freq_mask]
                 psd = self.psd_results[channel_name][freq_mask]
                 rms = self.rms_values[channel_name]
                 unit = self.channel_units[i] if i < len(self.channel_units) else ''
@@ -1528,9 +1536,9 @@ class PSDAnalysisWindow(QMainWindow):
                         window=window
                     )
                     
-                    # Store full frequency range (same for all)
-                    if self.frequencies is None:
-                        self.frequencies = frequencies
+                    # Store frequency array for this channel
+                    if channel_name not in self.frequencies:
+                        self.frequencies[channel_name] = frequencies
                     
                     # Create unique key for event + channel
                     key = f"{event.name}_{channel_name}"
@@ -1556,7 +1564,7 @@ class PSDAnalysisWindow(QMainWindow):
     
     def _update_plot_with_events(self):
         """Update the PSD plot with event-based PSDs."""
-        if self.frequencies is None or not self.psd_results:
+        if not self.frequencies or not self.psd_results:
             return
         
         # Clear previous plot
@@ -1565,15 +1573,6 @@ class PSDAnalysisWindow(QMainWindow):
         # Get frequency range for plotting
         freq_min = self.freq_min_spin.value()
         freq_max = self.freq_max_spin.value()
-        
-        # Filter frequencies for plotting
-        freq_mask = (self.frequencies >= freq_min) & (self.frequencies <= freq_max)
-        
-        if not np.any(freq_mask):
-            show_warning(self, "No Data", "No frequency data in the specified range.")
-            return
-        
-        frequencies_plot = self.frequencies[freq_mask]
         
         # Define colors for different events
         colors = ['#60a5fa', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
@@ -1590,6 +1589,16 @@ class PSDAnalysisWindow(QMainWindow):
                     if key not in self.psd_results:
                         continue
                     
+                    # Get frequency array for this channel
+                    frequencies = self.frequencies[channel_name]
+                    
+                    # Apply frequency mask for this channel's frequency array
+                    freq_mask = (frequencies >= freq_min) & (frequencies <= freq_max)
+                    
+                    if not np.any(freq_mask):
+                        continue
+                    
+                    frequencies_plot = frequencies[freq_mask]
                     psd = self.psd_results[key][freq_mask]
                     rms = self.rms_values[key]
                     unit = self.channel_units[i] if i < len(self.channel_units) else ''
@@ -1707,20 +1716,13 @@ class PSDAnalysisWindow(QMainWindow):
     
     def _auto_fit_axes(self):
         """Auto-fit axes based on current data."""
-        if self.frequencies is None or not self.psd_results:
+        if not self.frequencies or not self.psd_results:
             show_information(self, "No Data", "Please calculate PSD first before using auto-fit.")
             return
         
         # Get frequency range from data
         freq_min = self.freq_min_spin.value()
         freq_max = self.freq_max_spin.value()
-        
-        # Filter frequencies
-        freq_mask = (self.frequencies >= freq_min) & (self.frequencies <= freq_max)
-        
-        if not np.any(freq_mask):
-            show_warning(self, "No Data", "No data in the specified frequency range.")
-            return
         
         # Find min/max PSD values across all selected channels
         psd_min = np.inf
@@ -1731,6 +1733,15 @@ class PSDAnalysisWindow(QMainWindow):
                 channel_name = self.channel_names[i]
                 
                 if channel_name in self.psd_results:
+                    # Get frequency array for this channel
+                    frequencies = self.frequencies[channel_name]
+                    
+                    # Apply frequency mask for this channel
+                    freq_mask = (frequencies >= freq_min) & (frequencies <= freq_max)
+                    
+                    if not np.any(freq_mask):
+                        continue
+                    
                     psd = self.psd_results[channel_name][freq_mask]
                     
                     # Filter out zeros and negative values for log scale
@@ -2034,13 +2045,13 @@ class PSDAnalysisWindow(QMainWindow):
         self.octave_combo.setEnabled(is_enabled)
         
         # Re-plot if we have data
-        if self.frequencies is not None and self.psd_results:
+        if self.frequencies and self.psd_results:
             self._update_plot()
     
     def _on_octave_fraction_changed(self):
         """Handle octave fraction selection change."""
         # Re-plot if we have data and octave display is enabled
-        if self.octave_checkbox.isChecked() and self.frequencies is not None and self.psd_results:
+        if self.octave_checkbox.isChecked() and self.frequencies and self.psd_results:
             self._update_plot()
 
     def _remove_running_mean(self, signal, window_seconds=1.0):

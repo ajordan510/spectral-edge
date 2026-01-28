@@ -26,6 +26,7 @@ from spectral_edge.core.psd import (
     calculate_psd_welch, calculate_psd_maximax, psd_to_db, calculate_rms_from_psd, 
     get_window_options, convert_psd_to_octave_bands
 )
+from spectral_edge.core.channel_data import ChannelData, align_channels_by_time
 from spectral_edge.gui.spectrogram_window import SpectrogramWindow
 from spectral_edge.gui.event_manager import EventManagerWindow, Event
 from spectral_edge.gui.flight_navigator import FlightNavigator
@@ -99,7 +100,8 @@ class PSDAnalysisWindow(QMainWindow):
         self.channel_names = None
         self.channel_units = []  # Store units for each channel
         self.channel_flight_names = []  # Store flight name for each channel (for multi-flight HDF5)
-        self.sample_rate = None
+        self.channel_sample_rates = []  # Store sample rate for each channel (for multi-rate support)
+        self.sample_rate = None  # Reference sample rate (highest or first channel)
         self.current_file = None
         self.flight_name = ""  # Flight name for HDF5 data, empty for CSV
         
@@ -1013,6 +1015,12 @@ class PSDAnalysisWindow(QMainWindow):
             for channel_idx in range(num_channels):
                 channel_name = self.channel_names[channel_idx]
                 
+                # Get this channel's sample rate (support for multi-rate)
+                if self.channel_sample_rates and len(self.channel_sample_rates) > channel_idx:
+                    channel_sample_rate = self.channel_sample_rates[channel_idx]
+                else:
+                    channel_sample_rate = self.sample_rate  # Fallback to reference rate
+                
                 # Extract signal for this channel from FULL resolution data
                 if self.signal_data_full.ndim == 1:
                     signal = self.signal_data_full
@@ -1027,7 +1035,7 @@ class PSDAnalysisWindow(QMainWindow):
                     
                     frequencies, psd = calculate_psd_maximax(
                         signal,
-                        self.sample_rate,
+                        channel_sample_rate,  # Use channel-specific sample rate
                         df=df,
                         maximax_window=maximax_window,
                         overlap_percent=maximax_overlap,
@@ -1036,12 +1044,12 @@ class PSDAnalysisWindow(QMainWindow):
                 else:
                     # Use traditional averaged PSD
                     # Calculate nperseg from df for overlap calculation
-                    nperseg = int(self.sample_rate / df)
+                    nperseg = int(channel_sample_rate / df)  # Use channel-specific sample rate
                     noverlap = int(nperseg * overlap_percent / 100.0)
                     
                     frequencies, psd = calculate_psd_welch(
                         signal,
-                        self.sample_rate,
+                        channel_sample_rate,  # Use channel-specific sample rate
                         df=df,
                         noverlap=noverlap,
                         window=window
@@ -1256,6 +1264,7 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Prepare data for selected channels
         channels_data = []
+        channel_sample_rates_list = []  # Store sample rate for each selected channel
         for idx in selected_channels:
             channel_name = self.channel_names[idx]
             # Use FULL resolution data for spectrogram calculations
@@ -1266,7 +1275,13 @@ class PSDAnalysisWindow(QMainWindow):
             unit = self.channel_units[idx] if idx < len(self.channel_units) else ''
             # Get flight name for this specific channel (empty for CSV)
             flight_name = self.channel_flight_names[idx] if idx < len(self.channel_flight_names) else ''
+            # Get sample rate for this channel
+            if self.channel_sample_rates and idx < len(self.channel_sample_rates):
+                channel_sr = self.channel_sample_rates[idx]
+            else:
+                channel_sr = self.sample_rate  # Fallback
             channels_data.append((channel_name, signal, unit, flight_name))
+            channel_sample_rates_list.append(channel_sr)
         
         # Get current PSD parameters to pass to spectrogram
         window = self.window_combo.currentText().lower()
@@ -1289,7 +1304,7 @@ class PSDAnalysisWindow(QMainWindow):
             window_obj = SpectrogramWindow(
                 self.time_data_full,
                 channels_data,  # Pass list of (name, signal, unit, flight_name) tuples
-                self.sample_rate,
+                channel_sample_rates_list,  # Pass list of sample rates (one per channel)
                 window_type=window,
                 df=df,
                 overlap_percent=overlap_percent,
@@ -1796,12 +1811,15 @@ class PSDAnalysisWindow(QMainWindow):
             all_signals_display = []
             all_channel_names = []
             all_channel_units = []
+            all_sample_rates = []  # Store sample rate for each channel
             time_data_full = None
             time_data_display = None
-            sample_rate = None
+            sample_rate = None  # Reference sample rate (will be max of all)
             decimation_factor = 1
             flight_info = []
             
+            # First pass: collect all data and find max sample rate
+            channel_data_list = []
             for idx, (flight_key, channel_key, channel_info) in enumerate(selected_items):
                 print(f"\nChannel {idx+1}/{len(selected_items)}:")
                 print(f"  Flight key: {flight_key}")
@@ -1814,30 +1832,50 @@ class PSDAnalysisWindow(QMainWindow):
                 print(f"  Display data: time shape={result['time_display'].shape}, signal shape={result['data_display'].shape}")
                 print(f"  Decimation factor: {result.get('decimation_factor', 1)}")
                 
-                # Store first channel's time and sample rate as reference
+                channel_data_list.append({
+                    'result': result,
+                    'channel_key': channel_key,
+                    'flight_key': flight_key,
+                    'units': channel_info.units
+                })
+                
+                # Track max sample rate
+                if sample_rate is None or result['sample_rate'] > sample_rate:
+                    sample_rate = result['sample_rate']
+                    decimation_factor = result.get('decimation_factor', 1)
+            
+            print(f"\nReference sample rate (max): {sample_rate} Hz")
+            
+            # Second pass: align time data if needed
+            for idx, ch_data in enumerate(channel_data_list):
+                result = ch_data['result']
+                
+                # Store first channel's time as reference
                 if time_data_full is None:
                     time_data_full = result['time_full']
                     time_data_display = result['time_display']
-                    sample_rate = result['sample_rate']
-                    decimation_factor = result.get('decimation_factor', 1)
-                elif result['sample_rate'] != sample_rate:
-                    # Warn if sample rates differ
-                    print(f"  WARNING: Sample rate mismatch! Expected {sample_rate}, got {result['sample_rate']}")
+                
+                # Check if sample rates differ
+                if result['sample_rate'] != sample_rate:
+                    print(f"  Channel {idx+1}: Different sample rate {result['sample_rate']} Hz (reference: {sample_rate} Hz)")
+                    print(f"    Multi-rate support: Each channel will use its own sample rate for PSD calculation")
                 
                 all_signals_full.append(result['data_full'])
                 all_signals_display.append(result['data_display'])
-                all_channel_names.append(channel_key)
-                all_channel_units.append(channel_info.units)
-                flight_info.append(flight_key)
+                all_channel_names.append(ch_data['channel_key'])
+                all_channel_units.append(ch_data['units'])
+                all_sample_rates.append(result['sample_rate'])  # Store each channel's sample rate
+                flight_info.append(ch_data['flight_key'])
             
             # Stack signals into 2D array (samples x channels)
             self.signal_data_full = np.column_stack(all_signals_full) if len(all_signals_full) > 1 else all_signals_full[0].reshape(-1, 1)
             self.signal_data_display = np.column_stack(all_signals_display) if len(all_signals_display) > 1 else all_signals_display[0].reshape(-1, 1)
             self.time_data_full = time_data_full
             self.time_data_display = time_data_display
-            self.sample_rate = sample_rate
+            self.sample_rate = sample_rate  # Reference sample rate (max)
             self.channel_names = all_channel_names
             self.channel_units = all_channel_units
+            self.channel_sample_rates = all_sample_rates  # Store each channel's sample rate
             self.channel_flight_names = flight_info  # Store flight name for each channel
             
             # Create file label and set flight name
@@ -1881,8 +1919,12 @@ class PSDAnalysisWindow(QMainWindow):
             self.channel_checkboxes.clear()
             
             # Create checkboxes for all channels
-            for i, (name, unit) in enumerate(zip(self.channel_names, self.channel_units)):
-                display_name = f"{name} ({unit})" if unit else name
+            for i, (name, unit, sr) in enumerate(zip(self.channel_names, self.channel_units, self.channel_sample_rates)):
+                # Include sample rate if channels have different rates
+                if len(set(self.channel_sample_rates)) > 1:
+                    display_name = f"{name} ({unit}, {sr:.0f} Hz)" if unit else f"{name} ({sr:.0f} Hz)"
+                else:
+                    display_name = f"{name} ({unit})" if unit else name
                 checkbox = QCheckBox(display_name)
                 checkbox.setChecked(True)
                 checkbox.stateChanged.connect(self._plot_time_history)

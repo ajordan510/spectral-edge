@@ -60,7 +60,7 @@ class SpectrogramWindow(QMainWindow):
     Supports up to 4 channels displayed simultaneously in adaptive layout.
     """
     
-    def __init__(self, time_data, channels_data, sample_rate, 
+    def __init__(self, time_data, channels_data, sample_rates, 
                  window_type='hann', df=1.0, overlap_percent=50, 
                  efficient_fft=True, freq_min=10, freq_max=2000):
         """
@@ -68,15 +68,14 @@ class SpectrogramWindow(QMainWindow):
         
         Args:
             time_data: Time array
-            channels_data: List of (channel_name, signal_data, unit) tuples (up to 4)
-            sample_rate: Sampling rate in Hz
+            channels_data: List of (channel_name, signal_data, unit, flight_name) tuples (up to 4)
+            sample_rates: List of sample rates (one per channel) or single float for all channels
             window_type: Window function type
             df: Desired frequency resolution in Hz
             overlap_percent: Overlap percentage
             efficient_fft: Use efficient FFT size (power of 2)
             freq_min: Minimum frequency for display
             freq_max: Maximum frequency for display
-            flight_name: Flight name for HDF5 data (empty for CSV)
         """
         super().__init__()
         
@@ -85,7 +84,15 @@ class SpectrogramWindow(QMainWindow):
         # channels_data is list of (name, signal, unit, flight_name) tuples
         self.channels_data = channels_data[:4]  # Limit to 4 channels
         self.n_channels = len(self.channels_data)
-        self.sample_rate = sample_rate
+        
+        # Handle sample rates (list or single value for backward compatibility)
+        if isinstance(sample_rates, (list, tuple)):
+            self.sample_rates = list(sample_rates[:self.n_channels])  # One per channel
+            self.sample_rate = max(self.sample_rates)  # Reference rate (max)
+        else:
+            # Backward compatibility: single sample rate for all channels
+            self.sample_rate = sample_rates
+            self.sample_rates = [sample_rates] * self.n_channels
         
         # Spectrogram data for each channel
         self.spec_data = []  # List of (times, freqs, power_db) tuples
@@ -535,34 +542,37 @@ class SpectrogramWindow(QMainWindow):
         overlap_percent = self.overlap_spin.value()
         efficient_fft = self.efficient_fft_checkbox.isChecked()
         
-        # Calculate nperseg from df
-        nperseg = int(self.sample_rate / df)
-        
-        # Use efficient FFT size if requested
-        if efficient_fft:
-            nperseg = 2 ** int(np.ceil(np.log2(nperseg)))
-        
-        # Store actual nperseg
-        self.actual_nperseg = nperseg
-        
-        # Calculate actual df
-        self.actual_df = self.sample_rate / nperseg
-        
-        # Update actual df display
-        self.actual_df_label.setText(f"{self.actual_df:.3f}")
-        
-        # Calculate noverlap
-        noverlap = int(nperseg * overlap_percent / 100)
-        
         # Clear previous data
         self.spec_data = []
         
-        # Calculate spectrogram for each channel
+        # Calculate spectrogram for each channel (using per-channel sample rates)
         for i, (channel_name, signal_data, unit, flight_name) in enumerate(self.channels_data):
+            # Get this channel's sample rate
+            channel_sample_rate = self.sample_rates[i]
+            
+            # Calculate nperseg from df for this channel
+            nperseg = int(channel_sample_rate / df)
+            
+            # Use efficient FFT size if requested
+            if efficient_fft:
+                nperseg = 2 ** int(np.ceil(np.log2(nperseg)))
+            
+            # Calculate actual df for this channel
+            actual_df_channel = channel_sample_rate / nperseg
+            
+            # Store actual parameters (use first channel's values for display)
+            if i == 0:
+                self.actual_nperseg = nperseg
+                self.actual_df = actual_df_channel
+                self.actual_df_label.setText(f"{self.actual_df:.3f}")
+            
+            # Calculate noverlap
+            noverlap = int(nperseg * overlap_percent / 100)
+            
             # Calculate spectrogram
             freqs, times, Sxx = scipy_signal.spectrogram(
                 signal_data,
-                fs=self.sample_rate,
+                fs=channel_sample_rate,  # Use channel-specific sample rate
                 window=window_type,
                 nperseg=nperseg,
                 noverlap=noverlap,

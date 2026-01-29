@@ -843,10 +843,18 @@ class PSDAnalysisWindow(QMainWindow):
                                 "Low cutoff must be less than high cutoff. Filter not applied.")
                     return signal
                 
-                if high_cutoff >= nyquist:
+                # Ensure cutoffs are safely below Nyquist (leave 5% margin for stability)
+                if high_cutoff >= nyquist * 0.95:
+                    from spectral_edge.utils.message_box import show_warning
+                    max_cutoff = nyquist * 0.95
+                    show_warning(self, "Invalid Filter Parameters", 
+                                f"High cutoff ({high_cutoff} Hz) is too close to Nyquist frequency ({nyquist:.1f} Hz).\nMaximum recommended cutoff: {max_cutoff:.1f} Hz. Filter not applied.")
+                    return signal
+                
+                if low_cutoff <= 0:
                     from spectral_edge.utils.message_box import show_warning
                     show_warning(self, "Invalid Filter Parameters", 
-                                f"High cutoff ({high_cutoff} Hz) exceeds Nyquist frequency ({nyquist:.1f} Hz). Filter not applied.")
+                                "Low cutoff must be greater than 0 Hz. Filter not applied.")
                     return signal
                 
                 # Normalize to Nyquist frequency
@@ -855,31 +863,41 @@ class PSDAnalysisWindow(QMainWindow):
             else:
                 cutoff = self.cutoff_freq_spin.value()
                 
-                # Validate cutoff frequency
-                if cutoff >= nyquist:
+                # Validate cutoff frequency (leave 5% margin for stability)
+                if cutoff >= nyquist * 0.95:
+                    from spectral_edge.utils.message_box import show_warning
+                    max_cutoff = nyquist * 0.95
+                    show_warning(self, "Invalid Filter Parameters", 
+                                f"Cutoff frequency ({cutoff} Hz) is too close to Nyquist frequency ({nyquist:.1f} Hz).\nMaximum recommended cutoff: {max_cutoff:.1f} Hz. Filter not applied.")
+                    return signal
+                
+                if cutoff <= 0:
                     from spectral_edge.utils.message_box import show_warning
                     show_warning(self, "Invalid Filter Parameters", 
-                                f"Cutoff frequency ({cutoff} Hz) exceeds Nyquist frequency ({nyquist:.1f} Hz). Filter not applied.")
+                                "Cutoff must be greater than 0 Hz. Filter not applied.")
                     return signal
                 
                 # Normalize to Nyquist frequency
                 Wn = cutoff / nyquist
                 btype = filter_type
             
-            # Design filter based on selected design type
+            # Design filter using Second-Order Sections (SOS) for numerical stability
+            # SOS format is much more stable than transfer function (b, a) format,
+            # especially for high-order filters and filters with cutoffs near Nyquist
             if filter_design == 'butterworth':
-                b, a = scipy_signal.butter(filter_order, Wn, btype=btype)
+                sos = scipy_signal.butter(filter_order, Wn, btype=btype, output='sos')
             elif filter_design == 'chebyshev':
                 # Chebyshev Type I with 0.5 dB passband ripple
-                b, a = scipy_signal.cheby1(filter_order, 0.5, Wn, btype=btype)
+                sos = scipy_signal.cheby1(filter_order, 0.5, Wn, btype=btype, output='sos')
             elif filter_design == 'bessel':
-                b, a = scipy_signal.bessel(filter_order, Wn, btype=btype)
+                sos = scipy_signal.bessel(filter_order, Wn, btype=btype, output='sos')
             else:
                 # Default to Butterworth
-                b, a = scipy_signal.butter(filter_order, Wn, btype=btype)
+                sos = scipy_signal.butter(filter_order, Wn, btype=btype, output='sos')
             
-            # Apply filter using filtfilt for zero-phase filtering
-            filtered_signal = scipy_signal.filtfilt(b, a, signal)
+            # Apply filter using sosfiltfilt for zero-phase filtering with SOS
+            # sosfiltfilt is more numerically stable than filtfilt with (b, a)
+            filtered_signal = scipy_signal.sosfiltfilt(sos, signal)
             
             return filtered_signal
             

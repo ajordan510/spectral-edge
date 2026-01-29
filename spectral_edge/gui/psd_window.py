@@ -301,6 +301,13 @@ class PSDAnalysisWindow(QMainWindow):
         display_layout.addWidget(self._create_axis_limits_group())
         tab_widget.addTab(display_tab, "Display")
         
+        # Tab 3: Filter
+        filter_tab = QWidget()
+        filter_layout = QVBoxLayout(filter_tab)
+        filter_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        filter_layout.addWidget(self._create_filter_group())
+        tab_widget.addTab(filter_tab, "Filter")
+        
         layout.addWidget(tab_widget)
         
         # Calculate button
@@ -645,6 +652,243 @@ class PSDAnalysisWindow(QMainWindow):
         group.setLayout(layout)
         return group
     
+    def _create_filter_group(self):
+        """Create the filter configuration group box."""
+        group = QGroupBox("Signal Filtering")
+        layout = QVBoxLayout()
+        
+        # Description of default processing
+        desc_label = QLabel(
+            "<b>Default Processing:</b><br>"
+            "• Running mean removal (1 second window)<br>"
+            "• Applied to both display and PSD calculation<br><br>"
+            "<b>Optional Filtering:</b><br>"
+            "Additional filtering can be applied below."
+        )
+        desc_label.setWordWrap(True)
+        desc_label.setStyleSheet("color: #9ca3af; font-size: 10pt; padding: 8px; background-color: #0f172a; border-radius: 4px;")
+        layout.addWidget(desc_label)
+        
+        # Enable filtering checkbox
+        self.enable_filter_checkbox = QCheckBox("Enable Additional Filtering")
+        self.enable_filter_checkbox.setChecked(False)
+        self.enable_filter_checkbox.stateChanged.connect(self._on_filter_enabled_changed)
+        self.enable_filter_checkbox.stateChanged.connect(self._on_parameter_changed)
+        layout.addWidget(self.enable_filter_checkbox)
+        
+        # Filter options group
+        filter_options_group = QGroupBox("Filter Configuration")
+        filter_layout = QGridLayout()
+        
+        row = 0
+        
+        # Filter type
+        filter_layout.addWidget(QLabel("Filter Type:"), row, 0)
+        self.filter_type_combo = QComboBox()
+        self.filter_type_combo.addItems(['Lowpass', 'Highpass', 'Bandpass'])
+        self.filter_type_combo.setCurrentText('Lowpass')
+        self.filter_type_combo.currentTextChanged.connect(self._on_filter_type_changed)
+        self.filter_type_combo.currentTextChanged.connect(self._on_parameter_changed)
+        self.filter_type_combo.setEnabled(False)
+        filter_layout.addWidget(self.filter_type_combo, row, 1)
+        row += 1
+        
+        # Filter design
+        filter_layout.addWidget(QLabel("Filter Design:"), row, 0)
+        self.filter_design_combo = QComboBox()
+        self.filter_design_combo.addItems(['Butterworth', 'Chebyshev', 'Bessel'])
+        self.filter_design_combo.setCurrentText('Butterworth')
+        self.filter_design_combo.currentTextChanged.connect(self._on_parameter_changed)
+        self.filter_design_combo.setEnabled(False)
+        filter_layout.addWidget(self.filter_design_combo, row, 1)
+        row += 1
+        
+        # Filter order
+        filter_layout.addWidget(QLabel("Filter Order:"), row, 0)
+        self.filter_order_spin = QSpinBox()
+        self.filter_order_spin.setRange(1, 10)
+        self.filter_order_spin.setValue(4)
+        self.filter_order_spin.setSingleStep(1)
+        self.filter_order_spin.setToolTip("Higher order = sharper cutoff")
+        self.filter_order_spin.valueChanged.connect(self._on_parameter_changed)
+        self.filter_order_spin.setEnabled(False)
+        filter_layout.addWidget(self.filter_order_spin, row, 1)
+        row += 1
+        
+        # Cutoff frequency (for lowpass/highpass)
+        self.cutoff_label = QLabel("Cutoff Freq (Hz):")
+        filter_layout.addWidget(self.cutoff_label, row, 0)
+        self.cutoff_freq_spin = QDoubleSpinBox()
+        self.cutoff_freq_spin.setRange(0.1, 50000)
+        self.cutoff_freq_spin.setValue(1000.0)
+        self.cutoff_freq_spin.setDecimals(1)
+        self.cutoff_freq_spin.setSingleStep(10.0)
+        self.cutoff_freq_spin.setToolTip("Cutoff frequency for lowpass/highpass filter")
+        self.cutoff_freq_spin.valueChanged.connect(self._on_parameter_changed)
+        self.cutoff_freq_spin.setEnabled(False)
+        filter_layout.addWidget(self.cutoff_freq_spin, row, 1)
+        row += 1
+        
+        # Low cutoff frequency (for bandpass)
+        self.low_cutoff_label = QLabel("Low Cutoff (Hz):")
+        filter_layout.addWidget(self.low_cutoff_label, row, 0)
+        self.low_cutoff_spin = QDoubleSpinBox()
+        self.low_cutoff_spin.setRange(0.1, 50000)
+        self.low_cutoff_spin.setValue(100.0)
+        self.low_cutoff_spin.setDecimals(1)
+        self.low_cutoff_spin.setSingleStep(10.0)
+        self.low_cutoff_spin.setToolTip("Lower cutoff frequency for bandpass filter")
+        self.low_cutoff_spin.valueChanged.connect(self._on_parameter_changed)
+        self.low_cutoff_spin.setEnabled(False)
+        self.low_cutoff_spin.setVisible(False)
+        filter_layout.addWidget(self.low_cutoff_spin, row, 1)
+        self.low_cutoff_label.setVisible(False)
+        row += 1
+        
+        # High cutoff frequency (for bandpass)
+        self.high_cutoff_label = QLabel("High Cutoff (Hz):")
+        filter_layout.addWidget(self.high_cutoff_label, row, 0)
+        self.high_cutoff_spin = QDoubleSpinBox()
+        self.high_cutoff_spin.setRange(0.1, 50000)
+        self.high_cutoff_spin.setValue(2000.0)
+        self.high_cutoff_spin.setDecimals(1)
+        self.high_cutoff_spin.setSingleStep(10.0)
+        self.high_cutoff_spin.setToolTip("Upper cutoff frequency for bandpass filter")
+        self.high_cutoff_spin.valueChanged.connect(self._on_parameter_changed)
+        self.high_cutoff_spin.setEnabled(False)
+        self.high_cutoff_spin.setVisible(False)
+        filter_layout.addWidget(self.high_cutoff_spin, row, 1)
+        self.high_cutoff_label.setVisible(False)
+        row += 1
+        
+        filter_options_group.setLayout(filter_layout)
+        layout.addWidget(filter_options_group)
+        
+        layout.addStretch()
+        
+        group.setLayout(layout)
+        return group
+    
+    def _on_filter_enabled_changed(self):
+        """Handle filter enable/disable."""
+        enabled = self.enable_filter_checkbox.isChecked()
+        self.filter_type_combo.setEnabled(enabled)
+        self.filter_design_combo.setEnabled(enabled)
+        self.filter_order_spin.setEnabled(enabled)
+        
+        # Update cutoff frequency controls based on filter type
+        if enabled:
+            self._on_filter_type_changed()
+        else:
+            self.cutoff_freq_spin.setEnabled(False)
+            self.low_cutoff_spin.setEnabled(False)
+            self.high_cutoff_spin.setEnabled(False)
+    
+    def _on_filter_type_changed(self):
+        """Handle filter type change to show/hide appropriate cutoff controls."""
+        filter_type = self.filter_type_combo.currentText()
+        enabled = self.enable_filter_checkbox.isChecked()
+        
+        if filter_type == 'Bandpass':
+            # Show bandpass controls
+            self.cutoff_freq_spin.setVisible(False)
+            self.cutoff_label.setVisible(False)
+            self.low_cutoff_spin.setVisible(True)
+            self.high_cutoff_spin.setVisible(True)
+            self.low_cutoff_label.setVisible(True)
+            self.high_cutoff_label.setVisible(True)
+            
+            self.low_cutoff_spin.setEnabled(enabled)
+            self.high_cutoff_spin.setEnabled(enabled)
+        else:
+            # Show single cutoff control
+            self.cutoff_freq_spin.setVisible(True)
+            self.cutoff_label.setVisible(True)
+            self.low_cutoff_spin.setVisible(False)
+            self.high_cutoff_spin.setVisible(False)
+            self.low_cutoff_label.setVisible(False)
+            self.high_cutoff_label.setVisible(False)
+            
+            self.cutoff_freq_spin.setEnabled(enabled)
+    
+    def _apply_filter(self, signal, sample_rate):
+        """
+        Apply the configured filter to the signal.
+        
+        Args:
+            signal: Input signal array
+            sample_rate: Sample rate of the signal in Hz
+            
+        Returns:
+            Filtered signal array
+        """
+        from scipy import signal as scipy_signal
+        
+        filter_type = self.filter_type_combo.currentText().lower()
+        filter_design = self.filter_design_combo.currentText().lower()
+        filter_order = self.filter_order_spin.value()
+        
+        # Get cutoff frequencies
+        nyquist = sample_rate / 2.0
+        
+        try:
+            if filter_type == 'bandpass':
+                low_cutoff = self.low_cutoff_spin.value()
+                high_cutoff = self.high_cutoff_spin.value()
+                
+                # Validate cutoff frequencies
+                if low_cutoff >= high_cutoff:
+                    from spectral_edge.utils.message_box import show_warning
+                    show_warning(self, "Invalid Filter Parameters", 
+                                "Low cutoff must be less than high cutoff. Filter not applied.")
+                    return signal
+                
+                if high_cutoff >= nyquist:
+                    from spectral_edge.utils.message_box import show_warning
+                    show_warning(self, "Invalid Filter Parameters", 
+                                f"High cutoff ({high_cutoff} Hz) exceeds Nyquist frequency ({nyquist:.1f} Hz). Filter not applied.")
+                    return signal
+                
+                # Normalize to Nyquist frequency
+                Wn = [low_cutoff / nyquist, high_cutoff / nyquist]
+                btype = 'bandpass'
+            else:
+                cutoff = self.cutoff_freq_spin.value()
+                
+                # Validate cutoff frequency
+                if cutoff >= nyquist:
+                    from spectral_edge.utils.message_box import show_warning
+                    show_warning(self, "Invalid Filter Parameters", 
+                                f"Cutoff frequency ({cutoff} Hz) exceeds Nyquist frequency ({nyquist:.1f} Hz). Filter not applied.")
+                    return signal
+                
+                # Normalize to Nyquist frequency
+                Wn = cutoff / nyquist
+                btype = filter_type
+            
+            # Design filter based on selected design type
+            if filter_design == 'butterworth':
+                b, a = scipy_signal.butter(filter_order, Wn, btype=btype)
+            elif filter_design == 'chebyshev':
+                # Chebyshev Type I with 0.5 dB passband ripple
+                b, a = scipy_signal.cheby1(filter_order, 0.5, Wn, btype=btype)
+            elif filter_design == 'bessel':
+                b, a = scipy_signal.bessel(filter_order, Wn, btype=btype)
+            else:
+                # Default to Butterworth
+                b, a = scipy_signal.butter(filter_order, Wn, btype=btype)
+            
+            # Apply filter using filtfilt for zero-phase filtering
+            filtered_signal = scipy_signal.filtfilt(b, a, signal)
+            
+            return filtered_signal
+            
+        except Exception as e:
+            from spectral_edge.utils.message_box import show_warning
+            show_warning(self, "Filter Error", 
+                        f"Failed to apply filter: {str(e)}\n\nFilter not applied.")
+            return signal
+    
     def _create_plot_panel(self):
         """Create the right plot panel with time history and PSD plots."""
         panel = QWidget()
@@ -659,10 +903,15 @@ class PSDAnalysisWindow(QMainWindow):
         self.time_plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.time_plot_widget.setMouseEnabled(x=True, y=True)
         
-        # Add legend for time plot with styled background
+        # Set initial axis limits for professional appearance
+        self.time_plot_widget.setXRange(0, 60, padding=0)
+        self.time_plot_widget.setYRange(-10, 10, padding=0)
+        
+        # Add legend for time plot with styled background (initially hidden)
         self.time_legend = self.time_plot_widget.addLegend(offset=(10, 10))
         self.time_legend.setBrush(pg.mkBrush(26, 31, 46, 255))  # Solid GUI background
         self.time_legend.setPen(pg.mkPen(74, 85, 104, 255))  # Subtle border
+        self.time_legend.setVisible(False)  # Hide until data is loaded
         
         # Connect click event for interactive event selection
         self.time_plot_widget.scene().sigMouseClicked.connect(self._on_time_plot_clicked)
@@ -681,13 +930,18 @@ class PSDAnalysisWindow(QMainWindow):
         self.plot_widget.setMouseEnabled(x=True, y=True)
         self.plot_widget.setLogMode(x=True, y=True)
         
+        # Set initial axis limits for professional appearance (log scale: 10^1 to 10^3.5 for x, 10^-5 to 10^1 for y)
+        self.plot_widget.setXRange(np.log10(10), np.log10(3000), padding=0)
+        self.plot_widget.setYRange(np.log10(1e-5), np.log10(10), padding=0)
+        
         # Disable auto-range to prevent crosshair from panning
         self.plot_widget.getPlotItem().vb.disableAutoRange()
         
-        # Add legend for PSD with styled background
+        # Add legend for PSD with styled background (initially hidden)
         self.legend = self.plot_widget.addLegend(offset=(10, 10))
         self.legend.setBrush(pg.mkBrush(26, 31, 46, 255))  # Solid GUI background
         self.legend.setPen(pg.mkPen(74, 85, 104, 255))  # Subtle border
+        self.legend.setVisible(False)  # Hide until data is calculated
         
         # Configure axis appearance for full box border
         axis_pen = pg.mkPen(color='#4a5568', width=2)
@@ -926,10 +1180,14 @@ class PSDAnalysisWindow(QMainWindow):
         self.time_plot_widget.clear()
         self.time_legend.clear()
         
-        # Re-add legend with styling
+        # Re-add legend with styling and make it visible (data is loaded)
         self.time_legend = self.time_plot_widget.addLegend(offset=(10, 10))
         self.time_legend.setBrush(pg.mkBrush(26, 31, 46, 255))  # Solid GUI background
         self.time_legend.setPen(pg.mkPen(74, 85, 104, 255))
+        self.time_legend.setVisible(True)  # Show legend when data is present
+        
+        # Enable autorange for time history after data is loaded
+        self.time_plot_widget.enableAutoRange()
         
         # Define colors for different channels
         colors = ['#60a5fa', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
@@ -948,6 +1206,15 @@ class PSDAnalysisWindow(QMainWindow):
                 else:
                     signal = self.signal_data_display[:, i].copy()
                 
+                # Apply optional filtering if enabled
+                if self.enable_filter_checkbox.isChecked():
+                    # Get channel-specific sample rate
+                    if self.channel_sample_rates and len(self.channel_sample_rates) > i:
+                        channel_sample_rate = self.channel_sample_rates[i]
+                    else:
+                        channel_sample_rate = self.sample_rate
+                    signal = self._apply_filter(signal, channel_sample_rate)
+                
                 # Apply running mean removal if checkbox is checked
                 if self.remove_mean_checkbox.isChecked():
                     signal = self._remove_running_mean(signal, window_seconds=1.0)
@@ -961,9 +1228,16 @@ class PSDAnalysisWindow(QMainWindow):
                 else:
                     legend_label = channel_name
                 
-                # Add suffix to legend if running mean removed
+                # Add suffix to legend for processing applied
+                processing_tags = []
+                if self.enable_filter_checkbox.isChecked():
+                    filter_type = self.filter_type_combo.currentText().lower()
+                    processing_tags.append(f"{filter_type} filtered")
                 if self.remove_mean_checkbox.isChecked():
-                    legend_label += " (mean removed)"
+                    processing_tags.append("mean removed")
+                
+                if processing_tags:
+                    legend_label += f" ({', '.join(processing_tags)})"
                 
                 self.time_plot_widget.plot(
                     self.time_data_display,
@@ -1029,9 +1303,13 @@ class PSDAnalysisWindow(QMainWindow):
                 
                 # Extract signal for this channel from FULL resolution data
                 if self.signal_data_full.ndim == 1:
-                    signal = self.signal_data_full
+                    signal = self.signal_data_full.copy()
                 else:
-                    signal = self.signal_data_full[:, channel_idx]
+                    signal = self.signal_data_full[:, channel_idx].copy()
+                
+                # Apply optional filtering if enabled
+                if self.enable_filter_checkbox.isChecked():
+                    signal = self._apply_filter(signal, channel_sample_rate)
                 
                 # Calculate PSD (maximax or traditional)
                 if self.maximax_checkbox.isChecked():
@@ -1235,12 +1513,20 @@ class PSDAnalysisWindow(QMainWindow):
                 
                 plot_count += 1
         
+        # Show legend when data is present
+        if plot_count > 0:
+            self.legend.setVisible(True)
+        
         # Update Y-axis label with units
         if self.channel_units and self.channel_units[0]:
             unit = self.channel_units[0]
             self.plot_widget.setLabel('left', f'PSD ({unit}²/Hz)', color='#e0e0e0', size='12pt')
         else:
             self.plot_widget.setLabel('left', 'PSD (units²/Hz)', color='#e0e0e0', size='12pt')
+        
+        # Enable autorange for PSD plot after data is calculated
+        if plot_count > 0:
+            self.plot_widget.enableAutoRange()
         
         # Apply axis limits from controls
         self._apply_axis_limits()

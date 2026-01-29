@@ -341,34 +341,40 @@ class SpectrogramWindow(QMainWindow):
         layout.addWidget(self.window_combo, row, 1)
         row += 1
         
-        # Desired frequency resolution
-        layout.addWidget(QLabel("Desired Δf (Hz):"), row, 0)
+        # Frequency resolution (df) - match PSD style
+        layout.addWidget(QLabel("Δf (Hz):"), row, 0)
         self.df_spin = QDoubleSpinBox()
-        self.df_spin.setRange(0.1, 100)
+        self.df_spin.setRange(0.01, 100)
         self.df_spin.setValue(df)
-        self.df_spin.setDecimals(1)
+        self.df_spin.setDecimals(2)
+        self.df_spin.setSingleStep(0.1)
         layout.addWidget(self.df_spin, row, 1)
         row += 1
         
-        # Actual df display (read-only)
-        layout.addWidget(QLabel("Actual Δf (Hz):"), row, 0)
-        self.actual_df_label = QLabel("--")
-        self.actual_df_label.setStyleSheet("color: #60a5fa; font-weight: bold;")
-        layout.addWidget(self.actual_df_label, row, 1)
+        # Use efficient FFT size checkbox with df display - match PSD style
+        fft_layout = QHBoxLayout()
+        self.efficient_fft_checkbox = QCheckBox("Use efficient FFT size")
+        self.efficient_fft_checkbox.setChecked(efficient_fft)
+        self.efficient_fft_checkbox.setToolTip("Round segment length to nearest power of 2 for faster FFT computation")
+        fft_layout.addWidget(self.efficient_fft_checkbox)
+        
+        # Add df display label next to checkbox
+        self.actual_df_label = QLabel("(df = 1.0 Hz)")
+        self.actual_df_label.setStyleSheet("color: #9ca3af; font-size: 10pt;")
+        self.actual_df_label.setToolTip("Actual frequency resolution after FFT size adjustment")
+        fft_layout.addWidget(self.actual_df_label)
+        fft_layout.addStretch()
+        
+        layout.addLayout(fft_layout, row, 0, 1, 2)
         row += 1
         
-        # Overlap
+        # Overlap percentage - match PSD style
         layout.addWidget(QLabel("Overlap (%):"), row, 0)
         self.overlap_spin = QSpinBox()
         self.overlap_spin.setRange(0, 90)
         self.overlap_spin.setValue(overlap_percent)
+        self.overlap_spin.setSingleStep(10)
         layout.addWidget(self.overlap_spin, row, 1)
-        row += 1
-        
-        # Efficient FFT
-        self.efficient_fft_checkbox = QCheckBox("Efficient FFT (power of 2)")
-        self.efficient_fft_checkbox.setChecked(efficient_fft)
-        layout.addWidget(self.efficient_fft_checkbox, row, 0, 1, 2)
         row += 1
         
         group.setLayout(layout)
@@ -417,27 +423,6 @@ class SpectrogramWindow(QMainWindow):
         """)
         self.apply_freq_button.clicked.connect(self._apply_frequency_range)
         layout.addWidget(self.apply_freq_button, row, 0, 1, 2)
-        row += 1
-        
-        # Frequency scale (vertical stack)
-        layout.addWidget(QLabel("Y-Scale:"), row, 0, 1, 2)
-        row += 1
-        
-        self.scale_group = QButtonGroup()
-        
-        self.linear_radio = QRadioButton("Linear")
-        self.log_radio = QRadioButton("Log")
-        self.linear_radio.setChecked(True)  # Default to linear
-        
-        self.scale_group.addButton(self.linear_radio)
-        self.scale_group.addButton(self.log_radio)
-        
-        self.linear_radio.toggled.connect(self._update_plots)
-        
-        # Vertical stack for radio buttons
-        layout.addWidget(self.linear_radio, row, 0, 1, 2)
-        row += 1
-        layout.addWidget(self.log_radio, row, 0, 1, 2)
         row += 1
         
         # Color map (fix dropdown text color)
@@ -674,7 +659,6 @@ class SpectrogramWindow(QMainWindow):
             freq_min = 10.0
             freq_max = 2000.0
         colormap_name = self.colormap_combo.currentText()
-        use_log_scale = self.log_radio.isChecked()
         snr_db = self.snr_spin.value()
         show_colorbar = self.show_colorbar_checkbox.isChecked()
         
@@ -722,34 +706,13 @@ class SpectrogramWindow(QMainWindow):
                 freqs_plot[-1] - freqs_plot[0]
             ))
             
-            # Set Y-axis scale mode
-            if use_log_scale:
-                plot_widget.setLogMode(x=False, y=True)
-                plot_widget.setLabel('left', 'Frequency (Hz, log)', color='#e0e0e0', size='11pt')
-                
-                # Set custom ticks for octave-based spacing (powers of 10)
-                min_power = int(np.floor(np.log10(freq_min)))
-                max_power = int(np.ceil(np.log10(freq_max)))
-                
-                tick_values = []
-                tick_labels = []
-                
-                for power in range(min_power, max_power + 1):
-                    freq = 10 ** power
-                    if freq >= freq_min and freq <= freq_max:
-                        tick_values.append(freq)  # Use actual frequency value (PyQtGraph handles log conversion)
-                        tick_labels.append(str(int(freq)))
-                
-                # Set the ticks on the left axis
-                left_axis = plot_widget.getPlotItem().getAxis('left')
-                left_axis.setTicks([[(val, label) for val, label in zip(tick_values, tick_labels)]])
-            else:
-                plot_widget.setLogMode(x=False, y=False)
-                plot_widget.setLabel('left', 'Frequency (Hz)', color='#e0e0e0', size='11pt')
-                
-                # Reset to automatic ticks for linear scale
-                left_axis = plot_widget.getPlotItem().getAxis('left')
-                left_axis.setTicks(None)
+            # Set Y-axis to linear scale only
+            plot_widget.setLogMode(x=False, y=False)
+            plot_widget.setLabel('left', 'Frequency (Hz)', color='#e0e0e0', size='11pt')
+            
+            # Reset to automatic ticks for linear scale
+            left_axis = plot_widget.getPlotItem().getAxis('left')
+            left_axis.setTicks(None)
             
             # Apply colormap using matplotlib colormap
             colors = []

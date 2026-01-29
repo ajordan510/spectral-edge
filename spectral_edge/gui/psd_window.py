@@ -1289,6 +1289,8 @@ class PSDAnalysisWindow(QMainWindow):
             window = self.window_combo.currentText().lower()
             df = self.df_spin.value()
             overlap_percent = self.overlap_spin.value()
+            freq_min = self.freq_min_spin.value()
+            freq_max = self.freq_max_spin.value()
             
             # Note: Frequency range is for DISPLAY only, not calculation
             # PSD is calculated for full frequency range up to Nyquist
@@ -1783,6 +1785,8 @@ class PSDAnalysisWindow(QMainWindow):
             window = self.window_combo.currentText().lower()
             df = self.df_spin.value()
             overlap_percent = self.overlap_spin.value()
+            freq_min = self.freq_min_spin.value()
+            freq_max = self.freq_max_spin.value()
             
             # Note: Frequency range is for DISPLAY only, not calculation
             # PSD is calculated for full frequency range up to Nyquist

@@ -379,6 +379,7 @@ class SpectrogramWindow(QMainWindow):
         self.overlap_spin.setRange(0, 90)
         self.overlap_spin.setValue(overlap_percent)
         self.overlap_spin.setSingleStep(10)
+        self.overlap_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
         layout.addWidget(self.overlap_spin, row, 1)
         row += 1
         
@@ -456,6 +457,7 @@ class SpectrogramWindow(QMainWindow):
         self.snr_spin.setRange(10, 100)
         self.snr_spin.setValue(60)
         self.snr_spin.setSingleStep(5)
+        self.snr_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
         self.snr_spin.setToolTip("Signal-to-noise ratio for color scale dynamic range")
         self.snr_spin.valueChanged.connect(self._update_plots)
         layout.addWidget(self.snr_spin, row, 1)

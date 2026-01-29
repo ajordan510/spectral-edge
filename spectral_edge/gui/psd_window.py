@@ -432,7 +432,7 @@ class PSDAnalysisWindow(QMainWindow):
         layout.addWidget(QLabel("Min Freq (Hz):"), 0, 0)
         self.freq_min_spin = QDoubleSpinBox()
         self.freq_min_spin.setRange(0.1, 10000)
-        self.freq_min_spin.setValue(10.0)
+        self.freq_min_spin.setValue(20.0)
         self.freq_min_spin.setDecimals(1)
         self.freq_min_spin.valueChanged.connect(self._on_parameter_changed)
         layout.addWidget(self.freq_min_spin, 0, 1)
@@ -661,7 +661,7 @@ class PSDAnalysisWindow(QMainWindow):
         desc_label = QLabel(
             "<b>Default Processing:</b><br>"
             "• Running mean removal (1 second window)<br>"
-            "• Applied to both display and PSD calculation<br><br>"
+            "• Applied to PSD calculation only<br><br>"
             "<b>Optional Filtering:</b><br>"
             "Additional filtering can be applied below."
         )
@@ -783,6 +783,10 @@ class PSDAnalysisWindow(QMainWindow):
             self.cutoff_freq_spin.setEnabled(False)
             self.low_cutoff_spin.setEnabled(False)
             self.high_cutoff_spin.setEnabled(False)
+        
+        # Replot time history to show/hide filtering
+        if self.signal_data_display is not None:
+            self._plot_time_history()
     
     def _on_filter_type_changed(self):
         """Handle filter type change to show/hide appropriate cutoff controls."""
@@ -1242,7 +1246,9 @@ class PSDAnalysisWindow(QMainWindow):
                 pen = pg.mkPen(color=color, width=1.5)
                 # Create legend label with individual flight name if available
                 if flight_name:
-                    legend_label = f"{flight_name} - {channel_name}"
+                    # Remove 'flight_' prefix for cleaner display
+                    clean_flight_name = flight_name.replace('flight_', '')
+                    legend_label = f"{clean_flight_name} - {channel_name}"
                 else:
                     legend_label = channel_name
                 
@@ -1284,21 +1290,8 @@ class PSDAnalysisWindow(QMainWindow):
             df = self.df_spin.value()
             overlap_percent = self.overlap_spin.value()
             
-            # Get frequency range for RMS calculation
-            freq_min = self.freq_min_spin.value()
-            freq_max = self.freq_max_spin.value()
-            
-            # Limit freq_max to Nyquist frequency (sample_rate / 2)
-            nyquist_freq = self.sample_rate / 2.0
-            if freq_max > nyquist_freq:
-                freq_max = nyquist_freq
-                # Update the spinbox to show the limited value
-                self.freq_max_spin.setValue(freq_max)
-                show_information(self, "Frequency Range Adjusted", 
-                    f"Maximum frequency adjusted to Nyquist limit: {nyquist_freq:.2f} Hz\n\n"
-                    f"Sample rate: {self.sample_rate} Hz\n"
-                    f"Nyquist frequency: {nyquist_freq:.2f} Hz\n\n"
-                    f"PSD will be calculated up to {nyquist_freq:.2f} Hz.")
+            # Note: Frequency range is for DISPLAY only, not calculation
+            # PSD is calculated for full frequency range up to Nyquist
             
             # Determine number of channels and shape
             if self.signal_data_full.ndim == 1:
@@ -1438,7 +1431,10 @@ class PSDAnalysisWindow(QMainWindow):
                 frequencies = self.frequencies[channel_name]
                 
                 # Apply frequency mask for this channel's frequency array
-                freq_mask = (frequencies >= freq_min) & (frequencies <= freq_max)
+                # Clip to available frequency range (don't error if user sets range beyond data)
+                actual_freq_min = max(freq_min, frequencies[0])
+                actual_freq_max = min(freq_max, frequencies[-1])
+                freq_mask = (frequencies >= actual_freq_min) & (frequencies <= actual_freq_max)
                 
                 if not np.any(freq_mask):
                     continue  # Skip this channel if no data in range
@@ -1453,9 +1449,10 @@ class PSDAnalysisWindow(QMainWindow):
                 # Convert to octave bands if requested
                 if use_octave and octave_fraction is not None:
                     try:
+                        # Use FULL narrowband PSD for octave conversion (not truncated)
                         frequencies_plot_oct, psd_oct = convert_psd_to_octave_bands(
-                            frequencies_plot,
-                            psd,
+                            frequencies,  # Full frequency array
+                            self.psd_results[channel_name],  # Full PSD array
                             octave_fraction=octave_fraction,
                             freq_min=freq_min,
                             freq_max=freq_max
@@ -1465,43 +1462,49 @@ class PSDAnalysisWindow(QMainWindow):
                         # Add octave info to legend with individual flight name
                         octave_name = self.octave_combo.currentText()
                         if flight_name:
+                            # Remove 'flight_' prefix for cleaner display
+                            clean_flight_name = flight_name.replace('flight_', '')
                             if unit:
-                                legend_label = f"{flight_name} - {channel_name} ({octave_name}): RMS={rms:.4f} {unit}"
+                                legend_label = f"{clean_flight_name} - {channel_name} ({octave_name}): RMS={rms:.2f} {unit}"
                             else:
-                                legend_label = f"{flight_name} - {channel_name} ({octave_name}): RMS={rms:.4f}"
+                                legend_label = f"{clean_flight_name} - {channel_name} ({octave_name}): RMS={rms:.2f}"
                         else:
                             if unit:
-                                legend_label = f"{channel_name} ({octave_name}): RMS={rms:.4f} {unit}"
+                                legend_label = f"{channel_name} ({octave_name}): RMS={rms:.2f} {unit}"
                             else:
-                                legend_label = f"{channel_name} ({octave_name}): RMS={rms:.4f}"
+                                legend_label = f"{channel_name} ({octave_name}): RMS={rms:.2f}"
                     except Exception as e:
                         show_warning(self, "Octave Conversion Error", f"Failed to convert to octave bands: {str(e)}\nShowing narrowband data.")
                         frequencies_to_plot = frequencies_plot
                         psd_to_plot = psd
                         if flight_name:
+                            # Remove 'flight_' prefix for cleaner display
+                            clean_flight_name = flight_name.replace('flight_', '')
                             if unit:
-                                legend_label = f"{flight_name} - {channel_name}: RMS={rms:.4f} {unit}"
+                                legend_label = f"{clean_flight_name} - {channel_name}: RMS={rms:.2f} {unit}"
                             else:
-                                legend_label = f"{flight_name} - {channel_name}: RMS={rms:.4f}"
+                                legend_label = f"{clean_flight_name} - {channel_name}: RMS={rms:.2f}"
                         else:
                             if unit:
-                                legend_label = f"{channel_name}: RMS={rms:.4f} {unit}"
+                                legend_label = f"{channel_name}: RMS={rms:.2f} {unit}"
                             else:
-                                legend_label = f"{channel_name}: RMS={rms:.4f}"
+                                legend_label = f"{channel_name}: RMS={rms:.2f}"
                 else:
                     frequencies_to_plot = frequencies_plot
                     psd_to_plot = psd
                     # Create legend label with RMS and individual flight name
                     if flight_name:
+                        # Remove 'flight_' prefix for cleaner display
+                        clean_flight_name = flight_name.replace('flight_', '')
                         if unit:
-                            legend_label = f"{flight_name} - {channel_name}: RMS={rms:.4f} {unit}"
+                            legend_label = f"{clean_flight_name} - {channel_name}: RMS={rms:.2f} {unit}"
                         else:
-                            legend_label = f"{flight_name} - {channel_name}: RMS={rms:.4f}"
+                            legend_label = f"{clean_flight_name} - {channel_name}: RMS={rms:.2f}"
                     else:
                         if unit:
-                            legend_label = f"{channel_name}: RMS={rms:.4f} {unit}"
+                            legend_label = f"{channel_name}: RMS={rms:.2f} {unit}"
                         else:
-                            legend_label = f"{channel_name}: RMS={rms:.4f}"
+                            legend_label = f"{channel_name}: RMS={rms:.2f}"
                 
                 # Plot the PSD
                 color = colors[plot_count % len(colors)]
@@ -1781,21 +1784,8 @@ class PSDAnalysisWindow(QMainWindow):
             df = self.df_spin.value()
             overlap_percent = self.overlap_spin.value()
             
-            # Get frequency range for RMS calculation
-            freq_min = self.freq_min_spin.value()
-            freq_max = self.freq_max_spin.value()
-            
-            # Limit freq_max to Nyquist frequency (sample_rate / 2)
-            nyquist_freq = self.sample_rate / 2.0
-            if freq_max > nyquist_freq:
-                freq_max = nyquist_freq
-                # Update the spinbox to show the limited value
-                self.freq_max_spin.setValue(freq_max)
-                show_information(self, "Frequency Range Adjusted", 
-                    f"Maximum frequency adjusted to Nyquist limit: {nyquist_freq:.2f} Hz\n\n"
-                    f"Sample rate: {self.sample_rate} Hz\n"
-                    f"Nyquist frequency: {nyquist_freq:.2f} Hz\n\n"
-                    f"PSD will be calculated up to {nyquist_freq:.2f} Hz.")
+            # Note: Frequency range is for DISPLAY only, not calculation
+            # PSD is calculated for full frequency range up to Nyquist
             
             # Determine number of channels
             if self.signal_data_full.ndim == 1:
@@ -1911,15 +1901,15 @@ class PSDAnalysisWindow(QMainWindow):
                     if len(self.events) > 1:
                         # Show event name when multiple events
                         if unit:
-                            legend_label = f"{event.name} - {channel_name}: RMS={rms:.4f} {unit}"
+                            legend_label = f"{event.name} - {channel_name}: RMS={rms:.2f} {unit}"
                         else:
-                            legend_label = f"{event.name} - {channel_name}: RMS={rms:.4f}"
+                            legend_label = f"{event.name} - {channel_name}: RMS={rms:.2f}"
                     else:
                         # Just channel name for single event
                         if unit:
-                            legend_label = f"{channel_name}: RMS={rms:.4f} {unit}"
+                            legend_label = f"{channel_name}: RMS={rms:.2f} {unit}"
                         else:
-                            legend_label = f"{channel_name}: RMS={rms:.4f}"
+                            legend_label = f"{channel_name}: RMS={rms:.2f}"
                     
                     # Plot the PSD
                     color = colors[plot_count % len(colors)]

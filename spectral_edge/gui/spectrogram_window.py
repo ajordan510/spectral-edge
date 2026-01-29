@@ -62,7 +62,7 @@ class SpectrogramWindow(QMainWindow):
     
     def __init__(self, time_data, channels_data, sample_rates, 
                  window_type='hann', df=1.0, overlap_percent=50, 
-                 efficient_fft=True, freq_min=10, freq_max=2000):
+                 efficient_fft=True, freq_min=20, freq_max=2000):
         """
         Initialize the spectrogram window.
         
@@ -105,17 +105,21 @@ class SpectrogramWindow(QMainWindow):
         if self.n_channels == 1:
             name, _, _, flight = self.channels_data[0]
             if flight:
-                self.setWindowTitle(f"SpectralEdge - Spectrogram: {flight} - {name}")
+                # Remove 'flight_' prefix for cleaner display
+                clean_flight = flight.replace('flight_', '')
+                self.setWindowTitle(f"SpectralEdge - Spectrogram: {clean_flight} - {name}")
             else:
                 self.setWindowTitle(f"SpectralEdge - Spectrogram: {name}")
         else:
             # Check if all channels from same flight
             flights = [f for _, _, _, f in self.channels_data if f]
-            if flights and len(set(flights)) == 1:
+            if len(set(flights)) == 1:
                 # All from same flight
                 flight = flights[0]
+                # Remove 'flight_' prefix for cleaner display
+                clean_flight = flight.replace('flight_', '')
                 channel_names = ", ".join([name for name, _, _, _ in self.channels_data])
-                self.setWindowTitle(f"SpectralEdge - Spectrogram: {flight} - {channel_names}")
+                self.setWindowTitle(f"SpectralEdge - Spectrogram: {clean_flight} - {channel_names}")
             elif flights:
                 # Multiple flights
                 channel_names = ", ".join([name for name, _, _, _ in self.channels_data])
@@ -348,6 +352,7 @@ class SpectrogramWindow(QMainWindow):
         self.df_spin.setValue(df)
         self.df_spin.setDecimals(2)
         self.df_spin.setSingleStep(0.1)
+        self.df_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
         layout.addWidget(self.df_spin, row, 1)
         row += 1
         
@@ -656,7 +661,7 @@ class SpectrogramWindow(QMainWindow):
             freq_max = float(self.freq_max_edit.text())
         except ValueError:
             # If parsing fails, use default values
-            freq_min = 10.0
+            freq_min = 20.0
             freq_max = 2000.0
         colormap_name = self.colormap_combo.currentText()
         snr_db = self.snr_spin.value()
@@ -680,7 +685,10 @@ class SpectrogramWindow(QMainWindow):
             plot_widget.clear()
             
             # Filter frequency range
-            freq_mask = (freqs >= freq_min) & (freqs <= freq_max)
+            # Clip to available frequency range (don't error if user sets range beyond data)
+            actual_freq_min = max(freq_min, freqs[0])
+            actual_freq_max = min(freq_max, freqs[-1])
+            freq_mask = (freqs >= actual_freq_min) & (freqs <= actual_freq_max)
             freqs_plot = freqs[freq_mask]
             Sxx_plot = Sxx_db[freq_mask, :]
             
@@ -696,7 +704,8 @@ class SpectrogramWindow(QMainWindow):
             plot_widget.addItem(img)
             
             # Set data with SNR-based levels
-            img.setImage(Sxx_plot, autoLevels=False, levels=(min_power, max_power))
+            # Transpose so frequency is on y-axis and time is on x-axis
+            img.setImage(Sxx_plot.T, autoLevels=False, levels=(min_power, max_power))
             
             # Set position and scale (always use actual frequency values)
             img.setRect(pg.QtCore.QRectF(
@@ -763,11 +772,13 @@ class SpectrogramWindow(QMainWindow):
             
             # Update title with individual flight name if available
             if flight_name:
+                # Remove 'flight_' prefix for cleaner display
+                clean_flight_name = flight_name.replace('flight_', '')
                 if unit:
-                    plot_widget.setTitle(f"{flight_name} - {channel_name} ({unit}) | SNR: {snr_db} dB", 
+                    plot_widget.setTitle(f"{clean_flight_name} - {channel_name} ({unit}) | SNR: {snr_db} dB", 
                                         color='#e0e0e0', size='12pt')
                 else:
-                    plot_widget.setTitle(f"{flight_name} - {channel_name} | SNR: {snr_db} dB", 
+                    plot_widget.setTitle(f"{clean_flight_name} - {channel_name} | SNR: {snr_db} dB", 
                                         color='#e0e0e0', size='12pt')
             else:
                 if unit:

@@ -955,6 +955,25 @@ def convert_psd_to_octave_bands(
         else:
             band_psd = psd[band_mask]
         
+        # Check for NaN or invalid values in band
+        if is_multichannel:
+            if np.any(np.isnan(band_psd)) or np.any(np.isinf(band_psd)):
+                # Skip bands with NaN/inf values
+                continue
+        else:
+            if np.any(np.isnan(band_psd)) or np.any(np.isinf(band_psd)):
+                # Skip bands with NaN/inf values
+                continue
+        
+        # Need at least 2 points for trapezoidal integration
+        if len(band_frequencies) < 2:
+            # Use single point value as average for this band
+            if is_multichannel:
+                octave_psd[i, :] = band_psd[0, :]
+            else:
+                octave_psd[i] = band_psd[0]
+            continue
+        
         # Integrate PSD over the band using trapezoidal rule
         # This gives total energy in the band
         if is_multichannel:
@@ -966,7 +985,10 @@ def convert_psd_to_octave_bands(
                 
                 # Convert to average PSD level by dividing by bandwidth
                 bandwidth = f_upper - f_lower
-                octave_psd[i, ch] = integrated_energy / bandwidth
+                if bandwidth > 0:
+                    octave_psd[i, ch] = integrated_energy / bandwidth
+                else:
+                    octave_psd[i, ch] = band_psd[0, ch]
         else:
             try:
                 integrated_energy = np.trapezoid(band_psd, band_frequencies)
@@ -975,6 +997,9 @@ def convert_psd_to_octave_bands(
             
             # Convert to average PSD level by dividing by bandwidth
             bandwidth = f_upper - f_lower
-            octave_psd[i] = integrated_energy / bandwidth
+            if bandwidth > 0:
+                octave_psd[i] = integrated_energy / bandwidth
+            else:
+                octave_psd[i] = band_psd[0]
     
     return octave_frequencies, octave_psd

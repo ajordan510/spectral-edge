@@ -26,32 +26,48 @@ from typing import Optional
 
 
 # Enhanced message box stylesheet with high contrast and better readability
+# Tight, professional layout with minimal icon spacing
 MESSAGE_BOX_STYLE = """
 QMessageBox {
     background-color: #ffffff;
     border: 1px solid #cccccc;
 }
+/* Shrink icon column to minimum size */
+QMessageBox QLabel[objectName="qt_msgboxicon_label"] {
+    min-width: 32px;
+    max-width: 32px;
+    padding: 0px;
+    margin: 0px;
+    margin-right: 8px;
+}
+/* Main text label - align close to left */
 QMessageBox QLabel {
     color: #1a1a1a;
     font-size: 14px;
     font-weight: normal;
-    min-width: 350px;
-    max-width: 600px;
-    padding: 8px;
-    margin: 4px;
+    min-width: 300px;
+    max-width: 550px;
+    padding: 4px;
+    margin: 0px;
+    margin-left: 0px;
     line-height: 1.5;
 }
+/* Message box label - tight spacing */
 QMessageBox QLabel#qt_msgbox_label {
-    margin-left: 8px;
-    padding-left: 8px;
+    margin-left: 0px;
+    padding-left: 4px;
+    padding-right: 4px;
     font-size: 14px;
 }
+/* Informative label - tight spacing */
 QMessageBox QLabel#qt_msgboxinformativelabel {
-    margin-left: 8px;
-    padding-left: 8px;
+    margin-left: 0px;
+    padding-left: 4px;
+    padding-right: 4px;
     font-size: 13px;
     color: #333333;
 }
+/* Buttons - clean styling */
 QMessageBox QPushButton {
     background-color: #0078d4;
     color: #ffffff;
@@ -61,12 +77,18 @@ QMessageBox QPushButton {
     font-size: 13px;
     font-weight: bold;
     min-width: 90px;
+    margin: 4px;
 }
 QMessageBox QPushButton:hover {
     background-color: #106ebe;
 }
 QMessageBox QPushButton:pressed {
     background-color: #005a9e;
+}
+/* Tight dialog box layout */
+QMessageBox QDialogButtonBox {
+    padding: 8px;
+    margin: 0px;
 }
 """
 
@@ -254,7 +276,7 @@ class EnhancedErrorDialog(QDialog):
 
 def show_information(parent: Optional[QWidget], title: str, message: str) -> None:
     """
-    Show an information message box with readable styling.
+    Show an information message box with readable styling and tight layout.
     
     Parameters:
     -----------
@@ -270,12 +292,19 @@ def show_information(parent: Optional[QWidget], title: str, message: str) -> Non
     msg_box.setWindowTitle(title)
     msg_box.setText(message)
     msg_box.setStyleSheet(MESSAGE_BOX_STYLE)
+    
+    # Set smaller icon size for tighter layout
+    msg_box.setIconPixmap(msg_box.iconPixmap().scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+    
+    # Adjust content margins for tighter fit
+    msg_box.setContentsMargins(8, 8, 8, 8)
+    
     msg_box.exec()
 
 
 def show_warning(parent: Optional[QWidget], title: str, message: str) -> None:
     """
-    Show a warning message box with readable styling.
+    Show a warning message box with readable styling and tight layout.
     
     Parameters:
     -----------
@@ -291,6 +320,13 @@ def show_warning(parent: Optional[QWidget], title: str, message: str) -> None:
     msg_box.setWindowTitle(title)
     msg_box.setText(message)
     msg_box.setStyleSheet(MESSAGE_BOX_STYLE)
+    
+    # Set smaller icon size for tighter layout
+    msg_box.setIconPixmap(msg_box.iconPixmap().scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+    
+    # Adjust content margins for tighter fit
+    msg_box.setContentsMargins(8, 8, 8, 8)
+    
     msg_box.exec()
 
 
@@ -322,6 +358,13 @@ def show_critical(parent: Optional[QWidget], title: str, message: str,
         msg_box.setWindowTitle(title)
         msg_box.setText(message)
         msg_box.setStyleSheet(MESSAGE_BOX_STYLE)
+        
+        # Set smaller icon size for tighter layout
+        msg_box.setIconPixmap(msg_box.iconPixmap().scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        
+        # Adjust content margins for tighter fit
+        msg_box.setContentsMargins(8, 8, 8, 8)
+        
         msg_box.exec()
 
 
@@ -358,7 +401,7 @@ def show_error(parent: Optional[QWidget], title: str, message: str,
 
 def show_question(parent: Optional[QWidget], title: str, message: str) -> bool:
     """
-    Show a question message box with Yes/No buttons and readable styling.
+    Show a question message box with Yes/No buttons, readable styling, and tight layout.
     
     Parameters:
     -----------
@@ -381,6 +424,12 @@ def show_question(parent: Optional[QWidget], title: str, message: str) -> bool:
     msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
     msg_box.setDefaultButton(QMessageBox.StandardButton.No)
     msg_box.setStyleSheet(MESSAGE_BOX_STYLE)
+    
+    # Set smaller icon size for tighter layout
+    msg_box.setIconPixmap(msg_box.iconPixmap().scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+    
+    # Adjust content margins for tighter fit
+    msg_box.setContentsMargins(8, 8, 8, 8)
     
     result = msg_box.exec()
     return result == QMessageBox.StandardButton.Yes

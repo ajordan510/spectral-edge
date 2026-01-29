@@ -317,7 +317,7 @@ class EnhancedFlightNavigator(QDialog):
         sensor_layout = QHBoxLayout()
         sensor_layout.addWidget(QLabel("Sensor Type:"))
         self.sensor_type_checks = {}
-        for sensor_type in ["Accelerometer", "Microphone", "Strain Gage", "Pressure", "Temperature"]:
+        for sensor_type in ["Accelerometer", "Pressure", "Temperature", "Strain Gage"]:
             cb = QCheckBox(sensor_type)
             cb.stateChanged.connect(self._on_filter_changed)
             self.sensor_type_checks[sensor_type] = cb
@@ -425,8 +425,8 @@ class EnhancedFlightNavigator(QDialog):
                 else:
                     time_range = "N/A"
                 
-                # Infer sensor type from channel name
-                sensor_type = self._infer_sensor_type(channel_key)
+                # Infer sensor type from channel units and name
+                sensor_type = self._infer_sensor_type(channel_key, channel_info)
                 
                 # Store channel data
                 self.all_channels.append({
@@ -448,13 +448,33 @@ class EnhancedFlightNavigator(QDialog):
         
         self.filtered_channels = self.all_channels.copy()
     
-    def _infer_sensor_type(self, channel_name: str) -> str:
-        """Infer sensor type from channel name"""
-        name_lower = channel_name.lower()
+    def _infer_sensor_type(self, channel_key: str, channel_info) -> str:
+        """Infer sensor type from channel units (primary) and name (fallback)"""
+        # Get units from channel_info
+        units = getattr(channel_info, 'units', '').lower().strip()
+        
+        # Map units to sensor types
+        if units:
+            # Accelerometer: G, g, m/s², m/s2, etc.
+            if units in ['g', 'gs', 'm/s²', 'm/s2', 'in/s²', 'in/s2']:
+                return "Accelerometer"
+            
+            # Pressure: psia, psig, pa, kpa, mpa, bar, psi, etc.
+            if units in ['psia', 'psig', 'psi', 'pa', 'kpa', 'mpa', 'bar', 'mbar', 'torr', 'atm', 'mmhg', 'inhg']:
+                return "Pressure"
+            
+            # Temperature: °C, °F, K, C, F, etc.
+            if units in ['°c', '°f', 'c', 'f', 'k', 'degc', 'degf', 'celsius', 'fahrenheit', 'kelvin']:
+                return "Temperature"
+            
+            # Strain: με, microstrain, strain, etc.
+            if units in ['με', 'microstrain', 'strain', 'ue', 'ustrain', 'µε']:
+                return "Strain Gage"
+        
+        # Fallback to name-based inference if units don't match
+        name_lower = channel_key.lower()
         if 'accel' in name_lower or 'acc_' in name_lower:
             return "Accelerometer"
-        elif 'mic' in name_lower or 'microphone' in name_lower:
-            return "Microphone"
         elif 'strain' in name_lower or 'sg_' in name_lower:
             return "Strain Gage"
         elif 'press' in name_lower or 'pres_' in name_lower:

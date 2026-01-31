@@ -378,13 +378,175 @@ If you encounter any issues during testing:
 
 ---
 
-### Automated Testing (Future)
+### Automated Testing & CI/CD
 
-Planned automated test suite:
-- Unit tests for core PSD functions
-- Integration tests for data loading
-- GUI tests for user interactions
-- Performance benchmarks
+SpectralEdge includes a comprehensive automated testing framework that can validate functionality without requiring a physical display. This enables continuous integration (CI) testing on cloud servers.
+
+#### What is CI/CD?
+
+**Continuous Integration (CI)** is the practice of automatically running tests every time code is pushed to a repository. This catches bugs early, before they reach your desktop.
+
+**Benefits:**
+- Catch bugs before they break your desktop testing
+- Validate code works on multiple platforms (Windows, Linux)
+- Ensure new features don't break existing functionality
+- Reduce manual testing time
+
+#### Test Layers
+
+| Layer | What It Tests | Requires Display? | Speed |
+|-------|--------------|-------------------|-------|
+| **Unit Tests** | Core algorithms (PSD, CSD, coherence) | No | Fast (seconds) |
+| **Headless GUI Tests** | GUI components with virtual display | No (uses Xvfb) | Medium |
+| **User Workflow Tests** | Simulated button clicks/interactions | No (uses Xvfb) | Medium |
+| **Integration Tests** | Full application workflows | No (uses Xvfb) | Slower |
+
+#### Running Tests Locally
+
+**1. Unit Tests (No GUI required):**
+```bash
+# Run core algorithm tests
+pytest tests/test_psd.py tests/test_signal_processing.py -v
+```
+
+**2. Headless GUI Tests:**
+```bash
+# Linux - with virtual framebuffer
+xvfb-run pytest tests/test_gui_headless.py -v
+
+# Any platform - with Qt offscreen mode
+QT_QPA_PLATFORM=offscreen pytest tests/test_gui_headless.py -v
+
+# Windows PowerShell
+$env:QT_QPA_PLATFORM="offscreen"; pytest tests/test_gui_headless.py -v
+```
+
+**3. All Tests:**
+```bash
+# Use the convenience script (Linux)
+./scripts/run_headless_tests.sh
+
+# Or run all tests
+QT_QPA_PLATFORM=offscreen pytest tests/ -v
+```
+
+#### GitHub Actions Workflow
+
+The CI pipeline runs automatically on every push and pull request. It's defined in `.github/workflows/ci.yml`.
+
+**Pipeline Jobs:**
+
+```
+┌─────────────────┐
+│   Code Quality  │  ← Syntax errors, style checks
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐     ┌─────────────────┐
+│   Unit Tests    │     │   Unit Tests    │
+│  (Ubuntu/3.11)  │     │  (Windows/3.11) │
+└────────┬────────┘     └────────┬────────┘
+         │                       │
+         └───────────┬───────────┘
+                     │
+                     ▼
+         ┌─────────────────┐
+         │  GUI Tests      │  ← Headless with Xvfb
+         │  (Ubuntu)       │
+         └────────┬────────┘
+                  │
+                  ▼
+         ┌─────────────────┐
+         │  Integration    │
+         │  Tests          │
+         └────────┬────────┘
+                  │
+                  ▼
+         ┌─────────────────┐
+         │  Build          │  ← Import validation
+         │  Validation     │
+         └─────────────────┘
+```
+
+**What Each Job Does:**
+
+| Job | Purpose |
+|-----|---------|
+| **lint** | Check for syntax errors and code style issues |
+| **unit-tests** | Run core algorithm tests on Ubuntu and Windows |
+| **gui-tests** | Test GUI components without a physical display |
+| **integration-tests** | Test complete application workflows |
+| **build** | Verify all modules import correctly |
+
+#### Viewing CI Results
+
+1. Go to your repository on GitHub
+2. Click the **Actions** tab
+3. View the latest workflow run
+4. Click on any job to see detailed logs
+
+**Status Badges:**
+- ✅ Green checkmark = All tests passed
+- ❌ Red X = Tests failed (click to see which ones)
+- 🟡 Yellow dot = Tests in progress
+
+#### Writing New Tests
+
+When adding new features, add corresponding tests:
+
+**1. For core algorithms** (no GUI):
+```python
+# tests/test_my_feature.py
+def test_my_new_function():
+    from spectral_edge.core.psd import my_new_function
+    result = my_new_function(input_data)
+    assert result == expected_value
+```
+
+**2. For GUI components**:
+```python
+# tests/test_gui_headless.py
+def test_my_window(qapp):
+    from spectral_edge.gui.my_window import MyWindow
+    window = MyWindow()
+    assert window is not None
+    window.close()
+```
+
+**3. For user interactions** (with pytest-qt):
+```python
+# tests/test_user_workflows.py
+def test_button_click(qtbot):
+    window = MyWindow()
+    qtbot.addWidget(window)
+    qtbot.mouseClick(window.my_button, Qt.MouseButton.LeftButton)
+    assert window.result == expected
+```
+
+#### Key Technologies
+
+| Tool | Purpose |
+|------|---------|
+| **pytest** | Test framework |
+| **pytest-qt** | PyQt6 testing utilities |
+| **Xvfb** | Virtual framebuffer (fake display for Linux) |
+| **QT_QPA_PLATFORM=offscreen** | Qt's built-in headless mode |
+| **GitHub Actions** | Cloud CI/CD runner |
+
+#### Troubleshooting CI Failures
+
+**"No module named 'PyQt6'"**
+- PyQt6 not installed in the CI environment
+- Check that `requirements.txt` includes PyQt6
+
+**"cannot open display"**
+- Xvfb not running
+- Use `xvfb-run` or set `QT_QPA_PLATFORM=offscreen`
+
+**Tests pass locally but fail in CI**
+- Check for hardcoded paths
+- Ensure all dependencies are in `requirements.txt`
+- Check for timing-dependent tests
 
 Contributions welcome!
 

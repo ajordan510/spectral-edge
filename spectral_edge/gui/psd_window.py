@@ -23,14 +23,17 @@ from pathlib import Path
 from spectral_edge.utils.data_loader import load_csv_data, DataLoadError
 from spectral_edge.utils.hdf5_loader import HDF5FlightDataLoader
 from spectral_edge.core.psd import (
-    calculate_psd_welch, calculate_psd_maximax, psd_to_db, calculate_rms_from_psd, 
-    get_window_options, convert_psd_to_octave_bands
+    calculate_psd_welch, calculate_psd_maximax, psd_to_db, calculate_rms_from_psd,
+    get_window_options, convert_psd_to_octave_bands,
+    calculate_csd, calculate_coherence, calculate_transfer_function
 )
 from spectral_edge.core.channel_data import ChannelData, align_channels_by_time
 from spectral_edge.gui.spectrogram_window import SpectrogramWindow
 from spectral_edge.gui.event_manager import EventManagerWindow, Event
 from spectral_edge.gui.flight_navigator import FlightNavigator
 from spectral_edge.utils.message_box import show_information, show_warning, show_critical
+from spectral_edge.utils.report_generator import ReportGenerator, export_plot_to_image, PPTX_AVAILABLE
+from spectral_edge.gui.cross_spectrum_window import CrossSpectrumWindow
 
 
 class ScientificAxisItem(pg.AxisItem):
@@ -127,6 +130,13 @@ class PSDAnalysisWindow(QMainWindow):
         # HDF5 data management
         self.hdf5_loader = None
         self.flight_navigator = None
+
+        # Comparison curves storage
+        # Each curve is a dict: {name, frequencies, psd, color, line_style, visible}
+        self.comparison_curves = []
+
+        # Cross-spectrum window
+        self.cross_spectrum_window = None
         
         # Apply styling
         self._apply_styling()
@@ -307,7 +317,14 @@ class PSDAnalysisWindow(QMainWindow):
         filter_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         filter_layout.addWidget(self._create_filter_group())
         tab_widget.addTab(filter_tab, "Filter")
-        
+
+        # Tab 4: Comparison
+        compare_tab = QWidget()
+        compare_layout = QVBoxLayout(compare_tab)
+        compare_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        compare_layout.addWidget(self._create_comparison_group())
+        tab_widget.addTab(compare_tab, "Compare")
+
         layout.addWidget(tab_widget)
         
         # Calculate button
@@ -366,7 +383,23 @@ class PSDAnalysisWindow(QMainWindow):
             }
         """)
         layout.addWidget(self.clear_events_button)
-        
+
+        # Cross-Spectrum button
+        self.cross_spectrum_button = QPushButton("Cross-Spectrum Analysis")
+        self.cross_spectrum_button.setEnabled(False)
+        self.cross_spectrum_button.setToolTip("Analyze coherence and transfer function between two channels")
+        self.cross_spectrum_button.clicked.connect(self._open_cross_spectrum)
+        layout.addWidget(self.cross_spectrum_button)
+
+        # Generate Report button
+        self.report_button = QPushButton("Generate Report")
+        self.report_button.setEnabled(False)
+        self.report_button.setToolTip("Generate PowerPoint report with current analysis")
+        self.report_button.clicked.connect(self._generate_report)
+        if not PPTX_AVAILABLE:
+            self.report_button.setToolTip("python-pptx not installed - report generation unavailable")
+        layout.addWidget(self.report_button)
+
         layout.addStretch()
         
         return panel
@@ -910,7 +943,318 @@ class PSDAnalysisWindow(QMainWindow):
             show_warning(self, "Filter Error", 
                         f"Failed to apply filter: {str(e)}\n\nFilter not applied.")
             return signal
-    
+
+    def _create_comparison_group(self):
+        """Create the comparison curves management group box."""
+        group = QGroupBox("Reference Curves")
+        layout = QVBoxLayout()
+
+        # Description
+        desc_label = QLabel(
+            "Import reference PSD curves from CSV files to overlay on the plot. "
+            "CSV format: two columns (frequency, PSD) with optional header."
+        )
+        desc_label.setWordWrap(True)
+        desc_label.setStyleSheet("color: #9ca3af; font-size: 10pt;")
+        layout.addWidget(desc_label)
+
+        # Import button
+        import_button = QPushButton("Import Reference Curve...")
+        import_button.clicked.connect(self._import_comparison_curve)
+        layout.addWidget(import_button)
+
+        # List of loaded curves (scroll area)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(150)
+
+        self.comparison_list_widget = QWidget()
+        self.comparison_list_widget.setObjectName("comparisonWidget")
+        self.comparison_list_layout = QVBoxLayout(self.comparison_list_widget)
+        self.comparison_list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        scroll.setWidget(self.comparison_list_widget)
+        layout.addWidget(scroll)
+
+        # Clear all button
+        clear_button = QPushButton("Clear All Reference Curves")
+        clear_button.clicked.connect(self._clear_comparison_curves)
+        layout.addWidget(clear_button)
+
+        group.setLayout(layout)
+        return group
+
+    def _import_comparison_curve(self):
+        """Import a reference PSD curve from a CSV file."""
+        from PyQt6.QtWidgets import QFileDialog, QInputDialog
+        import pandas as pd
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Reference Curve CSV",
+            "",
+            "CSV Files (*.csv);;All Files (*)"
+        )
+
+        if not file_path:
+            return
+
+        try:
+            # Try to load the CSV
+            df = pd.read_csv(file_path)
+
+            # Check if we have at least 2 columns
+            if df.shape[1] < 2:
+                show_warning(self, "Invalid File",
+                            "CSV must have at least 2 columns (frequency, PSD).")
+                return
+
+            # Get the first two columns as frequency and PSD
+            frequencies = df.iloc[:, 0].values.astype(float)
+            psd = df.iloc[:, 1].values.astype(float)
+
+            # Validate data
+            if len(frequencies) < 2:
+                show_warning(self, "Invalid Data",
+                            "Reference curve must have at least 2 data points.")
+                return
+
+            # Get a name for this curve
+            default_name = Path(file_path).stem
+            name, ok = QInputDialog.getText(
+                self, "Curve Name",
+                "Enter a name for this reference curve:",
+                text=default_name
+            )
+
+            if not ok or not name:
+                name = default_name
+
+            # Define colors for comparison curves (different from channel colors)
+            comparison_colors = ['#ff6b6b', '#ffd93d', '#6bcb77', '#4d96ff', '#ff6f91', '#845ec2']
+            color_idx = len(self.comparison_curves) % len(comparison_colors)
+            color = comparison_colors[color_idx]
+
+            # Add to comparison curves
+            curve_data = {
+                'name': name,
+                'frequencies': frequencies,
+                'psd': psd,
+                'color': color,
+                'line_style': Qt.PenStyle.DashLine,
+                'visible': True,
+                'file_path': file_path
+            }
+            self.comparison_curves.append(curve_data)
+
+            # Update the comparison list UI
+            self._update_comparison_list()
+
+            # Update the plot
+            self._update_plot()
+
+            show_information(self, "Reference Curve Imported",
+                           f"Successfully imported '{name}' with {len(frequencies)} data points.")
+
+        except Exception as e:
+            show_critical(self, "Import Error", f"Failed to import reference curve: {str(e)}")
+
+    def _update_comparison_list(self):
+        """Update the comparison curves list UI."""
+        # Clear existing widgets
+        while self.comparison_list_layout.count():
+            item = self.comparison_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # Add widgets for each curve
+        for i, curve in enumerate(self.comparison_curves):
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+
+            # Checkbox for visibility
+            checkbox = QCheckBox(curve['name'])
+            checkbox.setChecked(curve['visible'])
+            checkbox.setStyleSheet(f"color: {curve['color']};")
+            checkbox.stateChanged.connect(lambda state, idx=i: self._toggle_comparison_curve(idx, state))
+            row_layout.addWidget(checkbox)
+
+            # Remove button
+            remove_btn = QPushButton("X")
+            remove_btn.setFixedSize(25, 25)
+            remove_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #dc2626;
+                    color: white;
+                    border: none;
+                    border-radius: 3px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #b91c1c;
+                }
+            """)
+            remove_btn.clicked.connect(lambda _, idx=i: self._remove_comparison_curve(idx))
+            row_layout.addWidget(remove_btn)
+
+            self.comparison_list_layout.addWidget(row_widget)
+
+    def _toggle_comparison_curve(self, index: int, state: int):
+        """Toggle visibility of a comparison curve."""
+        if 0 <= index < len(self.comparison_curves):
+            self.comparison_curves[index]['visible'] = (state == Qt.CheckState.Checked.value)
+            self._update_plot()
+
+    def _remove_comparison_curve(self, index: int):
+        """Remove a comparison curve."""
+        if 0 <= index < len(self.comparison_curves):
+            self.comparison_curves.pop(index)
+            self._update_comparison_list()
+            self._update_plot()
+
+    def _clear_comparison_curves(self):
+        """Clear all comparison curves."""
+        self.comparison_curves.clear()
+        self._update_comparison_list()
+        self._update_plot()
+
+    def _open_cross_spectrum(self):
+        """Open the Cross-Spectrum Analysis window."""
+        if self.signal_data_full is None or len(self.channel_names) < 2:
+            show_warning(self, "Insufficient Data",
+                        "At least two channels are required for cross-spectrum analysis.")
+            return
+
+        # Prepare channel data
+        channels_data = []
+        for i, name in enumerate(self.channel_names):
+            if self.signal_data_full.ndim == 1:
+                signal = self.signal_data_full
+            else:
+                signal = self.signal_data_full[:, i]
+            unit = self.channel_units[i] if i < len(self.channel_units) else ''
+            flight = self.channel_flight_names[i] if i < len(self.channel_flight_names) else ''
+            channels_data.append((name, signal, unit, flight))
+
+        # Get current parameters
+        window_type = self.window_combo.currentText().lower()
+        df = self.df_spin.value()
+        overlap = self.overlap_spin.value()
+        freq_min = self.freq_min_spin.value()
+        freq_max = self.freq_max_spin.value()
+
+        # Create or show cross-spectrum window
+        if self.cross_spectrum_window is None or not self.cross_spectrum_window.isVisible():
+            self.cross_spectrum_window = CrossSpectrumWindow(
+                channels_data=channels_data,
+                sample_rate=self.sample_rate,
+                window_type=window_type,
+                df=df,
+                overlap_percent=overlap,
+                freq_min=freq_min,
+                freq_max=freq_max,
+                parent=self
+            )
+            self.cross_spectrum_window.show()
+        else:
+            self.cross_spectrum_window.raise_()
+            self.cross_spectrum_window.activateWindow()
+
+    def _generate_report(self):
+        """Generate a PowerPoint report with the current analysis."""
+        if not PPTX_AVAILABLE:
+            show_warning(self, "Feature Unavailable",
+                        "python-pptx is not installed. Install it with: pip install python-pptx")
+            return
+
+        if not self.psd_results:
+            show_warning(self, "No Results",
+                        "Please calculate PSD first before generating a report.")
+            return
+
+        from PyQt6.QtWidgets import QFileDialog
+
+        # Get save path
+        default_name = f"PSD_Report_{self.current_file or 'analysis'}.pptx"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Report",
+            default_name,
+            "PowerPoint Files (*.pptx)"
+        )
+
+        if not file_path:
+            return
+
+        try:
+            # Create report generator
+            title = f"PSD Analysis Report"
+            if self.flight_name:
+                subtitle = f"Flight: {self.flight_name}"
+            elif self.current_file:
+                subtitle = f"File: {self.current_file}"
+            else:
+                subtitle = ""
+
+            report = ReportGenerator(title=title)
+            report.add_title_slide(subtitle=subtitle)
+
+            # Export PSD plot
+            psd_image = export_plot_to_image(self.plot_widget)
+
+            # Build parameters dict
+            parameters = {
+                "Window": self.window_combo.currentText(),
+                "Δf": f"{self.df_spin.value()} Hz",
+                "Overlap": f"{self.overlap_spin.value()}%",
+                "Method": "Maximax" if self.maximax_checkbox.isChecked() else "Welch",
+                "Freq Range": f"{self.freq_min_spin.value()}-{self.freq_max_spin.value()} Hz"
+            }
+
+            if self.maximax_checkbox.isChecked():
+                parameters["Maximax Window"] = f"{self.maximax_window_spin.value()} s"
+
+            # Get units
+            units = self.channel_units[0] if self.channel_units else ""
+
+            # Add PSD plot slide
+            report.add_psd_plot(
+                psd_image,
+                title="Power Spectral Density",
+                parameters=parameters,
+                rms_values=self.rms_values,
+                units=units
+            )
+
+            # Add summary table
+            selected_channels = [
+                self.channel_names[i]
+                for i, cb in enumerate(self.channel_checkboxes)
+                if cb.isChecked()
+            ]
+            report.add_summary_table(
+                channels=selected_channels,
+                rms_values=self.rms_values,
+                units=units
+            )
+
+            # Export time history if visible
+            time_image = export_plot_to_image(self.time_plot_widget)
+            report.add_comparison_plot(
+                time_image,
+                title="Time History",
+                description="Signal time history for analyzed channels"
+            )
+
+            # Save report
+            saved_path = report.save(file_path)
+            show_information(self, "Report Generated",
+                           f"Report saved to:\n{saved_path}")
+
+        except Exception as e:
+            show_critical(self, "Report Error", f"Failed to generate report: {str(e)}")
+
     def _create_plot_panel(self):
         """Create the right plot panel with time history and PSD plots."""
         panel = QWidget()
@@ -1155,12 +1499,14 @@ class PSDAnalysisWindow(QMainWindow):
             self.calc_button.setEnabled(True)
             self.spec_button.setEnabled(True)
             self.event_button.setEnabled(True)
-            
+            self.cross_spectrum_button.setEnabled(len(self.channel_names) >= 2)
+            self.report_button.setEnabled(PPTX_AVAILABLE)
+
             # Clear previous results
             self.frequencies = {}
             self.psd_results = {}
             self.rms_values = {}
-            
+
             # Plot time history
             self._plot_time_history()
             
@@ -1536,10 +1882,41 @@ class PSDAnalysisWindow(QMainWindow):
                 
                 plot_count += 1
         
+        # Plot comparison curves (reference/spec limit curves)
+        for curve in self.comparison_curves:
+            if not curve['visible']:
+                continue
+
+            # Apply frequency mask to comparison curve
+            curve_freqs = curve['frequencies']
+            curve_psd = curve['psd']
+
+            # Filter to display frequency range
+            curve_mask = (curve_freqs >= freq_min) & (curve_freqs <= freq_max)
+            if not np.any(curve_mask):
+                continue
+
+            curve_freqs_plot = curve_freqs[curve_mask]
+            curve_psd_plot = curve_psd[curve_mask]
+
+            # Plot with dashed line style
+            pen = pg.mkPen(
+                color=curve['color'],
+                width=2,
+                style=curve.get('line_style', Qt.PenStyle.DashLine)
+            )
+            self.plot_widget.plot(
+                curve_freqs_plot,
+                curve_psd_plot,
+                pen=pen,
+                name=f"Ref: {curve['name']}"
+            )
+            plot_count += 1
+
         # Show legend when data is present
         if plot_count > 0:
             self.legend.setVisible(True)
-        
+
         # Update Y-axis label with units
         if self.channel_units and self.channel_units[0]:
             unit = self.channel_units[0]
@@ -2274,7 +2651,9 @@ class PSDAnalysisWindow(QMainWindow):
             self.calc_button.setEnabled(True)
             self.spec_button.setEnabled(True)
             self.event_button.setEnabled(True)
-            
+            self.cross_spectrum_button.setEnabled(len(self.channel_names) >= 2)
+            self.report_button.setEnabled(PPTX_AVAILABLE)
+
             # Clear previous results
             self.frequencies = {}
             self.psd_results = {}

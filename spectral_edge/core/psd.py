@@ -1003,3 +1003,551 @@ def convert_psd_to_octave_bands(
                 octave_psd[i] = band_psd[0]
     
     return octave_frequencies, octave_psd
+
+
+def calculate_csd(
+    signal1: np.ndarray,
+    signal2: np.ndarray,
+    sample_rate: float,
+    window: str = 'hann',
+    nperseg: Optional[int] = None,
+    noverlap: Optional[int] = None,
+    df: Optional[float] = None,
+    use_efficient_fft: bool = False
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Calculate Cross-Spectral Density between two signals.
+
+    The Cross-Spectral Density (CSD) measures the correlation between two signals
+    as a function of frequency. It is complex-valued, with magnitude representing
+    the correlation strength and phase representing the phase relationship.
+
+    Parameters
+    ----------
+    signal1 : np.ndarray
+        First input signal array (1D), typically the reference signal.
+        Type: float64 array
+        Units: Same as signal (e.g., g for acceleration)
+
+    signal2 : np.ndarray
+        Second input signal array (1D), typically the response signal.
+        Type: float64 array
+        Units: Same as signal (e.g., g for acceleration)
+        Must have the same length as signal1.
+
+    sample_rate : float
+        Sampling frequency of the input signals in Hz.
+        Type: float
+        Units: Hz (samples per second)
+        Must be positive.
+
+    window : str, optional
+        Window function to apply to each segment. Default is 'hann'.
+        Type: str
+        Options: 'hann', 'hamming', 'blackman', 'bartlett', 'flattop', etc.
+
+    nperseg : int, optional
+        Length of each segment in samples. If None, calculated from df or defaults to 256.
+        Type: int or None
+        Units: samples
+
+    noverlap : int, optional
+        Number of samples to overlap between segments. If None, defaults to nperseg // 2.
+        Type: int or None
+        Units: samples
+
+    df : float, optional
+        Desired frequency resolution in Hz. If provided, nperseg is calculated as
+        nperseg = sample_rate / df. Takes precedence over nperseg parameter.
+        Type: float or None
+        Units: Hz
+
+    use_efficient_fft : bool, optional
+        If True, rounds nperseg to the nearest power of 2 for faster FFT computation.
+        Default is False.
+        Type: bool
+
+    Returns
+    -------
+    frequencies : np.ndarray
+        Array of frequency values in Hz corresponding to the CSD values.
+        Type: float64 array
+        Units: Hz
+        Shape: (n_freqs,)
+
+    csd : np.ndarray
+        Cross-Spectral Density values (complex).
+        Type: complex128 array
+        Units: signal_units^2 / Hz (e.g., g^2/Hz)
+        Shape: (n_freqs,)
+
+    Raises
+    ------
+    ValueError
+        If signals have different lengths
+        If signals are empty
+        If sample_rate is not positive
+
+    Examples
+    --------
+    >>> # Generate two correlated signals
+    >>> sample_rate = 1000.0
+    >>> t = np.linspace(0, 10, 10000)
+    >>> signal1 = np.sin(2 * np.pi * 50 * t)
+    >>> signal2 = np.sin(2 * np.pi * 50 * t + np.pi/4)  # Phase shifted
+    >>>
+    >>> frequencies, csd = calculate_csd(signal1, signal2, sample_rate, df=1.0)
+    >>>
+    >>> # CSD magnitude at 50 Hz will be high
+    >>> # CSD phase at 50 Hz will be approximately pi/4
+
+    See Also
+    --------
+    calculate_coherence : Calculate coherence between two signals
+    calculate_psd_welch : Calculate PSD of a single signal
+    scipy.signal.csd : Underlying SciPy function
+    """
+    # Input validation
+    if signal1.size == 0 or signal2.size == 0:
+        raise ValueError("Input signals cannot be empty")
+
+    if len(signal1) != len(signal2):
+        raise ValueError(
+            f"Signals must have the same length. "
+            f"Got signal1: {len(signal1)}, signal2: {len(signal2)}"
+        )
+
+    if sample_rate <= 0:
+        raise ValueError("sample_rate must be positive")
+
+    # Calculate nperseg from df if provided
+    if df is not None:
+        if df <= 0:
+            raise ValueError("df (frequency resolution) must be positive")
+
+        if df >= sample_rate / 2:
+            raise ValueError(f"df ({df} Hz) must be less than Nyquist frequency ({sample_rate/2} Hz)")
+
+        nperseg_calc = int(sample_rate / df)
+
+        if use_efficient_fft:
+            nperseg_calc = 2 ** int(np.ceil(np.log2(nperseg_calc)))
+
+        nperseg = nperseg_calc
+
+    # Use default if nperseg not specified
+    if nperseg is None:
+        nperseg = min(256, len(signal1))
+
+    # Validate nperseg
+    if nperseg > len(signal1):
+        raise ValueError(
+            f"nperseg ({nperseg}) cannot be larger than signal length ({len(signal1)}). "
+            f"Try using a larger df (coarser frequency resolution) or longer signal."
+        )
+
+    # Calculate noverlap if not provided (default to 50%)
+    if noverlap is None:
+        noverlap = nperseg // 2
+
+    # Validate noverlap
+    if noverlap >= nperseg:
+        raise ValueError(f"noverlap ({noverlap}) must be less than nperseg ({nperseg})")
+
+    # Calculate CSD using scipy
+    frequencies, csd = signal.csd(
+        signal1,
+        signal2,
+        fs=sample_rate,
+        window=window,
+        nperseg=nperseg,
+        noverlap=noverlap,
+        scaling='density'
+    )
+
+    return frequencies, csd
+
+
+def calculate_coherence(
+    signal1: np.ndarray,
+    signal2: np.ndarray,
+    sample_rate: float,
+    window: str = 'hann',
+    nperseg: Optional[int] = None,
+    noverlap: Optional[int] = None,
+    df: Optional[float] = None,
+    use_efficient_fft: bool = False
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Calculate magnitude-squared coherence between two signals.
+
+    Coherence is a measure of the linear correlation between two signals at each
+    frequency. It ranges from 0 (no correlation) to 1 (perfect linear correlation).
+
+    Coherence is defined as:
+        Cxy = |Pxy|^2 / (Pxx * Pyy)
+
+    where Pxy is the cross-spectral density and Pxx, Pyy are the auto-spectral
+    densities (PSDs) of the two signals.
+
+    Parameters
+    ----------
+    signal1 : np.ndarray
+        First input signal array (1D), typically the reference signal.
+        Type: float64 array
+        Units: Same as signal (e.g., g for acceleration)
+
+    signal2 : np.ndarray
+        Second input signal array (1D), typically the response signal.
+        Type: float64 array
+        Units: Same as signal (e.g., g for acceleration)
+        Must have the same length as signal1.
+
+    sample_rate : float
+        Sampling frequency of the input signals in Hz.
+        Type: float
+        Units: Hz (samples per second)
+        Must be positive.
+
+    window : str, optional
+        Window function to apply to each segment. Default is 'hann'.
+        Type: str
+        Options: 'hann', 'hamming', 'blackman', 'bartlett', 'flattop', etc.
+
+    nperseg : int, optional
+        Length of each segment in samples. If None, calculated from df or defaults to 256.
+        Type: int or None
+        Units: samples
+
+    noverlap : int, optional
+        Number of samples to overlap between segments. If None, defaults to nperseg // 2.
+        Type: int or None
+        Units: samples
+
+    df : float, optional
+        Desired frequency resolution in Hz. If provided, nperseg is calculated as
+        nperseg = sample_rate / df. Takes precedence over nperseg parameter.
+        Type: float or None
+        Units: Hz
+
+    use_efficient_fft : bool, optional
+        If True, rounds nperseg to the nearest power of 2 for faster FFT computation.
+        Default is False.
+        Type: bool
+
+    Returns
+    -------
+    frequencies : np.ndarray
+        Array of frequency values in Hz corresponding to the coherence values.
+        Type: float64 array
+        Units: Hz
+        Shape: (n_freqs,)
+
+    coherence : np.ndarray
+        Magnitude-squared coherence values (dimensionless).
+        Type: float64 array
+        Units: dimensionless (0 to 1)
+        Shape: (n_freqs,)
+
+    Raises
+    ------
+    ValueError
+        If signals have different lengths
+        If signals are empty
+        If sample_rate is not positive
+
+    Examples
+    --------
+    >>> # Generate two correlated signals
+    >>> sample_rate = 1000.0
+    >>> t = np.linspace(0, 10, 10000)
+    >>> signal1 = np.sin(2 * np.pi * 50 * t) + 0.1 * np.random.randn(len(t))
+    >>> signal2 = np.sin(2 * np.pi * 50 * t) + 0.1 * np.random.randn(len(t))
+    >>>
+    >>> frequencies, coh = calculate_coherence(signal1, signal2, sample_rate, df=1.0)
+    >>>
+    >>> # Coherence at 50 Hz will be high (close to 1)
+    >>> # Coherence at other frequencies will be low (close to 0)
+
+    Notes
+    -----
+    - Coherence of 1.0 indicates perfect linear correlation at that frequency
+    - Coherence of 0.0 indicates no linear correlation at that frequency
+    - A common threshold for "significant" coherence is 0.9
+    - Low coherence can indicate:
+        - Non-linear relationship between signals
+        - Noise contamination
+        - Multiple uncorrelated sources
+    - Coherence is useful for:
+        - Validating transfer function measurements
+        - Identifying correlated noise sources
+        - Checking sensor placement and data quality
+
+    See Also
+    --------
+    calculate_csd : Calculate cross-spectral density
+    calculate_transfer_function : Calculate transfer function from two signals
+    scipy.signal.coherence : Underlying SciPy function
+    """
+    # Input validation
+    if signal1.size == 0 or signal2.size == 0:
+        raise ValueError("Input signals cannot be empty")
+
+    if len(signal1) != len(signal2):
+        raise ValueError(
+            f"Signals must have the same length. "
+            f"Got signal1: {len(signal1)}, signal2: {len(signal2)}"
+        )
+
+    if sample_rate <= 0:
+        raise ValueError("sample_rate must be positive")
+
+    # Calculate nperseg from df if provided
+    if df is not None:
+        if df <= 0:
+            raise ValueError("df (frequency resolution) must be positive")
+
+        if df >= sample_rate / 2:
+            raise ValueError(f"df ({df} Hz) must be less than Nyquist frequency ({sample_rate/2} Hz)")
+
+        nperseg_calc = int(sample_rate / df)
+
+        if use_efficient_fft:
+            nperseg_calc = 2 ** int(np.ceil(np.log2(nperseg_calc)))
+
+        nperseg = nperseg_calc
+
+    # Use default if nperseg not specified
+    if nperseg is None:
+        nperseg = min(256, len(signal1))
+
+    # Validate nperseg
+    if nperseg > len(signal1):
+        raise ValueError(
+            f"nperseg ({nperseg}) cannot be larger than signal length ({len(signal1)}). "
+            f"Try using a larger df (coarser frequency resolution) or longer signal."
+        )
+
+    # Calculate noverlap if not provided (default to 50%)
+    if noverlap is None:
+        noverlap = nperseg // 2
+
+    # Validate noverlap
+    if noverlap >= nperseg:
+        raise ValueError(f"noverlap ({noverlap}) must be less than nperseg ({nperseg})")
+
+    # Calculate coherence using scipy
+    frequencies, coherence = signal.coherence(
+        signal1,
+        signal2,
+        fs=sample_rate,
+        window=window,
+        nperseg=nperseg,
+        noverlap=noverlap
+    )
+
+    return frequencies, coherence
+
+
+def calculate_transfer_function(
+    input_signal: np.ndarray,
+    output_signal: np.ndarray,
+    sample_rate: float,
+    window: str = 'hann',
+    nperseg: Optional[int] = None,
+    noverlap: Optional[int] = None,
+    df: Optional[float] = None,
+    use_efficient_fft: bool = False
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Calculate transfer function (frequency response function) between input and output signals.
+
+    The transfer function H(f) represents how a system transforms an input signal
+    to produce an output signal at each frequency. It is calculated using the H1
+    estimator which minimizes noise on the output:
+
+        H1(f) = Pxy(f) / Pxx(f)
+
+    where Pxy is the cross-spectral density between input and output, and Pxx is
+    the auto-spectral density (PSD) of the input.
+
+    Parameters
+    ----------
+    input_signal : np.ndarray
+        Input signal array (1D), the excitation or reference signal.
+        Type: float64 array
+        Units: Same as signal (e.g., N for force, V for voltage)
+
+    output_signal : np.ndarray
+        Output signal array (1D), the response signal.
+        Type: float64 array
+        Units: Same as signal (e.g., g for acceleration, m/s for velocity)
+        Must have the same length as input_signal.
+
+    sample_rate : float
+        Sampling frequency of the input signals in Hz.
+        Type: float
+        Units: Hz (samples per second)
+        Must be positive.
+
+    window : str, optional
+        Window function to apply to each segment. Default is 'hann'.
+        Type: str
+        Options: 'hann', 'hamming', 'blackman', 'bartlett', 'flattop', etc.
+
+    nperseg : int, optional
+        Length of each segment in samples. If None, calculated from df or defaults to 256.
+        Type: int or None
+        Units: samples
+
+    noverlap : int, optional
+        Number of samples to overlap between segments. If None, defaults to nperseg // 2.
+        Type: int or None
+        Units: samples
+
+    df : float, optional
+        Desired frequency resolution in Hz. If provided, nperseg is calculated as
+        nperseg = sample_rate / df. Takes precedence over nperseg parameter.
+        Type: float or None
+        Units: Hz
+
+    use_efficient_fft : bool, optional
+        If True, rounds nperseg to the nearest power of 2 for faster FFT computation.
+        Default is False.
+        Type: bool
+
+    Returns
+    -------
+    frequencies : np.ndarray
+        Array of frequency values in Hz.
+        Type: float64 array
+        Units: Hz
+        Shape: (n_freqs,)
+
+    magnitude : np.ndarray
+        Transfer function magnitude.
+        Type: float64 array
+        Units: output_units / input_units (e.g., g/N for accelerance)
+        Shape: (n_freqs,)
+
+    phase : np.ndarray
+        Transfer function phase in degrees.
+        Type: float64 array
+        Units: degrees
+        Shape: (n_freqs,)
+        Range: -180 to 180 degrees
+
+    Raises
+    ------
+    ValueError
+        If signals have different lengths
+        If signals are empty
+        If sample_rate is not positive
+
+    Examples
+    --------
+    >>> # Simulate a simple system (low-pass filter response)
+    >>> sample_rate = 1000.0
+    >>> t = np.linspace(0, 10, 10000)
+    >>> input_signal = np.random.randn(len(t))  # White noise input
+    >>>
+    >>> # Simple first-order low-pass filter
+    >>> from scipy import signal as sp
+    >>> b, a = sp.butter(1, 100, fs=sample_rate)
+    >>> output_signal = sp.lfilter(b, a, input_signal)
+    >>>
+    >>> frequencies, magnitude, phase = calculate_transfer_function(
+    ...     input_signal, output_signal, sample_rate, df=1.0
+    ... )
+
+    Notes
+    -----
+    - The H1 estimator is used, which assumes noise is primarily on the output
+    - For noise on the input, use H2 estimator: H2 = Pyy / Pyx (not implemented)
+    - Always check coherence to validate transfer function quality
+    - Low coherence indicates unreliable transfer function at that frequency
+    - Common applications:
+        - Modal analysis (structural dynamics)
+        - System identification
+        - Vibration isolation effectiveness
+        - Acoustic transfer paths
+
+    See Also
+    --------
+    calculate_coherence : Calculate coherence to validate transfer function
+    calculate_csd : Calculate cross-spectral density
+    """
+    # Input validation
+    if input_signal.size == 0 or output_signal.size == 0:
+        raise ValueError("Input signals cannot be empty")
+
+    if len(input_signal) != len(output_signal):
+        raise ValueError(
+            f"Signals must have the same length. "
+            f"Got input: {len(input_signal)}, output: {len(output_signal)}"
+        )
+
+    if sample_rate <= 0:
+        raise ValueError("sample_rate must be positive")
+
+    # Calculate nperseg from df if provided
+    if df is not None:
+        if df <= 0:
+            raise ValueError("df (frequency resolution) must be positive")
+
+        if df >= sample_rate / 2:
+            raise ValueError(f"df ({df} Hz) must be less than Nyquist frequency ({sample_rate/2} Hz)")
+
+        nperseg_calc = int(sample_rate / df)
+
+        if use_efficient_fft:
+            nperseg_calc = 2 ** int(np.ceil(np.log2(nperseg_calc)))
+
+        nperseg = nperseg_calc
+
+    # Use default if nperseg not specified
+    if nperseg is None:
+        nperseg = min(256, len(input_signal))
+
+    # Validate nperseg
+    if nperseg > len(input_signal):
+        raise ValueError(
+            f"nperseg ({nperseg}) cannot be larger than signal length ({len(input_signal)}). "
+            f"Try using a larger df (coarser frequency resolution) or longer signal."
+        )
+
+    # Calculate noverlap if not provided (default to 50%)
+    if noverlap is None:
+        noverlap = nperseg // 2
+
+    # Calculate CSD (cross-spectral density) - Pxy
+    frequencies, Pxy = signal.csd(
+        input_signal,
+        output_signal,
+        fs=sample_rate,
+        window=window,
+        nperseg=nperseg,
+        noverlap=noverlap,
+        scaling='density'
+    )
+
+    # Calculate PSD of input - Pxx
+    _, Pxx = signal.welch(
+        input_signal,
+        fs=sample_rate,
+        window=window,
+        nperseg=nperseg,
+        noverlap=noverlap,
+        scaling='density'
+    )
+
+    # Calculate H1 transfer function estimate
+    # H1 = Pxy / Pxx
+    # Add small value to avoid division by zero
+    H = Pxy / (Pxx + 1e-20)
+
+    # Calculate magnitude and phase
+    magnitude = np.abs(H)
+    phase = np.angle(H, deg=True)  # Phase in degrees
+
+    return frequencies, magnitude, phase

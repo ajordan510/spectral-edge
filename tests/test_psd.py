@@ -233,10 +233,10 @@ class TestPSDCalculation(unittest.TestCase):
         )
         
         # Calculate RMS over a range that includes only the 10 Hz component
-        rms_low = calculate_rms_from_psd(frequencies, psd, freq_range=(5, 20))
-        
+        rms_low = calculate_rms_from_psd(frequencies, psd, freq_min=5, freq_max=20)
+
         # Calculate RMS over a range that includes only the 50 Hz component
-        rms_high = calculate_rms_from_psd(frequencies, psd, freq_range=(40, 60))
+        rms_high = calculate_rms_from_psd(frequencies, psd, freq_min=40, freq_max=60)
         
         # Both should be positive and finite
         self.assertTrue(rms_low > 0)

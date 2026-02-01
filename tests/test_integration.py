@@ -17,6 +17,10 @@ import os
 import numpy as np
 import tempfile
 import h5py
+import pytest
+
+# Skip entire module if PyQt6 is not available
+pytest.importorskip("PyQt6")
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))

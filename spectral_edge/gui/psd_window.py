@@ -300,6 +300,7 @@ class PSDAnalysisWindow(QMainWindow):
         params_scroll.setWidgetResizable(True)
         params_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         params_tab = QWidget()
+        params_tab.setStyleSheet("background-color: #1a1f2e;")
         params_layout = QVBoxLayout(params_tab)
         params_layout.setContentsMargins(0, 0, 0, 0)
         params_layout.setSpacing(4)
@@ -315,6 +316,7 @@ class PSDAnalysisWindow(QMainWindow):
         display_scroll.setWidgetResizable(True)
         display_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         display_tab = QWidget()
+        display_tab.setStyleSheet("background-color: #1a1f2e;")
         display_layout = QVBoxLayout(display_tab)
         display_layout.setContentsMargins(0, 0, 0, 0)
         display_layout.setSpacing(4)
@@ -330,6 +332,7 @@ class PSDAnalysisWindow(QMainWindow):
         filter_scroll.setWidgetResizable(True)
         filter_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         filter_tab = QWidget()
+        filter_tab.setStyleSheet("background-color: #1a1f2e;")
         filter_layout = QVBoxLayout(filter_tab)
         filter_layout.setContentsMargins(0, 0, 0, 0)
         filter_layout.setSpacing(4)
@@ -344,6 +347,7 @@ class PSDAnalysisWindow(QMainWindow):
         compare_scroll.setWidgetResizable(True)
         compare_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         compare_tab = QWidget()
+        compare_tab.setStyleSheet("background-color: #1a1f2e;")
         compare_layout = QVBoxLayout(compare_tab)
         compare_layout.setContentsMargins(0, 0, 0, 0)
         compare_layout.setSpacing(4)
@@ -1031,7 +1035,7 @@ class PSDAnalysisWindow(QMainWindow):
         # List of loaded curves (scroll area)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMaximumHeight(150)
+        scroll.setMaximumHeight(400)  # Increased from 150 to utilize available space
 
         self.comparison_list_widget = QWidget()
         self.comparison_list_widget.setObjectName("comparisonWidget")
@@ -1373,7 +1377,10 @@ class PSDAnalysisWindow(QMainWindow):
         self.legend.setBrush(pg.mkBrush(26, 31, 46, 255))  # Solid GUI background
         self.legend.setPen(pg.mkPen(74, 85, 104, 255))  # Subtle border
         self.legend.setVisible(False)  # Hide until data is calculated
-        
+
+        # Set initial frequency ticks to powers of 10 (10, 100, 1000)
+        self._set_initial_frequency_ticks()
+
         # Configure axis appearance for full box border
         axis_pen = pg.mkPen(color='#4a5568', width=2)
         self.plot_widget.getPlotItem().getAxis('top').setPen(axis_pen)
@@ -1785,6 +1792,21 @@ class PSDAnalysisWindow(QMainWindow):
         except Exception as e:
             show_critical(self, "Calculation Error", f"Failed to calculate PSD: {e}\n\nPlease try adjusting the frequency resolution or frequency range.")
     
+    def _set_initial_frequency_ticks(self):
+        """Set initial frequency axis ticks to powers of 10 for the default range (10-3000 Hz)."""
+        # Default range: 10 to 3000 Hz
+        tick_values = []
+        tick_labels = []
+
+        for power in range(1, 4):  # 10^1, 10^2, 10^3
+            freq = 10 ** power
+            tick_values.append(np.log10(freq))
+            tick_labels.append(str(int(freq)))
+
+        # Set the ticks on the bottom axis
+        bottom_axis = self.plot_widget.getPlotItem().getAxis('bottom')
+        bottom_axis.setTicks([[(val, label) for val, label in zip(tick_values, tick_labels)]])
+
     def _set_frequency_ticks(self):
         """Set frequency axis ticks to only show powers of 10."""
         freq_min = self.freq_min_spin.value()

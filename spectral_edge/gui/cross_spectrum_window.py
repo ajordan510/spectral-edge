@@ -476,7 +476,7 @@ class CrossSpectrumWindow(QMainWindow):
             show_critical(self, "Calculation Error", f"Failed to calculate: {str(e)}")
 
     def _set_frequency_ticks(self, plot_widget):
-        """Set frequency axis ticks to only show powers of 10."""
+        """Set frequency axis ticks to only show powers of 10 for log mode."""
         freq_min = self.freq_min_spin.value()
         freq_max = self.freq_max_spin.value()
 
@@ -495,6 +495,11 @@ class CrossSpectrumWindow(QMainWindow):
         # Set the ticks on the bottom axis
         bottom_axis = plot_widget.getPlotItem().getAxis('bottom')
         bottom_axis.setTicks([[(val, label) for val, label in zip(tick_values, tick_labels)]])
+
+    def _reset_frequency_ticks(self, plot_widget):
+        """Reset frequency axis ticks to default (auto) for linear mode."""
+        bottom_axis = plot_widget.getPlotItem().getAxis('bottom')
+        bottom_axis.setTicks(None)  # Reset to automatic tick generation
 
     def _update_plots(self):
         """Update all plots with current results."""
@@ -536,6 +541,8 @@ class CrossSpectrumWindow(QMainWindow):
         self.coherence_plot.setYRange(0, 1.1)
         if log_mode:
             self._set_frequency_ticks(self.coherence_plot)
+        else:
+            self._reset_frequency_ticks(self.coherence_plot)
 
         # Update CSD plots
         self.csd_mag_plot.clear()
@@ -548,6 +555,8 @@ class CrossSpectrumWindow(QMainWindow):
         self.csd_mag_plot.getPlotItem().getAxis('left').enableAutoSIPrefix(False)
         if log_mode:
             self._set_frequency_ticks(self.csd_mag_plot)
+        else:
+            self._reset_frequency_ticks(self.csd_mag_plot)
 
         self.csd_phase_plot.clear()
         self.csd_phase_plot.setLogMode(x=log_mode, y=False)
@@ -558,6 +567,8 @@ class CrossSpectrumWindow(QMainWindow):
         self.csd_phase_plot.setYRange(-180, 180)
         if log_mode:
             self._set_frequency_ticks(self.csd_phase_plot)
+        else:
+            self._reset_frequency_ticks(self.csd_phase_plot)
 
         # Update transfer function plots with channel-specific titles
         self.tf_mag_plot.clear()
@@ -572,6 +583,8 @@ class CrossSpectrumWindow(QMainWindow):
         )
         if log_mode:
             self._set_frequency_ticks(self.tf_mag_plot)
+        else:
+            self._reset_frequency_ticks(self.tf_mag_plot)
 
         self.tf_phase_plot.clear()
         self.tf_phase_plot.setLogMode(x=log_mode, y=False)
@@ -586,6 +599,8 @@ class CrossSpectrumWindow(QMainWindow):
         self.tf_phase_plot.setYRange(-180, 180)
         if log_mode:
             self._set_frequency_ticks(self.tf_phase_plot)
+        else:
+            self._reset_frequency_ticks(self.tf_phase_plot)
 
         # Update PSD plot
         self.psd_plot.clear()
@@ -600,5 +615,7 @@ class CrossSpectrumWindow(QMainWindow):
             pen=pg.mkPen('#10b981', width=2),
             name=f"Response: {resp_name}"
         )
+        # Disable y-axis auto-scaling to show true values
+        self.psd_plot.getPlotItem().getAxis('left').enableAutoSIPrefix(False)
         # PSD plot is always in log mode, so always set frequency ticks
         self._set_frequency_ticks(self.psd_plot)

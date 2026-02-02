@@ -2033,11 +2033,20 @@ class PSDAnalysisWindow(QMainWindow):
                 width=2,
                 style=curve.get('line_style', Qt.PenStyle.DashLine)
             )
+
+            # Get RMS value and units for legend
+            rms_value = curve.get('rms', 0.0)
+            unit = ''
+            if self.channel_units and len(self.channel_units) > 0:
+                unit = self.channel_units[0]
+            else:
+                unit = 'g'  # Default to g if no channels loaded
+
             self.plot_widget.plot(
                 curve_freqs_plot,
                 curve_psd_plot,
                 pen=pen,
-                name=f"Ref: {curve['name']}"
+                name=f"Ref: {curve['name']} ({unit}RMS: {rms_value:.4f})"
             )
             plot_count += 1
 

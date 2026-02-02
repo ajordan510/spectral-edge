@@ -34,6 +34,7 @@ from spectral_edge.gui.flight_navigator import FlightNavigator
 from spectral_edge.utils.message_box import show_information, show_warning, show_critical
 from spectral_edge.utils.report_generator import ReportGenerator, export_plot_to_image, PPTX_AVAILABLE
 from spectral_edge.gui.cross_spectrum_window import CrossSpectrumWindow
+from spectral_edge.gui.statistics_window import create_statistics_window
 
 
 class ScientificAxisItem(pg.AxisItem):
@@ -137,7 +138,10 @@ class PSDAnalysisWindow(QMainWindow):
 
         # Cross-spectrum window
         self.cross_spectrum_window = None
-        
+
+        # Statistics window
+        self.statistics_window = None
+
         # Apply styling
         self._apply_styling()
         
@@ -399,6 +403,13 @@ class PSDAnalysisWindow(QMainWindow):
         if not PPTX_AVAILABLE:
             self.report_button.setToolTip("python-pptx not installed - report generation unavailable")
         layout.addWidget(self.report_button)
+
+        # Statistics button
+        self.statistics_button = QPushButton("📊 Statistics Analysis")
+        self.statistics_button.setEnabled(False)
+        self.statistics_button.setToolTip("View probability distribution, running statistics, and standard limits")
+        self.statistics_button.clicked.connect(self._open_statistics)
+        layout.addWidget(self.statistics_button)
 
         layout.addStretch()
         
@@ -989,15 +1000,51 @@ class PSDAnalysisWindow(QMainWindow):
         from PyQt6.QtWidgets import QFileDialog, QInputDialog
         import pandas as pd
 
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Reference Curve CSV",
-            "",
-            "CSV Files (*.csv);;All Files (*)"
-        )
+        # Style the file dialog to match dark theme
+        file_dialog = QFileDialog(self)
+        file_dialog.setWindowTitle("Select Reference Curve CSV")
+        file_dialog.setNameFilter("CSV Files (*.csv);;All Files (*)")
+        file_dialog.setStyleSheet("""
+            QFileDialog {
+                background-color: #1a1f2e;
+                color: #e0e0e0;
+            }
+            QWidget {
+                background-color: #1a1f2e;
+                color: #e0e0e0;
+            }
+            QLineEdit, QComboBox {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                padding: 5px;
+            }
+            QPushButton {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                padding: 5px 15px;
+            }
+            QPushButton:hover {
+                background-color: #3d4758;
+            }
+            QTreeView, QListView {
+                background-color: #2d3748;
+                color: #e0e0e0;
+            }
+            QHeaderView::section {
+                background-color: #2d3748;
+                color: #e0e0e0;
+            }
+        """)
 
-        if not file_path:
+        if not file_dialog.exec():
             return
+
+        file_paths = file_dialog.selectedFiles()
+        if not file_paths:
+            return
+        file_path = file_paths[0]
 
         try:
             # Try to load the CSV
@@ -1019,13 +1066,43 @@ class PSDAnalysisWindow(QMainWindow):
                             "Reference curve must have at least 2 data points.")
                 return
 
-            # Get a name for this curve
+            # Get a name for this curve with styled dialog
             default_name = Path(file_path).stem
-            name, ok = QInputDialog.getText(
-                self, "Curve Name",
-                "Enter a name for this reference curve:",
-                text=default_name
-            )
+
+            # Create styled input dialog
+            input_dialog = QInputDialog(self)
+            input_dialog.setWindowTitle("Curve Name")
+            input_dialog.setLabelText("Enter a name for this reference curve:")
+            input_dialog.setTextValue(default_name)
+            input_dialog.setStyleSheet("""
+                QInputDialog {
+                    background-color: #1a1f2e;
+                    color: #e0e0e0;
+                }
+                QLabel {
+                    color: #e0e0e0;
+                }
+                QLineEdit {
+                    background-color: #2d3748;
+                    color: #e0e0e0;
+                    border: 1px solid #4a5568;
+                    padding: 5px;
+                    min-width: 300px;
+                }
+                QPushButton {
+                    background-color: #2d3748;
+                    color: #e0e0e0;
+                    border: 1px solid #4a5568;
+                    padding: 5px 15px;
+                    min-width: 80px;
+                }
+                QPushButton:hover {
+                    background-color: #3d4758;
+                }
+            """)
+
+            ok = input_dialog.exec()
+            name = input_dialog.textValue()
 
             if not ok or not name:
                 name = default_name
@@ -1057,6 +1134,9 @@ class PSDAnalysisWindow(QMainWindow):
                            f"Successfully imported '{name}' with {len(frequencies)} data points.")
 
         except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"Reference curve import error: {error_details}")
             show_critical(self, "Import Error", f"Failed to import reference curve: {str(e)}")
 
     def _update_comparison_list(self):
@@ -1160,6 +1240,36 @@ class PSDAnalysisWindow(QMainWindow):
         else:
             self.cross_spectrum_window.raise_()
             self.cross_spectrum_window.activateWindow()
+
+    def _open_statistics(self):
+        """Open the Statistics Analysis window."""
+        if self.signal_data_full is None:
+            show_warning(self, "No Data",
+                        "Please load data first before opening statistics analysis.")
+            return
+
+        # Prepare channel data
+        channels_data = []
+        for i, name in enumerate(self.channel_names):
+            if self.signal_data_full.ndim == 1:
+                signal = self.signal_data_full
+            else:
+                signal = self.signal_data_full[:, i]
+            unit = self.channel_units[i] if i < len(self.channel_units) else ''
+            flight = self.channel_flight_names[i] if i < len(self.channel_flight_names) else ''
+            channels_data.append((name, signal, unit, flight))
+
+        # Create or show statistics window
+        if self.statistics_window is None or not self.statistics_window.isVisible():
+            self.statistics_window = create_statistics_window(
+                channels_data=channels_data,
+                sample_rate=self.sample_rate,
+                parent=self
+            )
+            self.statistics_window.show()
+        else:
+            self.statistics_window.raise_()
+            self.statistics_window.activateWindow()
 
     def _generate_report(self):
         """Generate a PowerPoint report with the current analysis."""
@@ -1501,6 +1611,7 @@ class PSDAnalysisWindow(QMainWindow):
             self.event_button.setEnabled(True)
             self.cross_spectrum_button.setEnabled(len(self.channel_names) >= 2)
             self.report_button.setEnabled(PPTX_AVAILABLE)
+            self.statistics_button.setEnabled(True)
 
             # Clear previous results
             self.frequencies = {}
@@ -2653,6 +2764,7 @@ class PSDAnalysisWindow(QMainWindow):
             self.event_button.setEnabled(True)
             self.cross_spectrum_button.setEnabled(len(self.channel_names) >= 2)
             self.report_button.setEnabled(PPTX_AVAILABLE)
+            self.statistics_button.setEnabled(True)
 
             # Clear previous results
             self.frequencies = {}

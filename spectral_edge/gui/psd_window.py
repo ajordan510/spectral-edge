@@ -1101,8 +1101,18 @@ class PSDAnalysisWindow(QMainWindow):
 
             # Define colors for comparison curves (different from channel colors)
             comparison_colors = ['#ff6b6b', '#ffd93d', '#6bcb77', '#4d96ff', '#ff6f91', '#845ec2']
-            color_idx = len(self.comparison_curves) % len(comparison_colors)
+            color_idx = len(self.comparison_curves) % len(comparison_curves)
             color = comparison_colors[color_idx]
+
+            # Calculate RMS for the reference curve using current frequency range
+            freq_min = self.freq_min_spin.value()
+            freq_max = self.freq_max_spin.value()
+            rms = calculate_rms_from_psd(
+                frequencies,
+                psd,
+                freq_min=freq_min,
+                freq_max=freq_max
+            )
 
             # Add to comparison curves
             curve_data = {
@@ -1112,7 +1122,8 @@ class PSDAnalysisWindow(QMainWindow):
                 'color': color,
                 'line_style': Qt.PenStyle.DashLine,
                 'visible': True,
-                'file_path': file_path
+                'file_path': file_path,
+                'rms': rms  # Store RMS value
             }
             self.comparison_curves.append(curve_data)
 
@@ -1142,8 +1153,16 @@ class PSDAnalysisWindow(QMainWindow):
             row_layout = QHBoxLayout(row_widget)
             row_layout.setContentsMargins(0, 0, 0, 0)
 
-            # Checkbox for visibility
-            checkbox = QCheckBox(curve['name'])
+            # Checkbox for visibility with RMS value
+            rms_value = curve.get('rms', 0.0)
+            # Get units from the first channel if available, otherwise default to 'g'
+            unit = ''
+            if self.channel_units and len(self.channel_units) > 0:
+                unit = self.channel_units[0]
+            else:
+                unit = 'g'  # Default to g if no channels loaded
+            label_text = f"{curve['name']} ({unit}RMS: {rms_value:.4f})"
+            checkbox = QCheckBox(label_text)
             checkbox.setChecked(curve['visible'])
             checkbox.setStyleSheet(f"color: {curve['color']};")
             checkbox.stateChanged.connect(lambda state, idx=i: self._toggle_comparison_curve(idx, state))
@@ -1461,13 +1480,35 @@ class PSDAnalysisWindow(QMainWindow):
             self.hLine.setVisible(False)
             self.coord_label.setVisible(False)
     
+    def _recalculate_comparison_rms(self):
+        """Recalculate RMS values for all comparison curves based on current frequency range."""
+        freq_min = self.freq_min_spin.value()
+        freq_max = self.freq_max_spin.value()
+
+        for curve in self.comparison_curves:
+            # Recalculate RMS for this curve
+            rms = calculate_rms_from_psd(
+                curve['frequencies'],
+                curve['psd'],
+                freq_min=freq_min,
+                freq_max=freq_max
+            )
+            curve['rms'] = rms
+
+        # Update the UI to show new RMS values
+        self._update_comparison_list()
+
     def _on_parameter_changed(self):
         """Handle parameter changes - clear PSD results to force recalculation."""
         # Clear PSD results
         self.frequencies = {}
         self.psd_results = {}
         self.rms_values = {}
-        
+
+        # Recalculate RMS for comparison curves (frequency range may have changed)
+        if self.comparison_curves:
+            self._recalculate_comparison_rms()
+
         # Clear the PSD plot but keep time history
         self._clear_psd_plot()
     

@@ -296,34 +296,62 @@ class PSDAnalysisWindow(QMainWindow):
         """)
         
         # Tab 1: PSD Parameters
+        params_scroll = QScrollArea()
+        params_scroll.setWidgetResizable(True)
+        params_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         params_tab = QWidget()
         params_layout = QVBoxLayout(params_tab)
+        params_layout.setContentsMargins(0, 0, 0, 0)
+        params_layout.setSpacing(4)
         params_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         params_layout.addWidget(self._create_frequency_range_group())
         params_layout.addWidget(self._create_parameter_group())
-        tab_widget.addTab(params_tab, "Parameters")
-        
+        params_layout.addStretch()
+        params_scroll.setWidget(params_tab)
+        tab_widget.addTab(params_scroll, "Parameters")
+
         # Tab 2: Display & Axes
+        display_scroll = QScrollArea()
+        display_scroll.setWidgetResizable(True)
+        display_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         display_tab = QWidget()
         display_layout = QVBoxLayout(display_tab)
+        display_layout.setContentsMargins(0, 0, 0, 0)
+        display_layout.setSpacing(4)
         display_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         display_layout.addWidget(self._create_display_options_group())
         display_layout.addWidget(self._create_axis_limits_group())
-        tab_widget.addTab(display_tab, "Display")
-        
+        display_layout.addStretch()
+        display_scroll.setWidget(display_tab)
+        tab_widget.addTab(display_scroll, "Display")
+
         # Tab 3: Filter
+        filter_scroll = QScrollArea()
+        filter_scroll.setWidgetResizable(True)
+        filter_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         filter_tab = QWidget()
         filter_layout = QVBoxLayout(filter_tab)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(4)
         filter_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         filter_layout.addWidget(self._create_filter_group())
-        tab_widget.addTab(filter_tab, "Filter")
+        filter_layout.addStretch()
+        filter_scroll.setWidget(filter_tab)
+        tab_widget.addTab(filter_scroll, "Filter")
 
         # Tab 4: Comparison
+        compare_scroll = QScrollArea()
+        compare_scroll.setWidgetResizable(True)
+        compare_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         compare_tab = QWidget()
         compare_layout = QVBoxLayout(compare_tab)
+        compare_layout.setContentsMargins(0, 0, 0, 0)
+        compare_layout.setSpacing(4)
         compare_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         compare_layout.addWidget(self._create_comparison_group())
-        tab_widget.addTab(compare_tab, "Compare")
+        compare_layout.addStretch()
+        compare_scroll.setWidget(compare_tab)
+        tab_widget.addTab(compare_scroll, "Compare")
 
         layout.addWidget(tab_widget)
         
@@ -460,6 +488,9 @@ class PSDAnalysisWindow(QMainWindow):
         """Create the frequency range input group box."""
         group = QGroupBox("Frequency Range")
         layout = QGridLayout()
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(3)
         
         # Min frequency
         layout.addWidget(QLabel("Min Freq (Hz):"), 0, 0)
@@ -486,9 +517,9 @@ class PSDAnalysisWindow(QMainWindow):
         """Create the parameter configuration group box."""
         group = QGroupBox("PSD Parameters")
         layout = QGridLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setHorizontalSpacing(10)
-        layout.setVerticalSpacing(6)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(3)
         
         row = 0
         
@@ -602,6 +633,8 @@ class PSDAnalysisWindow(QMainWindow):
         """Create display options group."""
         group = QGroupBox("Display Options")
         layout = QVBoxLayout()
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(3)
         
         # Show crosshair checkbox
         self.show_crosshair_checkbox = QCheckBox("Show Crosshair")
@@ -646,7 +679,10 @@ class PSDAnalysisWindow(QMainWindow):
         """Create axis limits control group."""
         group = QGroupBox("Axis Limits")
         layout = QGridLayout()
-        
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(3)
+
         row = 0
         
         # X-axis limits (Frequency)
@@ -711,7 +747,9 @@ class PSDAnalysisWindow(QMainWindow):
         """Create the filter configuration group box."""
         group = QGroupBox("Signal Filtering")
         layout = QVBoxLayout()
-        
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(3)
+
         # Description of default processing
         desc_label = QLabel(
             "<b>Default Processing:</b><br>"
@@ -734,7 +772,10 @@ class PSDAnalysisWindow(QMainWindow):
         # Filter options group
         filter_options_group = QGroupBox("Filter Configuration")
         filter_layout = QGridLayout()
-        
+        filter_layout.setContentsMargins(6, 4, 6, 4)
+        filter_layout.setHorizontalSpacing(8)
+        filter_layout.setVerticalSpacing(3)
+
         row = 0
         
         # Filter type
@@ -970,6 +1011,8 @@ class PSDAnalysisWindow(QMainWindow):
         """Create the comparison curves management group box."""
         group = QGroupBox("Reference Curves")
         layout = QVBoxLayout()
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(3)
 
         # Description
         desc_label = QLabel(

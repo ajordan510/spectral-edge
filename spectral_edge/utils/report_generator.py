@@ -570,11 +570,25 @@ def export_plot_to_image(plot_widget, width: int = 1200, height: int = 800) -> b
         exporter.parameters()['width'] = width
         exporter.parameters()['height'] = height
 
-        # Export to bytes
-        output = io.BytesIO()
-        exporter.export(output)
-        output.seek(0)
-        return output.read()
+        # Export to temporary file (ImageExporter.export() requires a filename)
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+            tmp_path = tmp_file.name
+
+        try:
+            exporter.export(tmp_path)
+
+            # Read the bytes from the temporary file
+            with open(tmp_path, 'rb') as f:
+                image_bytes = f.read()
+
+            return image_bytes
+
+        finally:
+            # Clean up the temporary file
+            try:
+                Path(tmp_path).unlink()
+            except Exception:
+                pass  # Ignore errors during cleanup
 
     except Exception as e:
         raise RuntimeError(f"Failed to export plot: {e}")

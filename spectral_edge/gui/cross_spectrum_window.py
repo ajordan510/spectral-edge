@@ -370,7 +370,12 @@ class CrossSpectrumWindow(QMainWindow):
         self.psd_plot = pg.PlotWidget()
         self._setup_plot(self.psd_plot, "Power Spectral Density", "Frequency (Hz)", "PSD")
         self.psd_plot.setLogMode(x=True, y=True)
-        self.psd_plot.addLegend(offset=(10, 10))
+
+        # Add legend with border and background
+        self.psd_legend = self.psd_plot.addLegend(offset=(10, 10))
+        self.psd_legend.setBrush(pg.mkBrush(26, 31, 46, 200))  # Semi-transparent dark background
+        self.psd_legend.setPen(pg.mkPen(74, 85, 104, 255))  # Subtle border
+
         psd_layout.addWidget(self.psd_plot)
         self.tab_widget.addTab(psd_widget, "PSDs")
 
@@ -470,6 +475,27 @@ class CrossSpectrumWindow(QMainWindow):
         except Exception as e:
             show_critical(self, "Calculation Error", f"Failed to calculate: {str(e)}")
 
+    def _set_frequency_ticks(self, plot_widget):
+        """Set frequency axis ticks to only show powers of 10."""
+        freq_min = self.freq_min_spin.value()
+        freq_max = self.freq_max_spin.value()
+
+        # Find all powers of 10 within the range
+        min_exp = int(np.floor(np.log10(freq_min)))
+        max_exp = int(np.ceil(np.log10(freq_max)))
+
+        tick_values = []
+        tick_labels = []
+        for exp in range(min_exp, max_exp + 1):
+            freq = 10 ** exp
+            if freq_min <= freq <= freq_max:
+                tick_values.append(np.log10(freq))
+                tick_labels.append(str(int(freq)))
+
+        # Set the ticks on the bottom axis
+        bottom_axis = plot_widget.getPlotItem().getAxis('bottom')
+        bottom_axis.setTicks([[(val, label) for val, label in zip(tick_values, tick_labels)]])
+
     def _update_plots(self):
         """Update all plots with current results."""
         if self.frequencies is None:
@@ -484,6 +510,12 @@ class CrossSpectrumWindow(QMainWindow):
 
         freqs = self.frequencies[mask]
         log_mode = self.log_freq_checkbox.isChecked()
+
+        # Get channel names for titles
+        ref_idx = self.ref_combo.currentIndex()
+        resp_idx = self.resp_combo.currentIndex()
+        ref_name = self.channels_data[ref_idx][0]
+        resp_name = self.channels_data[resp_idx][0]
 
         # Update coherence plot
         self.coherence_plot.clear()
@@ -502,6 +534,8 @@ class CrossSpectrumWindow(QMainWindow):
             )
             self.coherence_plot.addItem(threshold_line)
         self.coherence_plot.setYRange(0, 1.1)
+        if log_mode:
+            self._set_frequency_ticks(self.coherence_plot)
 
         # Update CSD plots
         self.csd_mag_plot.clear()
@@ -510,6 +544,10 @@ class CrossSpectrumWindow(QMainWindow):
             freqs, self.csd_magnitude[mask],
             pen=pg.mkPen('#10b981', width=2)
         )
+        # Disable y-axis auto-scaling to show true values
+        self.csd_mag_plot.getPlotItem().getAxis('left').enableAutoSIPrefix(False)
+        if log_mode:
+            self._set_frequency_ticks(self.csd_mag_plot)
 
         self.csd_phase_plot.clear()
         self.csd_phase_plot.setLogMode(x=log_mode, y=False)
@@ -518,29 +556,39 @@ class CrossSpectrumWindow(QMainWindow):
             pen=pg.mkPen('#f59e0b', width=2)
         )
         self.csd_phase_plot.setYRange(-180, 180)
+        if log_mode:
+            self._set_frequency_ticks(self.csd_phase_plot)
 
-        # Update transfer function plots
+        # Update transfer function plots with channel-specific titles
         self.tf_mag_plot.clear()
         self.tf_mag_plot.setLogMode(x=log_mode, y=True)
+        self.tf_mag_plot.setTitle(
+            f"Transfer Function Magnitude ({resp_name}/{ref_name})",
+            color='#60a5fa', size='12pt'
+        )
         self.tf_mag_plot.plot(
             freqs, self.tf_magnitude[mask],
             pen=pg.mkPen('#8b5cf6', width=2)
         )
+        if log_mode:
+            self._set_frequency_ticks(self.tf_mag_plot)
 
         self.tf_phase_plot.clear()
         self.tf_phase_plot.setLogMode(x=log_mode, y=False)
+        self.tf_phase_plot.setTitle(
+            f"Transfer Function Phase ({resp_name}/{ref_name})",
+            color='#60a5fa', size='12pt'
+        )
         self.tf_phase_plot.plot(
             freqs, self.tf_phase[mask],
             pen=pg.mkPen('#ec4899', width=2)
         )
         self.tf_phase_plot.setYRange(-180, 180)
+        if log_mode:
+            self._set_frequency_ticks(self.tf_phase_plot)
 
         # Update PSD plot
         self.psd_plot.clear()
-        ref_idx = self.ref_combo.currentIndex()
-        resp_idx = self.resp_combo.currentIndex()
-        ref_name = self.channels_data[ref_idx][0]
-        resp_name = self.channels_data[resp_idx][0]
 
         self.psd_plot.plot(
             freqs, self.psd_ref[mask],
@@ -552,3 +600,5 @@ class CrossSpectrumWindow(QMainWindow):
             pen=pg.mkPen('#10b981', width=2),
             name=f"Response: {resp_name}"
         )
+        # PSD plot is always in log mode, so always set frequency ticks
+        self._set_frequency_ticks(self.psd_plot)

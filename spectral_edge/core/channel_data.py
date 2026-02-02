@@ -154,7 +154,7 @@ class ChannelData:
         np.ndarray
             Time vector in seconds, shape=(n_samples,)
         """
-        return np.linspace(self.start_time, self.end_time, self.n_samples)
+        return self.start_time + (np.arange(self.n_samples) / self.sample_rate)
     
     def to_tuple(self) -> Tuple[str, np.ndarray, str, str]:
         """

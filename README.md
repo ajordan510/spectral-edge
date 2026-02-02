@@ -406,7 +406,7 @@ SpectralEdge includes a comprehensive automated testing framework that can valid
 **1. Unit Tests (No GUI required):**
 ```bash
 # Run core algorithm tests
-pytest tests/test_psd.py tests/test_signal_processing.py -v
+pytest tests/test_psd.py tests/test_core_algorithms.py -v
 ```
 
 **2. Headless GUI Tests:**

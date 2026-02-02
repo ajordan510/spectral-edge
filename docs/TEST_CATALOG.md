@@ -262,7 +262,7 @@ This document catalogs all existing and proposed tests, explaining their value i
 
 | Test | Status | Value Type | What It Would Ensure |
 |------|--------|------------|----------------------|
-| `test_psd_1m_samples_performance` | 📋 Proposed | Reliability | 1M samples processes in <5 seconds |
+| `test_psd_1m_samples_performance` | 📋 Proposed | Reliability | 1M samples processed in <5 seconds |
 | `test_hdf5_100_channels_performance` | 📋 Proposed | Reliability | 100 channels load in <10 seconds |
 | `test_spectrogram_large_data_performance` | 📋 Proposed | Reliability | Large spectrograms don't freeze UI |
 | `test_memory_usage_large_file` | 📋 Proposed | Reliability | Memory stays bounded for large files |

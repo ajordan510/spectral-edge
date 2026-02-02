@@ -486,12 +486,16 @@ class PSDAnalysisWindow(QMainWindow):
         """Create the parameter configuration group box."""
         group = QGroupBox("PSD Parameters")
         layout = QGridLayout()
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(6)
         
         row = 0
         
         # Window type
         layout.addWidget(QLabel("Window Type:"), row, 0)
         self.window_combo = QComboBox()
+        self.window_combo.setMinimumHeight(24)
         window_options = get_window_options()
         for window_name in window_options.keys():
             self.window_combo.addItem(window_name.capitalize())
@@ -503,6 +507,7 @@ class PSDAnalysisWindow(QMainWindow):
         # Frequency resolution (df)
         layout.addWidget(QLabel("Δf (Hz):"), row, 0)
         self.df_spin = QDoubleSpinBox()
+        self.df_spin.setMinimumHeight(24)
         self.df_spin.setRange(0.01, 100)
         self.df_spin.setValue(1.0)
         self.df_spin.setDecimals(2)
@@ -514,6 +519,8 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Use efficient FFT size checkbox with df display
         fft_layout = QHBoxLayout()
+        fft_layout.setContentsMargins(0, 0, 0, 0)
+        fft_layout.setSpacing(6)
         self.efficient_fft_checkbox = QCheckBox("Use efficient FFT size")
         self.efficient_fft_checkbox.setChecked(True)
         self.efficient_fft_checkbox.setToolTip("Round segment length to nearest power of 2 for faster FFT computation")
@@ -534,6 +541,7 @@ class PSDAnalysisWindow(QMainWindow):
         # Overlap percentage
         layout.addWidget(QLabel("Overlap (%):" ), row, 0)
         self.overlap_spin = QSpinBox()
+        self.overlap_spin.setMinimumHeight(24)
         self.overlap_spin.setRange(0, 90)
         self.overlap_spin.setValue(50)
         self.overlap_spin.setSingleStep(10)
@@ -553,6 +561,7 @@ class PSDAnalysisWindow(QMainWindow):
         # Maximax window duration
         layout.addWidget(QLabel("Maximax Window (s):" ), row, 0)
         self.maximax_window_spin = QDoubleSpinBox()
+        self.maximax_window_spin.setMinimumHeight(24)
         self.maximax_window_spin.setRange(0.1, 10.0)
         self.maximax_window_spin.setValue(1.0)
         self.maximax_window_spin.setDecimals(1)
@@ -565,6 +574,7 @@ class PSDAnalysisWindow(QMainWindow):
         # Maximax overlap percentage
         layout.addWidget(QLabel("Maximax Overlap (%):" ), row, 0)
         self.maximax_overlap_spin = QSpinBox()
+        self.maximax_overlap_spin.setMinimumHeight(24)
         self.maximax_overlap_spin.setRange(0, 90)
         self.maximax_overlap_spin.setValue(50)
         self.maximax_overlap_spin.setSingleStep(10)
@@ -572,6 +582,18 @@ class PSDAnalysisWindow(QMainWindow):
         self.maximax_overlap_spin.valueChanged.connect(self._on_parameter_changed)
         layout.addWidget(self.maximax_overlap_spin, row, 1)
         row += 1
+
+        group.setStyleSheet("""
+            QSpinBox, QDoubleSpinBox, QComboBox {
+                padding-top: 2px;
+                padding-bottom: 2px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 3px;
+            }
+        """)
         
         group.setLayout(layout)
         return group

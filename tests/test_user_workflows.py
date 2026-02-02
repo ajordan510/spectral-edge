@@ -33,14 +33,15 @@ def sample_csv_file(tmp_path):
 0.001,0.15,0.25
 0.002,0.12,0.22
 """
+    rng = np.random.default_rng(42)
     # Generate actual time series data
     sample_rate = 1000.0
     duration = 5.0
     t = np.arange(0, duration, 1/sample_rate)
 
     # Create signals with known frequencies
-    accel_x = np.sin(2 * np.pi * 50 * t) + 0.1 * np.random.randn(len(t))
-    accel_y = np.sin(2 * np.pi * 100 * t) + 0.1 * np.random.randn(len(t))
+    accel_x = np.sin(2 * np.pi * 50 * t) + 0.1 * rng.standard_normal(len(t))
+    accel_y = np.sin(2 * np.pi * 100 * t) + 0.1 * rng.standard_normal(len(t))
 
     csv_path = tmp_path / "test_data.csv"
     with open(csv_path, 'w') as f:

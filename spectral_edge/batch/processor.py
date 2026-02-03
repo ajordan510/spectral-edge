@@ -14,8 +14,10 @@ import logging
 from typing import Dict, List, Tuple, Optional, Any
 from pathlib import Path
 from datetime import datetime
-
-from ..core.psd import calculate_psd_welch, calculate_psd_maximax, calculate_rms_from_psd
+from spectral_edge.core.psd import (
+    calculate_psd_welch, calculate_psd_maximax, calculate_rms_from_psd
+)
+from spectral_edge.batch.spectrogram_generator import generate_spectrogram
 from ..utils.hdf5_loader import HDF5FlightDataLoader
 from .config import BatchConfig, EventDefinition
 from scipy import signal as scipy_signal
@@ -40,7 +42,7 @@ class BatchProcessingResult:
         
     def add_psd_result(self, flight_key: str, channel_key: str, event_name: str, 
                        frequencies: np.ndarray, psd: np.ndarray, 
-                       metadata: Dict[str, Any]):
+                       metadata: Dict[str, Any], spectrogram_data: Optional[Dict[str, Any]] = None):
         """
         Add a PSD result to the container.
         
@@ -58,6 +60,8 @@ class BatchProcessingResult:
             PSD values
         metadata : dict
             Additional metadata (sample_rate, units, processing params, etc.)
+        spectrogram_data : dict, optional
+            Spectrogram data containing 'frequencies', 'times', and 'Sxx' arrays
         """
         channel_id = (flight_key, channel_key)
         
@@ -67,7 +71,8 @@ class BatchProcessingResult:
         self.channel_results[channel_id][event_name] = {
             'frequencies': frequencies,
             'psd': psd,
-            'metadata': metadata
+            'metadata': metadata,
+            'spectrogram': spectrogram_data
         }
     
     def add_error(self, message: str):
@@ -359,6 +364,28 @@ class BatchProcessor:
         # Calculate RMS
         rms = calculate_rms_from_psd(frequencies, psd)
         
+        # Generate spectrogram if enabled
+        spectrogram_data = None
+        if self.config.spectrogram_config.enabled:
+            try:
+                spec_frequencies, spec_times, Sxx = generate_spectrogram(
+                    event_signal,
+                    sample_rate,
+                    desired_df=self.config.spectrogram_config.desired_df,
+                    overlap_percent=self.config.spectrogram_config.overlap_percent,
+                    snr_threshold=self.config.spectrogram_config.snr_threshold,
+                    use_efficient_fft=True
+                )
+                spectrogram_data = {
+                    'frequencies': spec_frequencies,
+                    'times': spec_times,
+                    'Sxx': Sxx
+                }
+            except Exception as e:
+                self.result.add_warning(
+                    f"Failed to generate spectrogram for {flight_key}/{channel_key}/{event_name}: {str(e)}"
+                )
+        
         # Store result
         metadata = {
             'sample_rate': sample_rate,
@@ -372,12 +399,13 @@ class BatchProcessor:
             'mean_removed': self.config.psd_config.remove_running_mean,
             'event_start_time': start_time,
             'event_end_time': end_time,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now().isoformat(),
+            'spectrogram_generated': spectrogram_data is not None
         }
         
         self.result.add_psd_result(
             flight_key, channel_key, event_name,
-            frequencies, psd, metadata
+            frequencies, psd, metadata, spectrogram_data
         )
         
         self.result.add_log_entry(

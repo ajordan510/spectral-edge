@@ -256,8 +256,8 @@ class BatchProcessor:
         data = loader.load_channel_data(
             flight_key, channel_key, decimate_for_display=False
         )
-        time_array = data['time']
-        signal_array = data['data']
+        time_array = data['time_full']
+        signal_array = data['data_full']
         
         # Process full duration if requested
         if self.config.process_full_duration:

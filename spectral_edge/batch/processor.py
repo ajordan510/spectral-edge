@@ -26,8 +26,7 @@ from .error_handler import ErrorHandler, BatchError, log_error_with_recovery
 from scipy import signal as scipy_signal
 
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Get module logger - configuration should be done at application entry point
 logger = logging.getLogger(__name__)
 
 
@@ -513,30 +512,35 @@ class BatchProcessor:
     
     def _remove_running_mean(self, signal: np.ndarray, sample_rate: float) -> np.ndarray:
         """
-        Remove running mean from signal using 1-second window.
-        
+        Remove running mean from signal using configurable window.
+
         Parameters:
         -----------
         signal : np.ndarray
             Input signal
         sample_rate : float
             Sample rate in Hz
-            
+
         Returns:
         --------
         np.ndarray
             Signal with running mean removed
         """
-        window_size = int(sample_rate)  # 1 second window
-        
+        # Use configurable window size (default 1.0 seconds)
+        window_seconds = self.config.psd_config.running_mean_window
+        window_size = int(sample_rate * window_seconds)
+
+        # Ensure minimum window size
+        window_size = max(1, window_size)
+
         if len(signal) < window_size:
             # If signal is shorter than window, just remove overall mean
             return signal - np.mean(signal)
-        
+
         # Calculate running mean using convolution
         kernel = np.ones(window_size) / window_size
         running_mean = np.convolve(signal, kernel, mode='same')
-        
+
         return signal - running_mean
     
     def _calculate_psd(self, signal: np.ndarray, sample_rate: float) -> Tuple[np.ndarray, np.ndarray]:

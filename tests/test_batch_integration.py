@@ -68,19 +68,30 @@ class TestBatchProcessorIntegration:
         # Create HDF5 file
         with h5py.File(file_path, 'w') as f:
             flight_group = f.create_group('flight_0001')
+
+            # Add metadata group (required by HDF5FlightDataLoader)
+            metadata_group = flight_group.create_group('metadata')
+            metadata_group.attrs['name'] = 'Test Flight'
+            metadata_group.attrs['date'] = '2026-02-03'
+            metadata_group.attrs['duration'] = duration
+
             channels_group = flight_group.create_group('channels')
-            
-            # Channel 1
-            ch1_dataset = channels_group.create_dataset('accel_x', data=signal1)
-            ch1_dataset.attrs['sample_rate'] = sample_rate
-            ch1_dataset.attrs['units'] = 'g'
-            ch1_dataset.attrs['time_offset'] = 0.0
-            
-            # Channel 2
-            ch2_dataset = channels_group.create_dataset('accel_y', data=signal2)
-            ch2_dataset.attrs['sample_rate'] = sample_rate
-            ch2_dataset.attrs['units'] = 'g'
-            ch2_dataset.attrs['time_offset'] = 0.0
+
+            # Channel 1 - create group with time and data datasets
+            ch1_group = channels_group.create_group('accel_x')
+            ch1_group.create_dataset('time', data=time)
+            ch1_group.create_dataset('data', data=signal1)
+            ch1_group.attrs['sample_rate'] = sample_rate
+            ch1_group.attrs['units'] = 'g'
+            ch1_group.attrs['time_offset'] = 0.0
+
+            # Channel 2 - create group with time and data datasets
+            ch2_group = channels_group.create_group('accel_y')
+            ch2_group.create_dataset('time', data=time)
+            ch2_group.create_dataset('data', data=signal2)
+            ch2_group.attrs['sample_rate'] = sample_rate
+            ch2_group.attrs['units'] = 'g'
+            ch2_group.attrs['time_offset'] = 0.0
         
         return file_path
     

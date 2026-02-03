@@ -67,6 +67,7 @@ class PSDConfig:
     freq_min: float = 20.0
     freq_max: float = 2000.0
     remove_running_mean: bool = True
+    running_mean_window: float = 1.0  # Window size in seconds for running mean removal
     frequency_spacing: str = "linear"  # linear or octave
     
     def validate(self):

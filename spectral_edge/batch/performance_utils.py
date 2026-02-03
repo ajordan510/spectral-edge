@@ -41,16 +41,14 @@ class MemoryManager:
         np.ndarray
             Optimized array
         """
-        # Ensure contiguous memory layout
+        # Ensure contiguous memory layout for efficient processing
         if not array.flags['C_CONTIGUOUS']:
             array = np.ascontiguousarray(array)
-        
-        # Use float32 instead of float64 where precision allows
-        if array.dtype == np.float64:
-            # Check if conversion to float32 would lose significant precision
-            if np.max(np.abs(array)) < 1e6:  # Safe range for float32
-                array = array.astype(np.float32)
-        
+
+        # Note: We keep float64 precision for PSD calculations.
+        # PSD values can span many orders of magnitude (e.g., 1e-12 to 1e3),
+        # and float32 would lose precision for small values.
+
         return array
     
     @staticmethod

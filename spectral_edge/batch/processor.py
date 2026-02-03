@@ -218,8 +218,10 @@ class BatchProcessor:
             
             try:
                 self._process_channel_hdf5(flight_key, channel_key)
+                self.progress_tracker.finish_channel()  # Mark channel as complete
             except Exception as e:
                 self.result.add_error(f"Failed to process {flight_key}/{channel_key}: {str(e)}")
+                self.progress_tracker.finish_channel()  # Mark channel as complete even on error
                 continue
             finally:
                 # Clear memory after each channel

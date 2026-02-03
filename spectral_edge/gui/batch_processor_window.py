@@ -29,6 +29,7 @@ from spectral_edge.batch.config import (
 from spectral_edge.batch.processor import BatchProcessor
 from spectral_edge.batch.batch_worker import BatchWorker
 from spectral_edge.gui.flight_navigator_enhanced import EnhancedFlightNavigator
+from spectral_edge.utils.hdf5_loader import HDF5FlightDataLoader
 from spectral_edge.utils.message_box import show_information, show_warning, show_critical, show_question
 
 logger = logging.getLogger(__name__)
@@ -616,7 +617,16 @@ class BatchProcessorWindow(QMainWindow):
             return
         
         # Open Enhanced Flight Navigator
-        navigator = EnhancedFlightNavigator(self.config.source_files[0], parent=self)
+        try:
+            loader = HDF5FlightDataLoader(self.config.source_files[0])
+            navigator = EnhancedFlightNavigator(loader, parent=self)
+        except Exception as e:
+            show_critical(
+                self,
+                "Error Loading HDF5 File",
+                f"Failed to load HDF5 file: {str(e)}"
+            )
+            return
         
         if navigator.exec() == navigator.DialogCode.Accepted:
             self.selected_channels = navigator.get_selected_channels()

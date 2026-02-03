@@ -191,18 +191,38 @@ def _create_event_sheet(wb: Workbook, event_name: str, event_results: Dict) -> N
     # Collect all PSD data
     all_frequencies = None
     psd_data = {}
-    
+    frequency_mismatch_warned = False
+
     for channel_id, result_data in event_results.items():
         frequencies = result_data['frequencies']
         psd_values = result_data['psd']
-        
+
         # Use first frequency array as reference
         if all_frequencies is None:
             all_frequencies = frequencies
-        
+        else:
+            # Validate that frequency arrays match
+            if len(frequencies) != len(all_frequencies):
+                if not frequency_mismatch_warned:
+                    logger.warning(
+                        f"Event '{event_name}': Frequency array length mismatch. "
+                        f"Reference has {len(all_frequencies)} points, "
+                        f"channel {channel_id} has {len(frequencies)} points. "
+                        f"Using reference frequencies - some channels may be misaligned."
+                    )
+                    frequency_mismatch_warned = True
+                # Truncate or pad PSD values to match reference length
+                if len(psd_values) > len(all_frequencies):
+                    psd_values = psd_values[:len(all_frequencies)]
+                elif len(psd_values) < len(all_frequencies):
+                    # Pad with NaN
+                    padded = np.full(len(all_frequencies), np.nan)
+                    padded[:len(psd_values)] = psd_values
+                    psd_values = padded
+
         # Use channel_id as column name
         psd_data[channel_id] = psd_values
-    
+
     if all_frequencies is None:
         logger.warning(f"No data for event: {event_name}")
         return
@@ -230,7 +250,7 @@ def _create_event_sheet(wb: Workbook, event_name: str, event_results: Dict) -> N
             try:
                 if len(str(cell.value)) > max_length:
                     max_length = len(str(cell.value))
-            except:
+            except (TypeError, AttributeError):
                 pass
         adjusted_width = min(max_length + 2, 50)
         ws.column_dimensions[column_letter].width = adjusted_width

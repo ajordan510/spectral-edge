@@ -231,9 +231,11 @@ class BatchProcessor:
         units = channel_info.units
         
         # Load full time history data (not decimated)
-        time_array, signal_array = loader.load_channel_data(
-            flight_key, channel_key, decimate=False
+        data = loader.load_channel_data(
+            flight_key, channel_key, decimate_for_display=False
         )
+        time_array = data['time']
+        signal_array = data['data']
         
         # Process full duration if requested
         if self.config.process_full_duration:
@@ -549,3 +551,26 @@ class BatchProcessor:
             raise ValueError(f"Unknown PSD method: {pc.method}")
         
         return frequencies, psd
+    
+    @property
+    def channels_processed(self) -> int:
+        """Get number of successfully processed channels."""
+        return len(self.channel_results)
+    
+    @property
+    def channels_failed(self) -> int:
+        """Get number of failed channels."""
+        return len(self.errors)
+    
+    @property
+    def processing_time(self) -> float:
+        """Get total processing time in seconds."""
+        if self.start_time and self.end_time:
+            return self.end_time - self.start_time
+        return 0.0
+    
+    @property
+    def success(self) -> bool:
+        """Check if processing was successful (at least one channel processed)."""
+        return len(self.channel_results) > 0
+

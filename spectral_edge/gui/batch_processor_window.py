@@ -27,8 +27,9 @@ from spectral_edge.batch.config import (
     DisplayConfig, OutputConfig, EventDefinition
 )
 from spectral_edge.batch.processor import BatchProcessor
+from spectral_edge.batch.batch_worker import BatchWorker
 from spectral_edge.gui.flight_navigator_enhanced import EnhancedFlightNavigator
-from spectral_edge.utils.message_box import show_information, show_warning, show_critical
+from spectral_edge.utils.message_box import show_information, show_warning, show_critical, show_question
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,8 @@ class BatchProcessorWindow(QMainWindow):
         
         self.config = BatchConfig()
         self.selected_channels = []
-        self.batch_processor = None
+        self.batch_worker = None
+        self.processing_log = []
         
         self._init_ui()
         self._connect_signals()
@@ -704,8 +706,8 @@ class BatchProcessorWindow(QMainWindow):
             # Validate configuration
             self.config.validate()
             
-            # TODO: Run batch processor in separate thread
-            show_information(self, "Batch Processing", "Batch processing will be implemented in Phase 3.")
+            # Start batch processing in worker thread
+            self._start_batch_processing()
             
         except ValueError as e:
             show_warning(self, "Invalid Configuration", f"Configuration validation failed:\n{str(e)}")
@@ -775,6 +777,67 @@ class BatchProcessorWindow(QMainWindow):
         """Populate UI controls from configuration object."""
         # TODO: Implement this method to load configuration into UI
         pass
+    
+    def _start_batch_processing(self):
+        """Start batch processing in worker thread."""
+        # Disable UI during processing
+        self._set_ui_enabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Processing...")
+        self.processing_log = []
+        
+        # Create and start worker
+        self.batch_worker = BatchWorker(self.config)
+        self.batch_worker.progress_updated.connect(self._on_progress_updated)
+        self.batch_worker.processing_complete.connect(self._on_processing_complete)
+        self.batch_worker.processing_failed.connect(self._on_processing_failed)
+        self.batch_worker.log_message.connect(self._on_log_message)
+        self.batch_worker.start()
+        
+        logger.info("Batch processing started")
+    
+    def _on_progress_updated(self, percent: int, message: str):
+        """Handle progress updates from worker."""
+        self.progress_bar.setValue(percent)
+        self.status_label.setText(message)
+    
+    def _on_processing_complete(self, results: Dict):
+        """Handle successful completion of batch processing."""
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("Complete!")
+        self._set_ui_enabled(True)
+        
+        # Show completion message
+        log_text = "\n".join(self.processing_log[-10:])  # Last 10 log messages
+        show_information(
+            self,
+            "Batch Processing Complete",
+            f"Batch processing completed successfully!\n\nOutput directory:\n{self.config.output_config.output_directory}\n\nRecent log:\n{log_text}"
+        )
+        
+        logger.info("Batch processing completed successfully")
+    
+    def _on_processing_failed(self, error_message: str):
+        """Handle batch processing failure."""
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("Failed")
+        self._set_ui_enabled(True)
+        
+        show_critical(self, "Batch Processing Failed", error_message)
+        logger.error(f"Batch processing failed: {error_message}")
+    
+    def _on_log_message(self, message: str):
+        """Handle log messages from worker."""
+        self.processing_log.append(message)
+        logger.info(f"Batch: {message}")
+    
+    def _set_ui_enabled(self, enabled: bool):
+        """Enable or disable UI controls."""
+        self.tab_widget.setEnabled(enabled)
+        self.load_config_btn.setEnabled(enabled)
+        self.save_config_btn.setEnabled(enabled)
+        self.run_batch_btn.setEnabled(enabled)
 
 
 if __name__ == "__main__":

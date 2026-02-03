@@ -1,0 +1,105 @@
+"""
+Batch Processor Worker Thread
+
+This module provides a QThread-based worker for running batch processing
+in the background without blocking the GUI.
+
+Author: SpectralEdge Development Team
+Date: 2026-02-02
+"""
+
+import logging
+from typing import Dict, Any
+from PyQt6.QtCore import QThread, pyqtSignal
+
+from spectral_edge.batch.config import BatchConfig
+from spectral_edge.batch.processor import BatchProcessor
+
+logger = logging.getLogger(__name__)
+
+
+class BatchWorker(QThread):
+    """
+    Worker thread for executing batch PSD processing.
+    
+    Runs the batch processor in a separate thread to prevent GUI freezing.
+    Emits signals to update progress and report completion/errors.
+    
+    Signals:
+    --------
+    progress_updated : pyqtSignal(int, str)
+        Emitted when progress changes. Args: (percent_complete, status_message)
+    processing_complete : pyqtSignal(dict)
+        Emitted when processing completes successfully. Args: (results_dict,)
+    processing_failed : pyqtSignal(str)
+        Emitted when processing fails. Args: (error_message,)
+    log_message : pyqtSignal(str)
+        Emitted for log messages during processing. Args: (message,)
+    """
+    
+    progress_updated = pyqtSignal(int, str)
+    processing_complete = pyqtSignal(dict)
+    processing_failed = pyqtSignal(str)
+    log_message = pyqtSignal(str)
+    
+    def __init__(self, config: BatchConfig):
+        """
+        Initialize the batch worker.
+        
+        Parameters:
+        -----------
+        config : BatchConfig
+            Batch configuration object
+        """
+        super().__init__()
+        self.config = config
+        self.processor = None
+        self._is_cancelled = False
+    
+    def run(self):
+        """
+        Execute the batch processing.
+        
+        This method runs in a separate thread and should not be called directly.
+        Use start() instead.
+        """
+        try:
+            self.log_message.emit("Initializing batch processor...")
+            self.progress_updated.emit(0, "Initializing...")
+            
+            # Create batch processor
+            self.processor = BatchProcessor(self.config)
+            
+            # Run batch processing
+            self.log_message.emit("Starting batch processing...")
+            self.progress_updated.emit(5, "Loading data...")
+            
+            results = self.processor.run()
+            
+            if self._is_cancelled:
+                self.log_message.emit("Batch processing cancelled by user")
+                self.processing_failed.emit("Processing cancelled by user")
+                return
+            
+            self.progress_updated.emit(100, "Complete!")
+            self.log_message.emit("Batch processing completed successfully")
+            self.processing_complete.emit(results)
+            
+        except Exception as e:
+            error_msg = f"Batch processing failed: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            self.log_message.emit(error_msg)
+            self.processing_failed.emit(error_msg)
+    
+    def cancel(self):
+        """
+        Request cancellation of the batch processing.
+        
+        Note: The cancellation is cooperative and may not take effect immediately.
+        """
+        self._is_cancelled = True
+        self.log_message.emit("Cancellation requested...")
+        
+        if self.processor:
+            # TODO: Implement cancellation in BatchProcessor
+            pass

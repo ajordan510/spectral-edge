@@ -17,6 +17,7 @@ from PyQt6.QtGui import QFont, QIcon, QPalette, QColor
 
 # Import tool windows
 from spectral_edge.gui.psd_window import PSDAnalysisWindow
+from spectral_edge.gui.batch_processor_window import BatchProcessorWindow
 
 
 class LandingPage(QMainWindow):
@@ -298,6 +299,8 @@ class LandingPage(QMainWindow):
         # Launch the appropriate tool based on name
         if tool_name == "PSD Analysis":
             self._launch_psd_tool()
+        elif tool_name == "Batch Processing":
+            self._launch_batch_processor()
         else:
             # Other tools not yet implemented
             print(f"Tool clicked: {tool_name} (not yet implemented)")
@@ -321,3 +324,23 @@ class LandingPage(QMainWindow):
             psd_window = PSDAnalysisWindow()
             psd_window.show()
             self.tool_windows["PSD Analysis"] = psd_window
+    
+    def _launch_batch_processor(self):
+        """
+        Launch the Batch Processor tool window.
+        
+        Creates a new Batch Processor window if one doesn't exist, or brings
+        the existing window to the front.
+        """
+        # Check if Batch Processor window already exists
+        if "Batch Processing" in self.tool_windows:
+            # Bring existing window to front
+            window = self.tool_windows["Batch Processing"]
+            window.show()
+            window.raise_()
+            window.activateWindow()
+        else:
+            # Create new Batch Processor window
+            batch_window = BatchProcessorWindow()
+            batch_window.show()
+            self.tool_windows["Batch Processing"] = batch_window

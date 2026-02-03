@@ -109,6 +109,7 @@ class BatchProcessor:
         self.config = config
         self.result = BatchProcessingResult()
         self.hdf5_loaders = {}  # Cache of HDF5 loaders
+        self.cancel_requested = False  # Flag for cancellation
         
     def process(self) -> BatchProcessingResult:
         """
@@ -165,6 +166,10 @@ class BatchProcessor:
         # Process each selected channel
         total_channels = len(self.config.selected_channels)
         for idx, (flight_key, channel_key) in enumerate(self.config.selected_channels, 1):
+            if self.cancel_requested:
+                self.result.add_warning("Processing cancelled by user")
+                break
+            
             self.result.add_log_entry(f"Processing channel {idx}/{total_channels}: {flight_key}/{channel_key}")
             
             try:

@@ -775,8 +775,89 @@ class BatchProcessorWindow(QMainWindow):
     
     def _populate_ui_from_config(self):
         """Populate UI controls from configuration object."""
-        # TODO: Implement this method to load configuration into UI
-        pass
+        # Data Source tab
+        if self.config.source_type == "hdf5":
+            self.hdf5_radio.setChecked(True)
+        else:
+            self.csv_radio.setChecked(True)
+        
+        # Events tab
+        self.full_duration_checkbox.setChecked(self.config.process_full_duration)
+        self.event_table.setRowCount(0)  # Clear existing rows
+        for event in self.config.events:
+            self._add_event_row(event.name, event.start_time, event.end_time, event.description)
+        
+        # PSD Parameters tab
+        if self.config.psd_config.method == "welch":
+            self.welch_radio.setChecked(True)
+        else:
+            self.maximax_radio.setChecked(True)
+        
+        window_index = self.window_combo.findText(self.config.psd_config.window)
+        if window_index >= 0:
+            self.window_combo.setCurrentIndex(window_index)
+        
+        self.overlap_spin.setValue(self.config.psd_config.overlap_percent)
+        self.df_spin.setValue(self.config.psd_config.desired_df)
+        self.efficient_fft_checkbox.setChecked(self.config.psd_config.use_efficient_fft)
+        self.freq_min_spin.setValue(self.config.psd_config.freq_min)
+        self.freq_max_spin.setValue(self.config.psd_config.freq_max)
+        
+        spacing_index = self.freq_spacing_combo.findText(self.config.psd_config.frequency_spacing)
+        if spacing_index >= 0:
+            self.freq_spacing_combo.setCurrentIndex(spacing_index)
+        
+        self.remove_mean_checkbox.setChecked(self.config.psd_config.remove_running_mean)
+        
+        # Filter tab
+        self.filter_enabled_checkbox.setChecked(self.config.filter_config.enabled)
+        
+        filter_type_index = self.filter_type_combo.findText(self.config.filter_config.filter_type)
+        if filter_type_index >= 0:
+            self.filter_type_combo.setCurrentIndex(filter_type_index)
+        
+        filter_design_index = self.filter_design_combo.findText(self.config.filter_config.filter_design)
+        if filter_design_index >= 0:
+            self.filter_design_combo.setCurrentIndex(filter_design_index)
+        
+        self.filter_order_spin.setValue(self.config.filter_config.filter_order)
+        self.cutoff_low_spin.setValue(self.config.filter_config.cutoff_low)
+        self.cutoff_high_spin.setValue(self.config.filter_config.cutoff_high)
+        
+        # Spectrogram tab
+        self.spectrogram_enabled_checkbox.setChecked(self.config.spectrogram_config.enabled)
+        self.spec_df_spin.setValue(self.config.spectrogram_config.desired_df)
+        self.spec_overlap_spin.setValue(self.config.spectrogram_config.overlap_percent)
+        self.snr_spin.setValue(self.config.spectrogram_config.snr_threshold)
+        
+        colormap_index = self.colormap_combo.findText(self.config.spectrogram_config.colormap)
+        if colormap_index >= 0:
+            self.colormap_combo.setCurrentIndex(colormap_index)
+        
+        # Display tab
+        self.auto_scale_checkbox.setChecked(self.config.display_config.auto_scale)
+        self.x_min_spin.setValue(self.config.display_config.x_min)
+        self.x_max_spin.setValue(self.config.display_config.x_max)
+        self.y_min_spin.setValue(self.config.display_config.y_min)
+        self.y_max_spin.setValue(self.config.display_config.y_max)
+        self.show_legend_checkbox.setChecked(self.config.display_config.show_legend)
+        self.show_grid_checkbox.setChecked(self.config.display_config.show_grid)
+        
+        # Output tab
+        self.excel_checkbox.setChecked(self.config.output_config.excel_enabled)
+        self.csv_checkbox.setChecked(self.config.output_config.csv_enabled)
+        self.powerpoint_checkbox.setChecked(self.config.output_config.powerpoint_enabled)
+        self.hdf5_checkbox.setChecked(self.config.output_config.hdf5_writeback_enabled)
+        self.output_dir_edit.setText(self.config.output_config.output_directory)
+    
+    def _add_event_row(self, name: str, start_time: float, end_time: float, description: str = ""):
+        """Helper method to add an event row to the table."""
+        row = self.event_table.rowCount()
+        self.event_table.insertRow(row)
+        self.event_table.setItem(row, 0, QTableWidgetItem(name))
+        self.event_table.setItem(row, 1, QTableWidgetItem(str(start_time)))
+        self.event_table.setItem(row, 2, QTableWidgetItem(str(end_time)))
+        self.event_table.setItem(row, 3, QTableWidgetItem(description))
     
     def _start_batch_processing(self):
         """Start batch processing in worker thread."""

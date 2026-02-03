@@ -506,6 +506,10 @@ class StatisticsWindow(QMainWindow):
                 }
 
             # Calculate overall statistics
+            rms = np.sqrt(np.mean(signal**2))
+            # Protect against division by zero for crest factor
+            crest_factor = np.max(np.abs(signal)) / rms if rms > 1e-12 else 0.0
+
             self.pdf_data[name]['overall'] = {
                 'mean': mean,
                 'std': std,
@@ -513,8 +517,8 @@ class StatisticsWindow(QMainWindow):
                 'kurtosis': stats.kurtosis(signal),
                 'min': np.min(signal),
                 'max': np.max(signal),
-                'rms': np.sqrt(np.mean(signal**2)),
-                'crest_factor': np.max(np.abs(signal)) / np.sqrt(np.mean(signal**2))
+                'rms': rms,
+                'crest_factor': crest_factor
             }
 
         self._update_plots()

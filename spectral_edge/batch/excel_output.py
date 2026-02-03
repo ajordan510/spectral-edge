@@ -21,10 +21,10 @@ logger = logging.getLogger(__name__)
 
 
 def export_to_excel(
-    results: Dict[str, Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]]],
-    output_path: str,
-    config: 'BatchConfig'
-) -> None:
+    result: 'BatchProcessingResult',
+    output_directory: str,
+    filename: str = "batch_psd_results.xlsx"
+) -> str:
     """
     Export batch processing results to Excel file.
     
@@ -33,74 +33,62 @@ def export_to_excel(
     
     Parameters:
     -----------
-    results : Dict[str, Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]]]
-        Nested dictionary structure:
-        {
-            event_name: {
-                source_identifier: {
-                    channel_name: (frequencies, psd_values),
-                    ...
-                },
-                ...
-            },
-            ...
-        }
-    output_path : str
-        Path to save the Excel file
-    config : BatchConfig
-        Batch configuration object containing processing parameters
+    result : BatchProcessingResult
+        Batch processing result object containing channel_results
+    output_directory : str
+        Directory to save the Excel file
+    filename : str, optional
+        Name of the Excel file (default: "batch_psd_results.xlsx")
         
     Returns:
     --------
-    None
+    str
+        Full path to the saved Excel file
     
     Raises:
     -------
     IOError
         If file cannot be written
-        
-    Notes:
-    ------
-    - Each sheet is named after the event
-    - First sheet contains a summary of all events and channels
-    - PSD data is written in columns: Frequency (Hz), Channel1 PSD, Channel2 PSD, ...
-    - Units are included in column headers
-    
-    Example:
-    --------
-    >>> results = {
-    ...     'liftoff': {
-    ...         'flight_0001': {
-    ...             'accel_x': (freq_array, psd_array),
-    ...         }
-    ...     }
-    ... }
-    >>> export_to_excel(results, 'batch_results.xlsx', config)
     """
     try:
+        output_path = str(Path(output_directory) / filename)
         wb = Workbook()
         
         # Remove default sheet
         if 'Sheet' in wb.sheetnames:
             wb.remove(wb['Sheet'])
         
+        # Reorganize results by event
+        events_data = {}
+        for (flight_key, channel_key), event_dict in result.channel_results.items():
+            for event_name, event_result in event_dict.items():
+                if event_name not in events_data:
+                    events_data[event_name] = {}
+                channel_id = f"{flight_key}_{channel_key}"
+                events_data[event_name][channel_id] = {
+                    'frequencies': event_result['frequencies'],
+                    'psd': event_result['psd'],
+                    'metadata': event_result['metadata']
+                }
+        
         # Create summary sheet
-        _create_summary_sheet(wb, results, config)
+        _create_summary_sheet(wb, events_data, result)
         
         # Create a sheet for each event
-        for event_name, event_results in results.items():
-            _create_event_sheet(wb, event_name, event_results, config)
+        for event_name, event_results in events_data.items():
+            _create_event_sheet(wb, event_name, event_results)
         
         # Save workbook
         wb.save(output_path)
         logger.info(f"Excel file saved: {output_path}")
+        return output_path
         
     except Exception as e:
         logger.error(f"Failed to export to Excel: {str(e)}")
         raise
 
 
-def _create_summary_sheet(wb: Workbook, results: Dict, config: 'BatchConfig') -> None:
+def _create_summary_sheet(wb: Workbook, events_data: Dict, result: 'BatchProcessingResult') -> None:
     """
     Create summary sheet with overview of all events and channels.
     
@@ -108,10 +96,10 @@ def _create_summary_sheet(wb: Workbook, results: Dict, config: 'BatchConfig') ->
     -----------
     wb : Workbook
         Excel workbook object
-    results : Dict
-        Processing results dictionary
-    config : BatchConfig
-        Batch configuration
+    events_data : Dict
+        Reorganized events data
+    result : BatchProcessingResult
+        Batch processing result object
     """
     ws = wb.create_sheet("Summary", 0)
     
@@ -119,22 +107,26 @@ def _create_summary_sheet(wb: Workbook, results: Dict, config: 'BatchConfig') ->
     ws['A1'] = "Batch PSD Processing Summary"
     ws['A1'].font = Font(size=14, bold=True)
     
-    # Configuration info
+    # Processing info
     row = 3
-    ws[f'A{row}'] = "Configuration:"
+    ws[f'A{row}'] = "Processing Summary:"
     ws[f'A{row}'].font = Font(bold=True)
     row += 1
     
-    ws[f'A{row}'] = "PSD Method:"
-    ws[f'B{row}'] = config.psd_config.method
+    ws[f'A{row}'] = "Total Channels:"
+    ws[f'B{row}'] = len(result.channel_results)
     row += 1
     
-    ws[f'A{row}'] = "Frequency Range:"
-    ws[f'B{row}'] = f"{config.psd_config.freq_min} - {config.psd_config.freq_max} Hz"
+    ws[f'A{row}'] = "Total Events:"
+    ws[f'B{row}'] = len(events_data)
     row += 1
     
-    ws[f'A{row}'] = "Frequency Spacing:"
-    ws[f'B{row}'] = config.psd_config.frequency_spacing
+    ws[f'A{row}'] = "Errors:"
+    ws[f'B{row}'] = len(result.errors)
+    row += 1
+    
+    ws[f'A{row}'] = "Warnings:"
+    ws[f'B{row}'] = len(result.warnings)
     row += 2
     
     # Events summary
@@ -154,16 +146,18 @@ def _create_summary_sheet(wb: Workbook, results: Dict, config: 'BatchConfig') ->
     row += 1
     
     # Fill in event data
-    for event_name, event_results in results.items():
+    for event_name, event_results in events_data.items():
         ws[f'A{row}'] = event_name
         
         # Count channels
-        total_channels = sum(len(channels) for channels in event_results.values())
+        total_channels = len(event_results)
         ws[f'B{row}'] = total_channels
         
-        # List sources
-        sources = ", ".join(event_results.keys())
-        ws[f'C{row}'] = sources
+        # List channel IDs
+        channels = ", ".join(list(event_results.keys())[:5])  # Show first 5
+        if len(event_results) > 5:
+            channels += "..."
+        ws[f'C{row}'] = channels
         
         row += 1
     
@@ -173,7 +167,7 @@ def _create_summary_sheet(wb: Workbook, results: Dict, config: 'BatchConfig') ->
     ws.column_dimensions['C'].width = 40
 
 
-def _create_event_sheet(wb: Workbook, event_name: str, event_results: Dict, config: 'BatchConfig') -> None:
+def _create_event_sheet(wb: Workbook, event_name: str, event_results: Dict) -> None:
     """
     Create a sheet for a specific event with PSD data.
     
@@ -184,9 +178,7 @@ def _create_event_sheet(wb: Workbook, event_name: str, event_results: Dict, conf
     event_name : str
         Name of the event
     event_results : Dict
-        Results for this event
-    config : BatchConfig
-        Batch configuration
+        Results for this event (channel_id -> {frequencies, psd, metadata})
     """
     # Clean sheet name (Excel has restrictions)
     sheet_name = event_name[:31]  # Max 31 characters
@@ -200,15 +192,16 @@ def _create_event_sheet(wb: Workbook, event_name: str, event_results: Dict, conf
     all_frequencies = None
     psd_data = {}
     
-    for source_id, channels in event_results.items():
-        for channel_name, (frequencies, psd_values) in channels.items():
-            # Use first frequency array as reference
-            if all_frequencies is None:
-                all_frequencies = frequencies
-            
-            # Create unique column name
-            col_name = f"{source_id}_{channel_name}"
-            psd_data[col_name] = psd_values
+    for channel_id, result_data in event_results.items():
+        frequencies = result_data['frequencies']
+        psd_values = result_data['psd']
+        
+        # Use first frequency array as reference
+        if all_frequencies is None:
+            all_frequencies = frequencies
+        
+        # Use channel_id as column name
+        psd_data[channel_id] = psd_values
     
     if all_frequencies is None:
         logger.warning(f"No data for event: {event_name}")

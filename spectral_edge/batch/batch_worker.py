@@ -93,7 +93,7 @@ class BatchWorker(QThread):
             self.log_message.emit("Processing complete, generating outputs...")
             
             # Generate outputs
-            from spectral_edge.batch.excel_output import generate_excel_output
+            from spectral_edge.batch.excel_output import export_to_excel
             from spectral_edge.batch.hdf5_output import write_psds_to_hdf5
             from spectral_edge.batch.powerpoint_output import generate_powerpoint_report
             
@@ -102,7 +102,7 @@ class BatchWorker(QThread):
             try:
                 if output_config.excel_enabled:
                     self.log_message.emit("Generating Excel output...")
-                    excel_path = generate_excel_output(result, output_config.output_directory)
+                    excel_path = export_to_excel(result, output_config.output_directory)
                     self.log_message.emit(f"Excel saved: {excel_path}")
                 
                 if output_config.csv_enabled:
@@ -119,11 +119,10 @@ class BatchWorker(QThread):
                     )
                     self.log_message.emit(f"PowerPoint saved: {ppt_path}")
                 
-                if output_config.hdf5_writeback_enabled and self.config.source_type == "hdf5":
+                if output_config.hdf5_enabled and self.config.data_source.source_type == 'hdf5':
                     self.log_message.emit("Writing PSDs back to HDF5...")
-                    write_psds_to_hdf5(result, self.config.source_files)
-                    self.log_message.emit("HDF5 write-back complete")
-                
+                    write_psds_to_hdf5(result, self.config.data_source.hdf5_file)
+                    self.log_message.emit("HDF5 write complete")  
             except Exception as e:
                 error_msg = f"Error generating outputs: {str(e)}"
                 self.log_message.emit(error_msg)

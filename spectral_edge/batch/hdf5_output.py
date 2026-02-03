@@ -11,16 +11,15 @@ Date: 2026-02-02
 import h5py
 import numpy as np
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List, Any
 import logging
 
 logger = logging.getLogger(__name__)
 
 
 def write_psds_to_hdf5(
-    results: Dict[str, Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]]],
-    source_file: str,
-    config: 'BatchConfig'
+    result: 'BatchProcessingResult',
+    source_file: str
 ) -> None:
     """
     Write processed PSD results back to the source HDF5 file.
@@ -49,22 +48,10 @@ def write_psds_to_hdf5(
     
     Parameters:
     -----------
-    results : Dict[str, Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]]]
-        Nested dictionary structure:
-        {
-            event_name: {
-                flight_key: {
-                    channel_name: (frequencies, psd_values),
-                    ...
-                },
-                ...
-            },
-            ...
-        }
+    result : BatchProcessingResult
+        Batch processing result object containing channel_results
     source_file : str
         Path to the HDF5 file to write to
-    config : BatchConfig
-        Batch configuration containing processing parameters
         
     Returns:
     --------
@@ -96,9 +83,18 @@ def write_psds_to_hdf5(
     """
     try:
         with h5py.File(source_file, 'a') as hdf_file:
-            for event_name, event_results in results.items():
-                for flight_key, channels in event_results.items():
-                    _write_event_psds(hdf_file, flight_key, event_name, channels, config)
+            # Reorganize results by flight and event
+            for (flight_key, channel_key), event_dict in result.channel_results.items():
+                for event_name, event_result in event_dict.items():
+                    _write_channel_psd_to_event(
+                        hdf_file, 
+                        flight_key, 
+                        event_name, 
+                        channel_key,
+                        event_result['frequencies'],
+                        event_result['psd'],
+                        event_result['metadata']
+                    )
         
         logger.info(f"PSDs written to HDF5: {source_file}")
         
@@ -107,28 +103,34 @@ def write_psds_to_hdf5(
         raise
 
 
-def _write_event_psds(
+def _write_channel_psd_to_event(
     hdf_file: h5py.File,
     flight_key: str,
     event_name: str,
-    channels: Dict[str, Tuple[np.ndarray, np.ndarray]],
-    config: 'BatchConfig'
+    channel_key: str,
+    frequencies: np.ndarray,
+    psd_values: np.ndarray,
+    metadata: Dict
 ) -> None:
     """
-    Write PSD data for one event to HDF5 file.
+    Write a single channel's PSD data to HDF5 for a specific event.
     
     Parameters:
     -----------
     hdf_file : h5py.File
         Open HDF5 file object
     flight_key : str
-        Flight identifier (e.g., 'flight_0001')
+        Flight identifier
     event_name : str
-        Name of the event
-    channels : Dict[str, Tuple[np.ndarray, np.ndarray]]
-        Dictionary mapping channel names to (frequencies, psd) tuples
-    config : BatchConfig
-        Batch configuration
+        Event name
+    channel_key : str
+        Channel identifier
+    frequencies : np.ndarray
+        Frequency array
+    psd_values : np.ndarray
+        PSD values
+    metadata : Dict
+        Processing metadata
     """
     # Ensure flight group exists
     if flight_key not in hdf_file:
@@ -144,49 +146,18 @@ def _write_event_psds(
     else:
         processed_psds_group = flight_group['processed_psds']
     
-    # Create or overwrite event group
-    if event_name in processed_psds_group:
-        del processed_psds_group[event_name]
+    # Create event group if it doesn't exist
+    if event_name not in processed_psds_group:
+        event_group = processed_psds_group.create_group(event_name)
+        event_group.attrs['event_name'] = event_name
+    else:
+        event_group = processed_psds_group[event_name]
     
-    event_group = processed_psds_group.create_group(event_name)
+    # Create or overwrite channel group
+    if channel_key in event_group:
+        del event_group[channel_key]
     
-    # Add event metadata
-    event_group.attrs['event_name'] = event_name
-    event_group.attrs['psd_method'] = config.psd_config.method
-    event_group.attrs['window'] = config.psd_config.window
-    event_group.attrs['overlap_percent'] = config.psd_config.overlap_percent
-    event_group.attrs['frequency_spacing'] = config.psd_config.frequency_spacing
-    
-    # Write each channel's PSD
-    for channel_name, (frequencies, psd_values) in channels.items():
-        _write_channel_psd(event_group, channel_name, frequencies, psd_values, config)
-
-
-def _write_channel_psd(
-    event_group: h5py.Group,
-    channel_name: str,
-    frequencies: np.ndarray,
-    psd_values: np.ndarray,
-    config: 'BatchConfig'
-) -> None:
-    """
-    Write a single channel's PSD data to HDF5.
-    
-    Parameters:
-    -----------
-    event_group : h5py.Group
-        HDF5 group for the event
-    channel_name : str
-        Name of the channel
-    frequencies : np.ndarray
-        Frequency array
-    psd_values : np.ndarray
-        PSD values array
-    config : BatchConfig
-        Batch configuration
-    """
-    # Create channel group
-    channel_group = event_group.create_group(channel_name)
+    channel_group = event_group.create_group(channel_key)
     
     # Write datasets
     freq_dataset = channel_group.create_dataset('frequencies', data=frequencies, compression='gzip')
@@ -194,23 +165,17 @@ def _write_channel_psd(
     freq_dataset.attrs['description'] = 'Frequency array for PSD'
     
     psd_dataset = channel_group.create_dataset('psd', data=psd_values, compression='gzip')
-    psd_dataset.attrs['units'] = 'g^2/Hz'  # TODO: Get actual units from channel info
+    psd_dataset.attrs['units'] = metadata.get('units', 'unknown')
     psd_dataset.attrs['description'] = 'Power Spectral Density values'
     
     # Add processing metadata
-    channel_group.attrs['channel_name'] = channel_name
+    channel_group.attrs['channel_name'] = channel_key
     channel_group.attrs['freq_min'] = float(frequencies[0])
     channel_group.attrs['freq_max'] = float(frequencies[-1])
     channel_group.attrs['num_points'] = len(frequencies)
-    
-    # Add filter info if filtering was applied
-    if config.filter_config.enabled:
-        channel_group.attrs['filtered'] = True
-        channel_group.attrs['filter_type'] = config.filter_config.filter_type
-        channel_group.attrs['filter_design'] = config.filter_config.filter_design
-        channel_group.attrs['filter_order'] = config.filter_config.filter_order
-    else:
-        channel_group.attrs['filtered'] = False
+    channel_group.attrs['sample_rate'] = metadata.get('sample_rate', 0.0)
+    channel_group.attrs['psd_method'] = metadata.get('method', 'unknown')
+    channel_group.attrs['window'] = metadata.get('window', 'unknown')
 
 
 def read_psds_from_hdf5(

@@ -107,7 +107,7 @@ class ProgressTracker:
         percent_complete = (self.current_channel / self.total_channels) * 100
         
         # Calculate estimated time remaining
-        if self.current_channel > 0:
+        if self.current_channel > 0 and elapsed_time > 0:
             avg_time_per_channel = elapsed_time / self.current_channel
             remaining_channels = self.total_channels - self.current_channel
             estimated_time_remaining = avg_time_per_channel * remaining_channels

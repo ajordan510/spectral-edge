@@ -71,12 +71,11 @@ def generate_powerpoint_report(
     >>> generate_powerpoint_report(results, 'batch_report.pptx', config)
     """
     try:
-        # Initialize report generator
-        report_gen = ReportGenerator()
+        # Initialize report generator with title
+        report_gen = ReportGenerator(title=title)
         
         # Create title slide
         report_gen.add_title_slide(
-            title=title,
             subtitle=f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         

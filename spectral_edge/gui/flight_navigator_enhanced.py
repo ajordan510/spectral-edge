@@ -865,3 +865,14 @@ class EnhancedFlightNavigator(QDialog):
             # Emit signal
             self.data_selected.emit(self.selected_items)
             self.accept()
+
+    def get_selected_channels(self):
+        """
+        Get the list of selected channels.
+        
+        Returns:
+        --------
+        list of tuple
+            List of (flight_key, channel_key) tuples for selected channels
+        """
+        return [(flight_key, channel_key) for flight_key, channel_key, _ in self.selected_items]

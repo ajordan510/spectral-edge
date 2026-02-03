@@ -74,15 +74,18 @@ def generate_powerpoint_report(
         _add_config_slide(report_gen, config)
         
         # Transform BatchProcessingResult into event-organized structure
-        # Group results by event
+        # Group results by event with nested structure: event -> flight -> channel -> (freq, psd)
         events_data = {}
         for (flight_key, channel_key), event_dict in results.channel_results.items():
             for event_name, event_result in event_dict.items():
                 if event_name not in events_data:
                     events_data[event_name] = {}
                 
-                channel_id = f"{flight_key}/{channel_key}"
-                events_data[event_name][channel_id] = (
+                # Create nested structure: flight_key -> channel_key -> (frequencies, psd)
+                if flight_key not in events_data[event_name]:
+                    events_data[event_name][flight_key] = {}
+                
+                events_data[event_name][flight_key][channel_key] = (
                     event_result['frequencies'],
                     event_result['psd']
                 )

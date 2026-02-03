@@ -11,7 +11,7 @@ Date: 2026-02-02
 
 import numpy as np
 import logging
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Callable
 from pathlib import Path
 from datetime import datetime
 from spectral_edge.core.psd import (

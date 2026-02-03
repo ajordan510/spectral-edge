@@ -167,21 +167,19 @@ def _add_event_slide(
     # Create PSD plot
     fig = _create_psd_plot(event_name, event_results, config)
     
-    # Save plot to temporary file
-    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
-        temp_path = tmp_file.name
-        fig.savefig(temp_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
+    # Save plot to bytes
+    import io
+    img_buffer = io.BytesIO()
+    fig.savefig(img_buffer, format='png', dpi=300, bbox_inches='tight')
+    img_buffer.seek(0)
+    image_bytes = img_buffer.read()
+    plt.close(fig)
     
-    try:
-        # Add slide with plot
-        report_gen.add_image_slide(
-            title=f"Event: {event_name}",
-            image_path=temp_path
-        )
-    finally:
-        # Clean up temporary file
-        Path(temp_path).unlink()
+    # Add slide with plot
+    report_gen.add_psd_plot(
+        image_bytes=image_bytes,
+        title=f"Event: {event_name}"
+    )
 
 
 def _create_psd_plot(

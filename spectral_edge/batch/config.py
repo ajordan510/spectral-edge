@@ -133,12 +133,50 @@ class SpectrogramConfig:
 
 
 @dataclass
+class DisplayConfig:
+    """Configuration for plot display settings."""
+    
+    # PSD plot settings
+    psd_y_axis_min: Optional[float] = 1e-5
+    psd_y_axis_max: Optional[float] = 10.0
+    psd_x_axis_min: Optional[float] = 10.0
+    psd_x_axis_max: Optional[float] = 3000.0
+    psd_auto_scale: bool = False
+    psd_show_legend: bool = True
+    psd_show_grid: bool = True
+    
+    # Spectrogram plot settings
+    spectrogram_auto_scale: bool = True
+    spectrogram_time_min: Optional[float] = None
+    spectrogram_time_max: Optional[float] = None
+    spectrogram_freq_min: Optional[float] = None
+    spectrogram_freq_max: Optional[float] = None
+    
+    def validate(self):
+        """
+        Validate display configuration parameters.
+        
+        Raises:
+        -------
+        ValueError
+            If configuration parameters are invalid
+        """
+        if self.psd_y_axis_min is not None and self.psd_y_axis_max is not None:
+            if self.psd_y_axis_min >= self.psd_y_axis_max:
+                raise ValueError("psd_y_axis_min must be less than psd_y_axis_max")
+        
+        if self.psd_x_axis_min is not None and self.psd_x_axis_max is not None:
+            if self.psd_x_axis_min >= self.psd_x_axis_max:
+                raise ValueError("psd_x_axis_min must be less than psd_x_axis_max")
+
+
+@dataclass
 class OutputConfig:
     """Configuration for output generation."""
     
     excel_enabled: bool = True
+    csv_enabled: bool = True
     powerpoint_enabled: bool = True
-    pdf_enabled: bool = False
     hdf5_writeback_enabled: bool = True
     output_directory: str = ""
     
@@ -151,8 +189,8 @@ class OutputConfig:
         ValueError
             If configuration parameters are invalid
         """
-        if not any([self.excel_enabled, self.powerpoint_enabled, 
-                    self.pdf_enabled, self.hdf5_writeback_enabled]):
+        if not any([self.excel_enabled, self.csv_enabled, self.powerpoint_enabled, 
+                    self.hdf5_writeback_enabled]):
             raise ValueError("At least one output format must be enabled")
             
         if self.output_directory and not Path(self.output_directory).exists():
@@ -211,6 +249,7 @@ class BatchConfig:
     filter_config: FilterConfig = field(default_factory=FilterConfig)
     psd_config: PSDConfig = field(default_factory=PSDConfig)
     spectrogram_config: SpectrogramConfig = field(default_factory=SpectrogramConfig)
+    display_config: DisplayConfig = field(default_factory=DisplayConfig)
     output_config: OutputConfig = field(default_factory=OutputConfig)
     
     # Metadata
@@ -257,6 +296,7 @@ class BatchConfig:
         self.filter_config.validate()
         self.psd_config.validate()
         self.spectrogram_config.validate()
+        self.display_config.validate()
         self.output_config.validate()
     
     def to_dict(self) -> Dict[str, Any]:
@@ -294,6 +334,9 @@ class BatchConfig:
             
         if 'spectrogram_config' in data and isinstance(data['spectrogram_config'], dict):
             data['spectrogram_config'] = SpectrogramConfig(**data['spectrogram_config'])
+            
+        if 'display_config' in data and isinstance(data['display_config'], dict):
+            data['display_config'] = DisplayConfig(**data['display_config'])
             
         if 'output_config' in data and isinstance(data['output_config'], dict):
             data['output_config'] = OutputConfig(**data['output_config'])

@@ -18,7 +18,7 @@ Date: 2026-01-27
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTreeWidget, QTreeWidgetItem, QGroupBox, QLineEdit,
+    QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator, QGroupBox, QLineEdit,
     QCheckBox, QScrollArea, QWidget, QRadioButton, QComboBox,
     QMessageBox, QInputDialog, QMenu
 )

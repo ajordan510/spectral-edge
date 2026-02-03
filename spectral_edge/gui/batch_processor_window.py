@@ -20,7 +20,39 @@ from PyQt6.QtWidgets import (
     QLineEdit, QTextEdit, QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QDoubleValidator
+
+
+class ScientificDoubleSpinBox(QDoubleSpinBox):
+    """
+    A QDoubleSpinBox that displays values in scientific notation.
+
+    Ideal for PSD values that span many orders of magnitude.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDecimals(10)  # Internal precision
+        self._decimals_display = 2  # Display precision for scientific notation
+
+    def textFromValue(self, value: float) -> str:
+        """Convert value to scientific notation string."""
+        if value == 0:
+            return "0.00e+00"
+        return f"{value:.{self._decimals_display}e}"
+
+    def valueFromText(self, text: str) -> float:
+        """Convert scientific notation string to value."""
+        try:
+            return float(text)
+        except ValueError:
+            return self.value()
+
+    def validate(self, text: str, pos: int):
+        """Validate scientific notation input."""
+        validator = QDoubleValidator()
+        validator.setNotation(QDoubleValidator.Notation.ScientificNotation)
+        return validator.validate(text, pos)
 
 from spectral_edge.batch.config import (
     BatchConfig, FilterConfig, PSDConfig, SpectrogramConfig,
@@ -511,18 +543,18 @@ class BatchProcessorWindow(QMainWindow):
         x_axis_row.addStretch()
         psd_layout.addLayout(x_axis_row)
         
-        # Y-axis limits
+        # Y-axis limits (scientific notation for PSD values)
         y_axis_row = QHBoxLayout()
-        self.psd_y_min_spin = QDoubleSpinBox()
-        self.psd_y_min_spin.setRange(1e-10, 1000.0)
+        self.psd_y_min_spin = ScientificDoubleSpinBox()
+        self.psd_y_min_spin.setRange(1e-15, 1e10)
         self.psd_y_min_spin.setValue(1e-5)
-        self.psd_y_min_spin.setDecimals(6)
         self.psd_y_min_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
-        self.psd_y_max_spin = QDoubleSpinBox()
-        self.psd_y_max_spin.setRange(1e-10, 1000.0)
+        self.psd_y_min_spin.setMinimumWidth(100)
+        self.psd_y_max_spin = ScientificDoubleSpinBox()
+        self.psd_y_max_spin.setRange(1e-15, 1e10)
         self.psd_y_max_spin.setValue(10.0)
-        self.psd_y_max_spin.setDecimals(6)
         self.psd_y_max_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
+        self.psd_y_max_spin.setMinimumWidth(100)
         y_axis_row.addWidget(QLabel("Y-axis (PSD):"))
         y_axis_row.addWidget(self.psd_y_min_spin)
         y_axis_row.addWidget(QLabel("to"))
@@ -693,15 +725,27 @@ class BatchProcessorWindow(QMainWindow):
                 border: 1px solid #4a5568;
                 border-radius: 4px;
                 padding: 4px;
+                padding-right: 20px;
             }
             QSpinBox::up-button, QDoubleSpinBox::up-button,
             QSpinBox::down-button, QDoubleSpinBox::down-button {
-                background-color: #4a5568;
-                border: none;
+                width: 20px;
+                background-color: #3d4758;
+                border: 1px solid #4a5568;
             }
             QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
             QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
-                background-color: #60a5fa;
+                background-color: #4d5768;
+            }
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-bottom: 5px solid #e0e0e0;
+            }
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 5px solid #e0e0e0;
             }
             QComboBox {
                 background-color: #2d3748;
@@ -802,6 +846,61 @@ class BatchProcessorWindow(QMainWindow):
             }
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
                 width: 0px;
+            }
+            /* File Dialog Styling for readability */
+            QFileDialog {
+                background-color: #1a1f2e;
+                color: #e0e0e0;
+            }
+            QFileDialog QWidget {
+                background-color: #1a1f2e;
+                color: #e0e0e0;
+            }
+            QFileDialog QListView, QFileDialog QTreeView {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                selection-background-color: #2563eb;
+            }
+            QFileDialog QListView::item, QFileDialog QTreeView::item {
+                color: #e0e0e0;
+                padding: 4px;
+            }
+            QFileDialog QListView::item:selected, QFileDialog QTreeView::item:selected {
+                background-color: #2563eb;
+                color: white;
+            }
+            QFileDialog QLineEdit {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                border-radius: 4px;
+                padding: 4px;
+            }
+            QFileDialog QComboBox {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+            }
+            QFileDialog QToolButton {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+            }
+            QFileDialog QHeaderView::section {
+                background-color: #1a1f2e;
+                color: #60a5fa;
+                border: 1px solid #4a5568;
+            }
+            QFileDialog QPushButton {
+                background-color: #2563eb;
+                color: white;
+                padding: 6px 16px;
+                border: none;
+                border-radius: 4px;
+            }
+            QFileDialog QPushButton:hover {
+                background-color: #1d4ed8;
             }
         """)
 

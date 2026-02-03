@@ -27,3 +27,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+logs/*.log
+logs/*.log.*

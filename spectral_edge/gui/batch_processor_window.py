@@ -66,7 +66,10 @@ class BatchProcessorWindow(QMainWindow):
         """Initialize the user interface."""
         self.setWindowTitle("Batch PSD Processor")
         self.setGeometry(100, 100, 1200, 800)
-        
+
+        # Apply dark theme styling to match PSD GUI
+        self._apply_dark_theme()
+
         # Central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -107,17 +110,53 @@ class BatchProcessorWindow(QMainWindow):
         
         # Control buttons
         button_layout = QHBoxLayout()
-        
+
         self.load_config_btn = QPushButton("Load Configuration")
         self.save_config_btn = QPushButton("Save Configuration")
-        self.run_batch_btn = QPushButton("Run Batch Processing")
-        self.run_batch_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 10px;")
-        
+        self.run_batch_btn = QPushButton("▶ Run Batch Processing")
+        self.run_batch_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #22c55e;
+                color: white;
+                font-weight: bold;
+                padding: 10px 20px;
+                border: none;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #16a34a;
+            }
+            QPushButton:disabled {
+                background-color: #4a5568;
+            }
+        """)
+
+        self.cancel_btn = QPushButton("⏹ Cancel")
+        self.cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ef4444;
+                color: white;
+                font-weight: bold;
+                padding: 10px 20px;
+                border: none;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #dc2626;
+            }
+            QPushButton:disabled {
+                background-color: #4a5568;
+            }
+        """)
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setVisible(False)
+
         button_layout.addWidget(self.load_config_btn)
         button_layout.addWidget(self.save_config_btn)
         button_layout.addStretch()
+        button_layout.addWidget(self.cancel_btn)
         button_layout.addWidget(self.run_batch_btn)
-        
+
         main_layout.addLayout(button_layout)
     
     def _create_data_source_tab(self):
@@ -568,10 +607,204 @@ class BatchProcessorWindow(QMainWindow):
         # Configuration
         self.load_config_btn.clicked.connect(self._on_load_config)
         self.save_config_btn.clicked.connect(self._on_save_config)
-        
-        # Run batch
+
+        # Run batch and cancel
         self.run_batch_btn.clicked.connect(self._on_run_batch)
-    
+        self.cancel_btn.clicked.connect(self._on_cancel_batch)
+
+    def _apply_dark_theme(self):
+        """Apply dark theme styling to match the PSD GUI."""
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #1a1f2e;
+            }
+            QWidget {
+                background-color: #1a1f2e;
+                color: #e0e0e0;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+            QGroupBox {
+                color: #60a5fa;
+                font-weight: bold;
+                border: 2px solid #4a5568;
+                border-radius: 5px;
+                margin-top: 1ex;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                color: #60a5fa;
+            }
+            QTabWidget::pane {
+                border: 2px solid #4a5568;
+                border-radius: 5px;
+                background-color: #1a1f2e;
+            }
+            QTabBar::tab {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                padding: 8px 16px;
+                border: 1px solid #4a5568;
+                border-bottom: none;
+                border-top-left-radius: 5px;
+                border-top-right-radius: 5px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #1a1f2e;
+                color: #60a5fa;
+                font-weight: bold;
+            }
+            QTabBar::tab:hover {
+                background-color: #374151;
+            }
+            QPushButton {
+                background-color: #2563eb;
+                color: white;
+                padding: 8px 16px;
+                border: none;
+                border-radius: 5px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #1d4ed8;
+            }
+            QPushButton:disabled {
+                background-color: #4a5568;
+                color: #9ca3af;
+            }
+            QLineEdit, QTextEdit {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                border-radius: 4px;
+                padding: 4px;
+            }
+            QLineEdit:focus, QTextEdit:focus {
+                border: 1px solid #60a5fa;
+            }
+            QSpinBox, QDoubleSpinBox {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                border-radius: 4px;
+                padding: 4px;
+            }
+            QSpinBox::up-button, QDoubleSpinBox::up-button,
+            QSpinBox::down-button, QDoubleSpinBox::down-button {
+                background-color: #4a5568;
+                border: none;
+            }
+            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+            QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+                background-color: #60a5fa;
+            }
+            QComboBox {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                border-radius: 4px;
+                padding: 4px 8px;
+            }
+            QComboBox::drop-down {
+                background-color: #4a5568;
+                border: none;
+                border-top-right-radius: 4px;
+                border-bottom-right-radius: 4px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                selection-background-color: #2563eb;
+                border: 1px solid #4a5568;
+            }
+            QCheckBox {
+                color: #e0e0e0;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 2px solid #4a5568;
+                border-radius: 3px;
+                background-color: #2d3748;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #2563eb;
+                border-color: #2563eb;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #60a5fa;
+            }
+            QTableWidget {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                gridline-color: #4a5568;
+                border: 1px solid #4a5568;
+                border-radius: 4px;
+            }
+            QTableWidget::item {
+                padding: 4px;
+            }
+            QTableWidget::item:selected {
+                background-color: #2563eb;
+            }
+            QHeaderView::section {
+                background-color: #1a1f2e;
+                color: #60a5fa;
+                padding: 8px;
+                border: 1px solid #4a5568;
+                font-weight: bold;
+            }
+            QProgressBar {
+                background-color: #2d3748;
+                border: 1px solid #4a5568;
+                border-radius: 5px;
+                text-align: center;
+                color: #e0e0e0;
+            }
+            QProgressBar::chunk {
+                background-color: #22c55e;
+                border-radius: 4px;
+            }
+            QScrollBar:vertical {
+                background-color: #1a1f2e;
+                width: 12px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #4a5568;
+                border-radius: 6px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #60a5fa;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar:horizontal {
+                background-color: #1a1f2e;
+                height: 12px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:horizontal {
+                background-color: #4a5568;
+                border-radius: 6px;
+                min-width: 20px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background-color: #60a5fa;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+        """)
+
     def _on_select_hdf5(self):
         """Handle HDF5 file selection."""
         files, _ = QFileDialog.getOpenFileNames(
@@ -895,7 +1128,12 @@ class BatchProcessorWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.status_label.setText("Processing...")
         self.processing_log = []
-        
+
+        # Show cancel button
+        self.cancel_btn.setVisible(True)
+        self.cancel_btn.setEnabled(True)
+        self.run_batch_btn.setEnabled(False)
+
         # Create and start worker
         self.batch_worker = BatchWorker(self.config)
         self.batch_worker.progress_updated.connect(self._on_progress_updated)
@@ -903,8 +1141,22 @@ class BatchProcessorWindow(QMainWindow):
         self.batch_worker.processing_failed.connect(self._on_processing_failed)
         self.batch_worker.log_message.connect(self._on_log_message)
         self.batch_worker.start()
-        
+
         logger.info("Batch processing started")
+
+    def _on_cancel_batch(self):
+        """Handle cancel button click."""
+        if self.batch_worker and self.batch_worker.isRunning():
+            reply = show_question(
+                self,
+                "Cancel Processing",
+                "Are you sure you want to cancel batch processing?\n\nThis may take a moment to stop."
+            )
+            if reply:
+                self.status_label.setText("Cancelling...")
+                self.cancel_btn.setEnabled(False)
+                self.batch_worker.cancel()
+                logger.info("Batch processing cancellation requested")
     
     def _on_progress_updated(self, percent: int, message: str):
         """Handle progress updates from worker."""
@@ -916,7 +1168,12 @@ class BatchProcessorWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.status_label.setText("Complete!")
         self._set_ui_enabled(True)
-        
+
+        # Hide cancel button
+        self.cancel_btn.setVisible(False)
+        self.cancel_btn.setEnabled(False)
+        self.run_batch_btn.setEnabled(True)
+
         # Show completion message
         log_text = "\n".join(self.processing_log[-10:])  # Last 10 log messages
         show_information(
@@ -924,7 +1181,7 @@ class BatchProcessorWindow(QMainWindow):
             "Batch Processing Complete",
             f"Batch processing completed successfully!\n\nOutput directory:\n{self.config.output_config.output_directory}\n\nRecent log:\n{log_text}"
         )
-        
+
         logger.info("Batch processing completed successfully")
     
     def _on_processing_failed(self, error_message: str):
@@ -932,7 +1189,12 @@ class BatchProcessorWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.status_label.setText("Failed")
         self._set_ui_enabled(True)
-        
+
+        # Hide cancel button
+        self.cancel_btn.setVisible(False)
+        self.cancel_btn.setEnabled(False)
+        self.run_batch_btn.setEnabled(True)
+
         show_critical(self, "Batch Processing Failed", error_message)
         logger.error(f"Batch processing failed: {error_message}")
     

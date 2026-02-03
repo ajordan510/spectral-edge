@@ -11,6 +11,7 @@ Date: 2026-02-02
 
 import numpy as np
 import logging
+import time
 from typing import Dict, List, Tuple, Optional, Any, Callable
 from pathlib import Path
 from datetime import datetime
@@ -252,14 +253,23 @@ class BatchProcessor:
         channel_info = loader.channels[flight_key][channel_key]
         sample_rate = channel_info.sample_rate
         units = channel_info.units
-        
+
+        # Check for cancellation before loading data
+        if self.cancel_requested:
+            raise InterruptedError("Processing cancelled by user")
+
         # Load full time history data (not decimated)
+        load_start = time.perf_counter()
         data = loader.load_channel_data(
             flight_key, channel_key, decimate_for_display=False
         )
         time_array = data['time_full']
         signal_array = data['data_full']
-        
+        load_time = time.perf_counter() - load_start
+        self.result.add_log_entry(
+            f"  Data loaded: {len(signal_array)} samples ({len(signal_array)/sample_rate:.1f}s) in {load_time:.2f}s"
+        )
+
         # Process full duration if requested
         if self.config.process_full_duration:
             self._process_event(
@@ -377,10 +387,17 @@ class BatchProcessor:
         end_time : float, optional
             Event end time in seconds
         """
+        # Check for cancellation
+        if self.cancel_requested:
+            raise InterruptedError("Processing cancelled by user")
+
         # Update progress tracker
         if self.progress_tracker:
             self.progress_tracker.update_event(event_name)
-        
+
+        event_start_time_perf = time.perf_counter()
+        self.result.add_log_entry(f"  Starting event '{event_name}' processing...")
+
         # Extract event data
         if start_time is not None and end_time is not None:
             # Validate time range
@@ -400,24 +417,50 @@ class BatchProcessor:
             # Use full signal
             event_signal = signal_array
         
+        # Check for cancellation
+        if self.cancel_requested:
+            raise InterruptedError("Processing cancelled by user")
+
         # Apply filtering if enabled
         if self.config.filter_config.enabled:
+            filter_start = time.perf_counter()
             event_signal = self._apply_filter(event_signal, sample_rate)
-        
+            filter_time = time.perf_counter() - filter_start
+            logger.debug(f"    Filter applied in {filter_time:.3f}s")
+
+        # Check for cancellation
+        if self.cancel_requested:
+            raise InterruptedError("Processing cancelled by user")
+
         # Apply running mean removal if enabled
         if self.config.psd_config.remove_running_mean:
+            mean_start = time.perf_counter()
             event_signal = self._remove_running_mean(event_signal, sample_rate)
-        
+            mean_time = time.perf_counter() - mean_start
+            logger.debug(f"    Running mean removed in {mean_time:.3f}s")
+
+        # Check for cancellation
+        if self.cancel_requested:
+            raise InterruptedError("Processing cancelled by user")
+
         # Calculate PSD
+        psd_start = time.perf_counter()
         frequencies, psd = self._calculate_psd(event_signal, sample_rate)
-        
+        psd_time = time.perf_counter() - psd_start
+        logger.debug(f"    PSD calculated in {psd_time:.3f}s ({len(event_signal)} samples)")
+
         # Calculate RMS
         rms = calculate_rms_from_psd(frequencies, psd)
-        
+
+        # Check for cancellation
+        if self.cancel_requested:
+            raise InterruptedError("Processing cancelled by user")
+
         # Generate spectrogram if enabled
         spectrogram_data = None
         if self.config.spectrogram_config.enabled:
             try:
+                spec_start = time.perf_counter()
                 spec_frequencies, spec_times, Sxx = generate_spectrogram(
                     event_signal,
                     sample_rate,
@@ -426,6 +469,8 @@ class BatchProcessor:
                     snr_threshold=self.config.spectrogram_config.snr_threshold,
                     use_efficient_fft=True
                 )
+                spec_time = time.perf_counter() - spec_start
+                logger.debug(f"    Spectrogram generated in {spec_time:.3f}s")
                 spectrogram_data = {
                     'frequencies': spec_frequencies,
                     'times': spec_times,
@@ -458,8 +503,9 @@ class BatchProcessor:
             frequencies, psd, metadata, spectrogram_data
         )
         
+        event_total_time = time.perf_counter() - event_start_time_perf
         self.result.add_log_entry(
-            f"  Event '{event_name}': RMS = {rms:.4f} {units}"
+            f"  Event '{event_name}': RMS = {rms:.4f} {units} (processed in {event_total_time:.2f}s)"
         )
     
     def _apply_filter(self, signal: np.ndarray, sample_rate: float) -> np.ndarray:

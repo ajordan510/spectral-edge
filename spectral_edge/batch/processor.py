@@ -109,7 +109,7 @@ class BatchProcessingResult:
     def processing_time(self) -> float:
         """Get total processing time in seconds."""
         if self.start_time and self.end_time:
-            return self.end_time - self.start_time
+            return (self.end_time - self.start_time).total_seconds()
         return 0.0
     
     @property

@@ -94,6 +94,28 @@ class BatchProcessingResult:
         log_entry = f"[{timestamp}] {message}"
         self.processing_log.append(log_entry)
         logger.info(message)
+    
+    @property
+    def channels_processed(self) -> int:
+        """Get number of successfully processed channels."""
+        return len(self.channel_results)
+    
+    @property
+    def channels_failed(self) -> int:
+        """Get number of failed channels."""
+        return len(self.errors)
+    
+    @property
+    def processing_time(self) -> float:
+        """Get total processing time in seconds."""
+        if self.start_time and self.end_time:
+            return self.end_time - self.start_time
+        return 0.0
+    
+    @property
+    def success(self) -> bool:
+        """Check if processing was successful (at least one channel processed)."""
+        return len(self.channel_results) > 0
 
 
 class BatchProcessor:
@@ -551,26 +573,3 @@ class BatchProcessor:
             raise ValueError(f"Unknown PSD method: {pc.method}")
         
         return frequencies, psd
-    
-    @property
-    def channels_processed(self) -> int:
-        """Get number of successfully processed channels."""
-        return len(self.channel_results)
-    
-    @property
-    def channels_failed(self) -> int:
-        """Get number of failed channels."""
-        return len(self.errors)
-    
-    @property
-    def processing_time(self) -> float:
-        """Get total processing time in seconds."""
-        if self.start_time and self.end_time:
-            return self.end_time - self.start_time
-        return 0.0
-    
-    @property
-    def success(self) -> bool:
-        """Check if processing was successful (at least one channel processed)."""
-        return len(self.channel_results) > 0
-

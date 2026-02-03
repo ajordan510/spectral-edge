@@ -67,8 +67,15 @@ class BatchWorker(QThread):
             self.log_message.emit("Initializing batch processor...")
             self.progress_updated.emit(0, "Initializing...")
             
-            # Create batch processor
-            self.processor = BatchProcessor(self.config)
+            # Create processor with progress callback
+            def progress_handler(progress_info):
+                self.progress_updated.emit(
+                    int(progress_info.percent_complete),
+                    str(progress_info)
+                )
+                self.log_message.emit(str(progress_info))
+            
+            self.processor = BatchProcessor(self.config, progress_callback=progress_handler)
             
             # Run batch processing
             self.log_message.emit("Starting batch processing...")

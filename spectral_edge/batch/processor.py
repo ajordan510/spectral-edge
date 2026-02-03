@@ -20,6 +20,9 @@ from spectral_edge.core.psd import (
 from spectral_edge.batch.spectrogram_generator import generate_spectrogram
 from ..utils.hdf5_loader import HDF5FlightDataLoader
 from .config import BatchConfig, EventDefinition
+from .progress_tracker import ProgressTracker, ProgressInfo
+from .performance_utils import MemoryManager, FFTOptimizer
+from .error_handler import ErrorHandler, BatchError, log_error_with_recovery
 from scipy import signal as scipy_signal
 
 
@@ -102,7 +105,7 @@ class BatchProcessor:
     It is designed to be GUI-independent for testability.
     """
     
-    def __init__(self, config: BatchConfig):
+    def __init__(self, config: BatchConfig, progress_callback: Optional[Callable] = None):
         """
         Initialize batch processor with configuration.
         
@@ -110,11 +113,15 @@ class BatchProcessor:
         -----------
         config : BatchConfig
             Complete batch processing configuration
+        progress_callback : callable, optional
+            Callback for detailed progress updates
         """
         self.config = config
         self.result = BatchProcessingResult()
         self.hdf5_loaders = {}  # Cache of HDF5 loaders
         self.cancel_requested = False  # Flag for cancellation
+        self.progress_callback = progress_callback
+        self.progress_tracker = None
         
     def process(self) -> BatchProcessingResult:
         """
@@ -164,17 +171,27 @@ class BatchProcessor:
                 loader = HDF5FlightDataLoader(file_path)
                 self.hdf5_loaders[file_path] = loader
                 self.result.add_log_entry(f"Loaded HDF5 file: {Path(file_path).name}")
+            except FileNotFoundError:
+                error = ErrorHandler.handle_file_not_found(file_path)
+                log_error_with_recovery(error)
+                self.result.add_error(error.get_full_message())
+                continue
             except Exception as e:
-                self.result.add_error(f"Failed to load HDF5 file {file_path}: {str(e)}")
+                error = ErrorHandler.handle_invalid_hdf5(file_path, str(e))
+                log_error_with_recovery(error)
+                self.result.add_error(error.get_full_message())
                 continue
         
         # Process each selected channel
         total_channels = len(self.config.selected_channels)
+        self.progress_tracker = ProgressTracker(total_channels, self.progress_callback)
+        
         for idx, (flight_key, channel_key) in enumerate(self.config.selected_channels, 1):
             if self.cancel_requested:
                 self.result.add_warning("Processing cancelled by user")
                 break
             
+            self.progress_tracker.start_channel(flight_key, channel_key)
             self.result.add_log_entry(f"Processing channel {idx}/{total_channels}: {flight_key}/{channel_key}")
             
             try:
@@ -182,6 +199,10 @@ class BatchProcessor:
             except Exception as e:
                 self.result.add_error(f"Failed to process {flight_key}/{channel_key}: {str(e)}")
                 continue
+            finally:
+                # Clear memory after each channel
+                if idx % 5 == 0:  # Every 5 channels
+                    MemoryManager.clear_memory()
     
     def _process_channel_hdf5(self, flight_key: str, channel_key: str):
         """
@@ -331,6 +352,10 @@ class BatchProcessor:
         end_time : float, optional
             Event end time in seconds
         """
+        # Update progress tracker
+        if self.progress_tracker:
+            self.progress_tracker.update_event(event_name)
+        
         # Extract event data
         if start_time is not None and end_time is not None:
             # Validate time range

@@ -22,11 +22,11 @@ logger = logging.getLogger(__name__)
 
 
 def generate_powerpoint_report(
-    results: Dict[str, Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]]],
+    results,  # BatchProcessingResult object
     output_path: str,
     config: 'BatchConfig',
     title: str = "Batch PSD Processing Report"
-) -> None:
+) -> str:
     """
     Generate a PowerPoint presentation from batch processing results.
     
@@ -38,20 +38,10 @@ def generate_powerpoint_report(
     
     Parameters:
     -----------
-    results : Dict[str, Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]]]
-        Nested dictionary structure:
-        {
-            event_name: {
-                source_identifier: {
-                    channel_name: (frequencies, psd_values),
-                    ...
-                },
-                ...
-            },
-            ...
-        }
+    results : BatchProcessingResult
+        Batch processing results object
     output_path : str
-        Path to save the PowerPoint file
+        Directory path to save the PowerPoint file
     config : BatchConfig
         Batch configuration object
     title : str, optional
@@ -59,7 +49,8 @@ def generate_powerpoint_report(
         
     Returns:
     --------
-    None
+    str
+        Path to the saved PowerPoint file
     
     Raises:
     -------
@@ -68,7 +59,7 @@ def generate_powerpoint_report(
         
     Example:
     --------
-    >>> generate_powerpoint_report(results, 'batch_report.pptx', config)
+    >>> generate_powerpoint_report(results, '/tmp/output', config)
     """
     try:
         # Initialize report generator with title
@@ -82,13 +73,32 @@ def generate_powerpoint_report(
         # Add configuration summary slide
         _add_config_slide(report_gen, config)
         
+        # Transform BatchProcessingResult into event-organized structure
+        # Group results by event
+        events_data = {}
+        for (flight_key, channel_key), event_dict in results.channel_results.items():
+            for event_name, event_result in event_dict.items():
+                if event_name not in events_data:
+                    events_data[event_name] = {}
+                
+                channel_id = f"{flight_key}/{channel_key}"
+                events_data[event_name][channel_id] = (
+                    event_result['frequencies'],
+                    event_result['psd']
+                )
+        
         # Add event slides
-        for event_name, event_results in results.items():
+        for event_name, event_results in events_data.items():
             _add_event_slide(report_gen, event_name, event_results, config)
         
         # Save presentation
-        report_gen.save(output_path)
-        logger.info(f"PowerPoint report saved: {output_path}")
+        from pathlib import Path
+        output_dir = Path(output_path)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        ppt_file = output_dir / "batch_psd_report.pptx"
+        report_gen.save(str(ppt_file))
+        logger.info(f"PowerPoint report saved: {ppt_file}")
+        return str(ppt_file)
         
     except Exception as e:
         logger.error(f"Failed to generate PowerPoint report: {str(e)}")

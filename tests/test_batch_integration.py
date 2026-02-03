@@ -19,13 +19,23 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Check for optional dependencies
+try:
+    import openpyxl
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+
 from spectral_edge.batch.config import (
     BatchConfig, PSDConfig, FilterConfig, SpectrogramConfig,
     DisplayConfig, OutputConfig, EventDefinition
 )
 from spectral_edge.batch.processor import BatchProcessor
-from spectral_edge.batch.excel_output import export_to_excel
 from spectral_edge.batch.hdf5_output import write_psds_to_hdf5
+
+# Conditionally import excel_output only if openpyxl is available
+if OPENPYXL_AVAILABLE:
+    from spectral_edge.batch.excel_output import export_to_excel
 
 
 class TestBatchProcessorIntegration:
@@ -103,6 +113,7 @@ class TestBatchProcessorIntegration:
         
         return csv_files
     
+    @pytest.mark.skipif(not OPENPYXL_AVAILABLE, reason="openpyxl not installed")
     def test_hdf5_full_workflow(self, sample_hdf5_file, temp_dir):
         """Test complete workflow with HDF5 source."""
         # Create configuration
@@ -142,26 +153,26 @@ class TestBatchProcessorIntegration:
         # Verify results
         assert len(result.errors) == 0, f"Processing errors: {result.errors}"
         assert len(result.channel_results) == 2, "Should process 2 channels"
-        
+
         # Check that PSDs were calculated
         for channel_key, events in result.channel_results.items():
-            assert "Full Duration" in events, f"Missing full duration for {channel_key}"
-            event_result = events["Full Duration"]
+            assert "full_duration" in events, f"Missing full_duration for {channel_key}"
+            event_result = events["full_duration"]
             assert event_result['frequencies'] is not None
             assert event_result['psd'] is not None
             assert event_result['metadata']['rms'] > 0
-        
+
         # Generate outputs
-        excel_path = export_to_excel(result, temp_dir, config)
+        excel_path = export_to_excel(result, temp_dir)
         assert os.path.exists(excel_path), "Excel file not created"
-        
+
         # Verify HDF5 write-back
-        write_psds_to_hdf5(result, [sample_hdf5_file])
-        
+        write_psds_to_hdf5(result, sample_hdf5_file)
+
         # Check that processed_psds group was created
         with h5py.File(sample_hdf5_file, 'r') as f:
             assert 'flight_0001/processed_psds' in f, "processed_psds group not created"
-            psd_group = f['flight_0001/processed_psds']
+            psd_group = f['flight_0001/processed_psds/full_duration']
             assert 'accel_x' in psd_group, "accel_x PSD not saved"
             assert 'accel_y' in psd_group, "accel_y PSD not saved"
         
@@ -170,6 +181,7 @@ class TestBatchProcessorIntegration:
         print(f"   - Generated Excel: {excel_path}")
         print(f"   - HDF5 write-back successful")
     
+    @pytest.mark.skipif(not OPENPYXL_AVAILABLE, reason="openpyxl not installed")
     def test_hdf5_event_based_workflow(self, sample_hdf5_file, temp_dir):
         """Test event-based processing with HDF5 source."""
         # Create configuration with events
@@ -209,13 +221,14 @@ class TestBatchProcessorIntegration:
         assert "Event2" in channel_result, "Event2 not processed"
         
         # Generate Excel output
-        excel_path = export_to_excel(result, temp_dir, config)
+        excel_path = export_to_excel(result, temp_dir)
         assert os.path.exists(excel_path), "Excel file not created"
-        
+
         print(f"✅ HDF5 event-based workflow test passed")
         print(f"   - Processed 2 events for 1 channel")
         print(f"   - Generated Excel: {excel_path}")
     
+    @pytest.mark.skipif(not OPENPYXL_AVAILABLE, reason="openpyxl not installed")
     def test_csv_workflow(self, sample_csv_files, temp_dir):
         """Test complete workflow with CSV source."""
         # Create configuration
@@ -257,9 +270,9 @@ class TestBatchProcessorIntegration:
         assert len(result.channel_results) == 2, "Should process 2 CSV files"
         
         # Generate outputs
-        excel_path = export_to_excel(result, temp_dir, config)
+        excel_path = export_to_excel(result, temp_dir)
         assert os.path.exists(excel_path), "Excel file not created"
-        
+
         print(f"✅ CSV workflow test passed")
         print(f"   - Processed {len(result.channel_results)} CSV files")
         print(f"   - Generated Excel: {excel_path}")
@@ -303,7 +316,7 @@ class TestBatchProcessorIntegration:
         
         # Check metadata indicates filtering was applied
         channel_result = result.channel_results[("flight_0001", "accel_x")]
-        event_result = channel_result["Full Duration"]
+        event_result = channel_result["full_duration"]
         assert event_result['metadata']['filter_applied'] == True, "Filter not applied"
         
         print(f"✅ Filtering workflow test passed")

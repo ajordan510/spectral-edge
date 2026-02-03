@@ -521,7 +521,7 @@ class EnhancedFlightNavigator(QDialog):
             flight_info = flights[flight_key][0]['flight_info']
             flight_item = QTreeWidgetItem(self.tree)
             flight_item.setText(0, f"{flight_key} ({len(flights[flight_key])} channels)")
-            flight_item.setFlags(flight_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsTristate)
+            flight_item.setFlags(flight_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
             flight_item.setCheckState(0, Qt.CheckState.Unchecked)
             flight_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'flight', 'key': flight_key})
             
@@ -541,7 +541,7 @@ class EnhancedFlightNavigator(QDialog):
         for location in sorted(locations.keys()):
             location_item = QTreeWidgetItem(self.tree)
             location_item.setText(0, f"{location} ({len(locations[location])} channels)")
-            location_item.setFlags(location_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsTristate)
+            location_item.setFlags(location_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
             location_item.setCheckState(0, Qt.CheckState.Unchecked)
             location_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'location', 'key': location})
             
@@ -561,7 +561,7 @@ class EnhancedFlightNavigator(QDialog):
         for sensor_type in sorted(sensor_types.keys()):
             type_item = QTreeWidgetItem(self.tree)
             type_item.setText(0, f"{sensor_type} ({len(sensor_types[sensor_type])} channels)")
-            type_item.setFlags(type_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsTristate)
+            type_item.setFlags(type_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
             type_item.setCheckState(0, Qt.CheckState.Unchecked)
             type_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'sensor_type', 'key': sensor_type})
             

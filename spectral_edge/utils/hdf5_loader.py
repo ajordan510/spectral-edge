@@ -126,27 +126,38 @@ class HDF5FlightDataLoader:
             meta_group = self.h5file['metadata']
             self.file_metadata = dict(meta_group.attrs)
         
-        # Find all flight groups
+        # Find all flight groups (any top-level group with 'channels' subgroup)
         for key in self.h5file.keys():
-            if key.startswith('flight_'):
-                # Load flight metadata
-                flight_group = self.h5file[key]
+            # Skip file-level metadata groups
+            if key in ['metadata', 'file_metadata', 'info']:
+                continue
+            
+            # Check if this group contains channels
+            flight_group = self.h5file[key]
+            if not isinstance(flight_group, h5py.Group):
+                continue
+            
+            # Only process groups that have a 'channels' subgroup
+            if 'channels' not in flight_group:
+                continue
+            
+            # This is a valid flight group
+            
+            if 'metadata' in flight_group:
+                meta_dict = dict(flight_group['metadata'].attrs)
+                self.flights[key] = FlightInfo(key, meta_dict)
+            
+            # Load channel metadata for this flight
+            if 'channels' in flight_group:
+                channels_group = flight_group['channels']
+                self.channels[key] = {}
                 
-                if 'metadata' in flight_group:
-                    meta_dict = dict(flight_group['metadata'].attrs)
-                    self.flights[key] = FlightInfo(key, meta_dict)
-                
-                # Load channel metadata for this flight
-                if 'channels' in flight_group:
-                    channels_group = flight_group['channels']
-                    self.channels[key] = {}
-                    
-                    for channel_key in channels_group.keys():
-                        channel_group = channels_group[channel_key]
-                        channel_attrs = dict(channel_group.attrs)
-                        self.channels[key][channel_key] = ChannelInfo(
-                            channel_key, key, channel_attrs
-                        )
+                for channel_key in channels_group.keys():
+                    channel_group = channels_group[channel_key]
+                    channel_attrs = dict(channel_group.attrs)
+                    self.channels[key][channel_key] = ChannelInfo(
+                        channel_key, key, channel_attrs
+                    )
     
     def get_flights(self) -> List[FlightInfo]:
         """

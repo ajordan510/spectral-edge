@@ -16,6 +16,7 @@ check_dependencies_or_exit()
 
 from PyQt6.QtWidgets import QApplication
 from spectral_edge.gui.landing_page import LandingPage
+from spectral_edge.gui.global_styles import apply_global_stylesheet
 from spectral_edge.utils.logging_config import setup_logging
 
 
@@ -41,6 +42,9 @@ def main():
     app.setApplicationName("SpectralEdge")
     app.setOrganizationName("SpectralEdge Team")
     app.setApplicationVersion("0.1.0")
+    
+    # Apply global stylesheet (dark theme with readable dialogs)
+    apply_global_stylesheet(app)
 
     # Create and show the landing page window
     window = LandingPage()

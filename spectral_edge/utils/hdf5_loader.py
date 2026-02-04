@@ -317,33 +317,44 @@ class HDF5FlightDataLoader:
         except Exception as e:
             # Re-raise with context
             raise RuntimeError(f"Error accessing HDF5 data: {str(e)}") from e
-        
-        # Determine indices for time range
+
+        # Get sample rate from channel info (already loaded in metadata)
+        sample_rate = channel_info.sample_rate
+        total_samples = len(data_dataset)
+
+        # Determine indices for time range using efficient calculation
+        # Instead of loading the full time array, we calculate indices mathematically
         if start_time is not None or end_time is not None:
-            # Load time vector to find indices
-            # For large files, we could optimize this by storing time range in metadata
-            time_full = time_dataset[:]
-            
-            start_idx = 0
+            # Read only the first time value (O(1) operation)
+            data_start_time = float(time_dataset[0])
+
+            # Calculate start index
             if start_time is not None:
-                start_idx = np.searchsorted(time_full, start_time)
-            
-            end_idx = len(time_full)
+                start_idx = max(0, int((start_time - data_start_time) * sample_rate))
+            else:
+                start_idx = 0
+
+            # Calculate end index
             if end_time is not None:
-                end_idx = np.searchsorted(time_full, end_time)
-            
-            # Load data slice
-            time = time_full[start_idx:end_idx]
-            data = data_dataset[start_idx:end_idx]
+                end_idx = min(total_samples, int((end_time - data_start_time) * sample_rate))
+            else:
+                end_idx = total_samples
+
+            # Validate indices
+            if start_idx >= end_idx:
+                raise ValueError(
+                    f"Invalid time range: start_idx={start_idx}, end_idx={end_idx}. "
+                    f"Requested range [{start_time}, {end_time}] may be outside data bounds."
+                )
+
+            # Load only the required slice directly from HDF5 (memory efficient)
+            time_full = time_dataset[start_idx:end_idx]
+            data_full = data_dataset[start_idx:end_idx]
         else:
-            # Load full data
+            # Load full data - still needs full array but no intermediate copy
             time_full = time_dataset[:]
             data_full = data_dataset[:]
-        
-        # Get sample rate from channel info
-        channel_info = self.get_channel_info(flight_key, channel_key)
-        sample_rate = channel_info.sample_rate
-        
+
         # Prepare result dictionary with full resolution data
         result = {
             'time_full': time_full,

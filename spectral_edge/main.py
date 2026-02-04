@@ -9,6 +9,11 @@ Author: SpectralEdge Development Team
 """
 
 import sys
+from spectral_edge.utils.dependency_checker import check_dependencies_or_exit
+
+# Check dependencies before importing GUI components
+check_dependencies_or_exit()
+
 from PyQt6.QtWidgets import QApplication
 from spectral_edge.gui.landing_page import LandingPage
 from spectral_edge.utils.logging_config import setup_logging

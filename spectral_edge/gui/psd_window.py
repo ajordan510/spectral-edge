@@ -35,6 +35,9 @@ from spectral_edge.utils.message_box import show_information, show_warning, show
 from spectral_edge.utils.report_generator import ReportGenerator, export_plot_to_image, PPTX_AVAILABLE
 from spectral_edge.gui.cross_spectrum_window import CrossSpectrumWindow
 from spectral_edge.gui.statistics_window import create_statistics_window
+from spectral_edge.gui.input_validator import ParameterValidator
+from spectral_edge.gui.parameter_tooltips import apply_tooltips_to_window
+from spectral_edge.gui.parameter_presets import PresetManager, apply_preset_to_window
 
 
 class ScientificAxisItem(pg.AxisItem):
@@ -142,11 +145,21 @@ class PSDAnalysisWindow(QMainWindow):
         # Statistics window
         self.statistics_window = None
 
+        # Input validator
+        self.validator = ParameterValidator()
+        
+        # Preset manager
+        self.preset_manager = PresetManager()
+        self.applying_preset = False  # Flag to prevent recursive preset changes
+
         # Apply styling
         self._apply_styling()
         
         # Create UI
         self._create_ui()
+        
+        # Apply comprehensive tooltips
+        apply_tooltips_to_window(self)
     
     def _apply_styling(self):
         """Apply aerospace-inspired styling to the window."""
@@ -538,6 +551,28 @@ class PSDAnalysisWindow(QMainWindow):
         
         row = 0
         
+        # Preset selector
+        layout.addWidget(QLabel("Preset:"), row, 0)
+        self.preset_combo = QComboBox()
+        self.preset_combo.setMinimumHeight(24)
+        self.preset_combo.addItem("Custom", "custom")
+        self.preset_combo.addItem("Aerospace Standard (SMC-S-016)", "aerospace_standard")
+        self.preset_combo.addItem("High Frequency Resolution", "high_resolution")
+        self.preset_combo.addItem("Fast Calculation", "fast_calculation")
+        self.preset_combo.addItem("Low Frequency Analysis", "low_frequency")
+        self.preset_combo.setToolTip(
+            "<b>Parameter Presets</b><br><br>"
+            "Quick-select common parameter configurations:<br><br>"
+            "<b>Aerospace Standard:</b> SMC-S-016 compliance<br>"
+            "<b>High Resolution:</b> Fine frequency detail<br>"
+            "<b>Fast Calculation:</b> Quick analysis<br>"
+            "<b>Low Frequency:</b> Optimized for < 100 Hz<br>"
+            "<b>Custom:</b> Manual parameter selection"
+        )
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+        layout.addWidget(self.preset_combo, row, 1)
+        row += 1
+        
         # Window type
         layout.addWidget(QLabel("Window Type:"), row, 0)
         self.window_combo = QComboBox()
@@ -547,6 +582,7 @@ class PSDAnalysisWindow(QMainWindow):
             self.window_combo.addItem(window_name.capitalize())
         self.window_combo.setCurrentText("Hann")
         self.window_combo.currentTextChanged.connect(self._on_parameter_changed)
+        self.window_combo.currentTextChanged.connect(self._on_manual_parameter_change)
         layout.addWidget(self.window_combo, row, 1)
         row += 1
         
@@ -560,6 +596,8 @@ class PSDAnalysisWindow(QMainWindow):
         self.df_spin.setSingleStep(0.1)
         self.df_spin.valueChanged.connect(self._update_nperseg_from_df)
         self.df_spin.valueChanged.connect(self._on_parameter_changed)
+        self.df_spin.valueChanged.connect(self._validate_df)
+        self.df_spin.valueChanged.connect(self._on_manual_parameter_change)
         layout.addWidget(self.df_spin, row, 1)
         row += 1
         
@@ -592,6 +630,8 @@ class PSDAnalysisWindow(QMainWindow):
         self.overlap_spin.setValue(50)
         self.overlap_spin.setSingleStep(10)
         self.overlap_spin.valueChanged.connect(self._on_parameter_changed)
+        self.overlap_spin.valueChanged.connect(self._validate_overlap)
+        self.overlap_spin.valueChanged.connect(self._on_manual_parameter_change)
         layout.addWidget(self.overlap_spin, row, 1)
         row += 1
         
@@ -614,6 +654,7 @@ class PSDAnalysisWindow(QMainWindow):
         self.maximax_window_spin.setSingleStep(0.5)
         self.maximax_window_spin.setToolTip("Duration of each maximax window in seconds")
         self.maximax_window_spin.valueChanged.connect(self._on_parameter_changed)
+        self.maximax_window_spin.valueChanged.connect(self._validate_maximax_window)
         layout.addWidget(self.maximax_window_spin, row, 1)
         row += 1
         
@@ -626,6 +667,7 @@ class PSDAnalysisWindow(QMainWindow):
         self.maximax_overlap_spin.setSingleStep(10)
         self.maximax_overlap_spin.setToolTip("Overlap percentage between maximax windows")
         self.maximax_overlap_spin.valueChanged.connect(self._on_parameter_changed)
+        self.maximax_overlap_spin.valueChanged.connect(self._validate_maximax_overlap)
         layout.addWidget(self.maximax_overlap_spin, row, 1)
         row += 1
 
@@ -709,6 +751,8 @@ class PSDAnalysisWindow(QMainWindow):
         self.x_min_edit.setText("10.0")
         self.x_min_edit.setPlaceholderText("e.g., 10 or 1e1")
         self.x_min_edit.setToolTip("Enter frequency in Hz (standard or scientific notation)")
+        self.x_min_edit._original_tooltip = self.x_min_edit.toolTip()
+        self.x_min_edit.textChanged.connect(self._validate_frequency_range)
         layout.addWidget(self.x_min_edit, row, 1)
         row += 1
         
@@ -717,6 +761,8 @@ class PSDAnalysisWindow(QMainWindow):
         self.x_max_edit.setText("3000.0")
         self.x_max_edit.setPlaceholderText("e.g., 3000 or 3e3")
         self.x_max_edit.setToolTip("Enter frequency in Hz (standard or scientific notation)")
+        self.x_max_edit._original_tooltip = self.x_max_edit.toolTip()
+        self.x_max_edit.textChanged.connect(self._validate_frequency_range)
         layout.addWidget(self.x_max_edit, row, 1)
         row += 1
         
@@ -1622,6 +1668,81 @@ class PSDAnalysisWindow(QMainWindow):
         # Clear the PSD plot but keep time history
         self._clear_psd_plot()
     
+    def _validate_overlap(self):
+        """Validate overlap percentage in real-time."""
+        overlap = self.overlap_spin.value()
+        result = self.validator.validate_overlap(overlap)
+        self.validator.apply_validation_style(self.overlap_spin, result)
+    
+    def _validate_maximax_overlap(self):
+        """Validate maximax overlap percentage in real-time."""
+        overlap = self.maximax_overlap_spin.value()
+        result = self.validator.validate_overlap(overlap)
+        self.validator.apply_validation_style(self.maximax_overlap_spin, result)
+    
+    def _validate_df(self):
+        """Validate frequency resolution in real-time."""
+        df = self.df_spin.value()
+        result = self.validator.validate_frequency_resolution(df)
+        self.validator.apply_validation_style(self.df_spin, result)
+    
+    def _validate_maximax_window(self):
+        """Validate maximax window duration in real-time."""
+        window_duration = self.maximax_window_spin.value()
+        data_duration = None
+        if self.time_data_full is not None and self.sample_rate is not None:
+            data_duration = len(self.time_data_full) / self.sample_rate
+        result = self.validator.validate_maximax_window(window_duration, data_duration)
+        self.validator.apply_validation_style(self.maximax_window_spin, result)
+    
+    def _validate_frequency_range(self):
+        """Validate frequency range in real-time."""
+        try:
+            min_freq = float(self.x_min_edit.text())
+            max_freq = float(self.x_max_edit.text())
+            result = self.validator.validate_frequency_range(min_freq, max_freq)
+            self.validator.apply_validation_style(self.x_min_edit, result)
+            self.validator.apply_validation_style(self.x_max_edit, result)
+        except ValueError:
+            # Invalid number format
+            from spectral_edge.gui.input_validator import ValidationResult
+            result = ValidationResult(False, "Invalid number format")
+            self.validator.apply_validation_style(self.x_min_edit, result)
+            self.validator.apply_validation_style(self.x_max_edit, result)
+    
+    def _on_preset_changed(self):
+        """Handle preset selection change."""
+        if self.applying_preset:
+            return  # Prevent recursive calls
+        
+        preset_key = self.preset_combo.currentData()
+        if preset_key == "custom":
+            return  # Custom mode - no action needed
+        
+        # Get the preset
+        preset = self.preset_manager.get_preset(preset_key)
+        if preset is None:
+            return
+        
+        # Apply the preset
+        self.applying_preset = True
+        try:
+            apply_preset_to_window(self, preset)
+            print(f"Applied preset: {preset.name}")
+        finally:
+            self.applying_preset = False
+    
+    def _on_manual_parameter_change(self):
+        """Handle manual parameter changes - switch to Custom preset."""
+        if self.applying_preset:
+            return  # Don't switch to custom when applying a preset
+        
+        # Switch to Custom if not already selected
+        if self.preset_combo.currentData() != "custom":
+            self.preset_combo.blockSignals(True)
+            self.preset_combo.setCurrentIndex(0)  # Custom is first item
+            self.preset_combo.blockSignals(False)
+    
     def _clear_psd_plot(self):
         """Clear only the PSD plot."""
         self.plot_widget.clear()
@@ -1852,6 +1973,11 @@ class PSDAnalysisWindow(QMainWindow):
     def _calculate_psd(self):
         """Calculate PSD with current parameters for all channels using FULL RESOLUTION data."""
         if self.signal_data_full is None:
+            show_warning(
+                self,
+                "No Data Loaded",
+                "Please load an HDF5 file and select a channel before calculating PSD."
+            )
             return
         
         try:
@@ -1859,6 +1985,23 @@ class PSDAnalysisWindow(QMainWindow):
             window = self.window_combo.currentText().lower()
             df = self.df_spin.value()
             overlap_percent = self.overlap_spin.value()
+            
+            # Validate all parameters before calculation
+            data_duration = len(self.time_data_full) / self.sample_rate if self.sample_rate else None
+            params = {
+                'overlap': overlap_percent,
+                'df': df,
+                'maximax_window': self.maximax_window_spin.value() if self.maximax_checkbox.isChecked() else None,
+                'data_duration': data_duration
+            }
+            
+            all_valid, errors = self.validator.validate_all_parameters(params)
+            if not all_valid:
+                error_msg = "Cannot calculate PSD due to invalid parameters:\n\n"
+                error_msg += "\n".join(f"• {err}" for err in errors)
+                error_msg += "\n\nPlease correct the highlighted parameters and try again."
+                show_warning(self, "Invalid Parameters", error_msg)
+                return
             freq_min = self.freq_min_spin.value()
             freq_max = self.freq_max_spin.value()
             
@@ -2718,8 +2861,50 @@ class PSDAnalysisWindow(QMainWindow):
             self.flight_navigator.data_selected.connect(self._on_hdf5_data_selected)
             self.flight_navigator.show()
             
+        except FileNotFoundError:
+            show_critical(
+                self, 
+                "File Not Found", 
+                "The selected HDF5 file could not be found.\n\n"
+                "Please verify the file path and try again."
+            )
+        except PermissionError:
+            show_critical(
+                self, 
+                "Permission Denied", 
+                "Unable to access the HDF5 file due to insufficient permissions.\n\n"
+                "Please check file permissions and try again."
+            )
+        except OSError as e:
+            if "corrupted" in str(e).lower() or "invalid" in str(e).lower():
+                show_critical(
+                    self, 
+                    "Corrupted File", 
+                    "The HDF5 file appears to be corrupted or invalid.\n\n"
+                    f"Error details: {e}\n\n"
+                    "Try using a different file or re-exporting the data."
+                )
+            else:
+                show_critical(
+                    self, 
+                    "File System Error", 
+                    f"An error occurred while accessing the file:\n\n{e}\n\n"
+                    "This may be due to insufficient disk space or file system issues."
+                )
+        except MemoryError:
+            show_critical(
+                self, 
+                "Insufficient Memory", 
+                "Not enough memory to load this HDF5 file.\n\n"
+                "Try closing other applications or selecting fewer channels."
+            )
         except Exception as e:
-            show_critical(self, "Load Error", f"Failed to load HDF5 file: {e}")
+            show_critical(
+                self, 
+                "Load Error", 
+                f"Failed to load HDF5 file:\n\n{e}\n\n"
+                "If this problem persists, please verify the file format is correct."
+            )
     
     def _on_hdf5_data_selected(self, selected_items):
         """
@@ -2841,6 +3026,12 @@ class PSDAnalysisWindow(QMainWindow):
             self.channel_units = all_channel_units
             self.channel_sample_rates = all_sample_rates  # Store each channel's sample rate
             self.channel_flight_names = flight_info  # Store flight name for each channel
+            
+            # Update validator with Nyquist frequency
+            if self.sample_rate is not None:
+                nyquist_freq = self.sample_rate / 2
+                self.validator.set_nyquist_frequency(nyquist_freq)
+                print(f"Validator: Nyquist frequency set to {nyquist_freq} Hz")
             
             # Create file label and set flight name
             if len(set(flight_info)) == 1:

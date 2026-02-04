@@ -725,8 +725,7 @@ class BatchProcessor:
         """
         Remove running mean from signal using configurable window.
 
-        Uses cumulative sum approach for O(n) performance instead of
-        O(n*k) convolution where k is window size.
+        Uses scipy.ndimage.uniform_filter1d for O(n) performance.
 
         Parameters:
         -----------
@@ -740,6 +739,8 @@ class BatchProcessor:
         np.ndarray
             Signal with running mean removed
         """
+        from scipy.ndimage import uniform_filter1d
+
         # Use configurable window size (default 1.0 seconds)
         window_seconds = self.config.psd_config.running_mean_window
         window_size = int(sample_rate * window_seconds)
@@ -752,27 +753,9 @@ class BatchProcessor:
             # If signal is shorter than window, just remove overall mean
             return signal - np.mean(signal)
 
-        # Use cumulative sum for O(n) running mean calculation
-        # This is much faster than convolution for large arrays
-        cumsum = np.cumsum(signal)
-        running_mean = np.empty(n, dtype=signal.dtype)
-
-        # Handle edges: use expanding window at start
-        half_window = window_size // 2
-        for i in range(half_window):
-            # Expanding window at start
-            running_mean[i] = cumsum[i + half_window] / (i + half_window + 1)
-
-        # Middle section: full window
-        running_mean[half_window:n - half_window] = (
-            cumsum[window_size:n] - np.concatenate([[0], cumsum[:n - window_size]])
-        ) / window_size
-
-        # Handle edges: use contracting window at end
-        for i in range(n - half_window, n):
-            # Contracting window at end
-            window_start = i - half_window
-            running_mean[i] = (cumsum[n - 1] - (cumsum[window_start - 1] if window_start > 0 else 0)) / (n - window_start)
+        # Use uniform_filter1d for O(n) running mean calculation
+        # This is much faster than convolution for large window sizes
+        running_mean = uniform_filter1d(signal.astype(np.float64), size=window_size, mode='nearest')
 
         return signal - running_mean
     

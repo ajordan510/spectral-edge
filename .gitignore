@@ -31,3 +31,7 @@ Thumbs.db
 # Logs
 logs/*.log
 logs/*.log.*
+
+# Test data (large files)
+data/*.hdf5
+data/batch_test_output/

@@ -16,17 +16,147 @@ Author: SpectralEdge Development Team
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox,
-    QGroupBox, QGridLayout, QTabWidget, QScrollArea
+    QGroupBox, QGridLayout, QTabWidget, QScrollArea, QApplication,
+    QProgressDialog
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 import pyqtgraph as pg
 import numpy as np
 from scipy import stats
+from scipy.ndimage import uniform_filter1d
 from typing import List, Tuple, Optional, Dict
 
 from spectral_edge.utils.message_box import show_information, show_warning, show_critical
 from spectral_edge.utils.report_generator import ReportGenerator, export_plot_to_image, PPTX_AVAILABLE
+
+
+class StatisticsCalculationThread(QThread):
+    """Background thread for statistics calculation."""
+    finished = pyqtSignal(dict, dict)  # pdf_data, running_stats
+    progress = pyqtSignal(int, str)  # percent, message
+    error = pyqtSignal(str)
+
+    def __init__(self, channels_data, channel_selection, n_bins, window_seconds, sample_rate):
+        super().__init__()
+        self.channels_data = channels_data
+        self.channel_selection = channel_selection
+        self.n_bins = n_bins
+        self.window_seconds = window_seconds
+        self.sample_rate = sample_rate
+
+    def run(self):
+        try:
+            pdf_data = {}
+            running_stats = {}
+
+            selected_channels = [(i, ch) for i, ch in enumerate(self.channels_data)
+                                 if self.channel_selection[i]]
+            total = len(selected_channels)
+
+            for idx, (i, (name, signal, unit, _)) in enumerate(selected_channels):
+                self.progress.emit(int(100 * idx / max(total, 1)), f"Processing {name}...")
+
+                # Calculate PDF (fast)
+                counts, bin_edges = np.histogram(signal, bins=self.n_bins, density=True)
+                bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+                mean = np.mean(signal)
+                std = np.std(signal)
+
+                pdf_data[name] = {
+                    'bins': bin_centers,
+                    'counts': counts,
+                    'mean': mean,
+                    'std': std,
+                    'unit': unit
+                }
+
+                # Calculate running statistics using optimized uniform_filter1d
+                window_samples = int(self.window_seconds * self.sample_rate)
+                window_samples = max(10, window_samples)
+
+                n = len(signal)
+                if n > window_samples:
+                    # Use uniform_filter1d for O(n) running mean (much faster than convolve)
+                    signal_float = signal.astype(np.float64)
+                    running_mean = uniform_filter1d(signal_float, size=window_samples, mode='nearest')
+
+                    # Running std using uniform_filter1d
+                    running_sq = uniform_filter1d(signal_float**2, size=window_samples, mode='nearest')
+                    running_std = np.sqrt(np.maximum(running_sq - running_mean**2, 0))
+
+                    # Downsample for display (keep max 5000 points)
+                    max_points = 5000
+                    if len(running_mean) > max_points:
+                        step = len(running_mean) // max_points
+                        running_mean = running_mean[::step]
+                        running_std = running_std[::step]
+                        time = np.arange(len(running_mean)) * step / self.sample_rate
+                    else:
+                        time = np.arange(len(running_mean)) / self.sample_rate
+
+                    # Calculate sampled skewness and kurtosis (limit to 200 points for speed)
+                    n_samples = min(200, len(signal) // window_samples)
+                    if n_samples > 0:
+                        sample_step = len(signal) // n_samples
+                        running_skewness = np.zeros(n_samples)
+                        running_kurtosis = np.zeros(n_samples)
+                        skewness_time = np.zeros(n_samples)
+
+                        for j in range(n_samples):
+                            start_idx = j * sample_step
+                            end_idx = min(start_idx + window_samples, len(signal))
+                            window = signal[start_idx:end_idx]
+                            if len(window) > 10:
+                                running_skewness[j] = stats.skew(window)
+                                running_kurtosis[j] = stats.kurtosis(window)
+                            skewness_time[j] = start_idx / self.sample_rate
+                    else:
+                        running_skewness = np.array([0])
+                        running_kurtosis = np.array([0])
+                        skewness_time = np.array([0])
+
+                    running_stats[name] = {
+                        'time': time,
+                        'mean': running_mean,
+                        'std': running_std,
+                        'skewness_time': skewness_time,
+                        'skewness': running_skewness,
+                        'kurtosis': running_kurtosis,
+                        'unit': unit
+                    }
+
+                # Overall statistics (use faster numpy where possible)
+                rms = np.sqrt(np.mean(signal**2))
+                crest_factor = np.max(np.abs(signal)) / rms if rms > 1e-12 else 0.0
+
+                # For large signals, sample for skewness/kurtosis
+                if len(signal) > 100000:
+                    sample_indices = np.random.choice(len(signal), 100000, replace=False)
+                    signal_sample = signal[sample_indices]
+                    skewness = stats.skew(signal_sample)
+                    kurtosis = stats.kurtosis(signal_sample)
+                else:
+                    skewness = stats.skew(signal)
+                    kurtosis = stats.kurtosis(signal)
+
+                pdf_data[name]['overall'] = {
+                    'mean': mean,
+                    'std': std,
+                    'skewness': skewness,
+                    'kurtosis': kurtosis,
+                    'min': np.min(signal),
+                    'max': np.max(signal),
+                    'rms': rms,
+                    'crest_factor': crest_factor
+                }
+
+            self.progress.emit(100, "Complete")
+            self.finished.emit(pdf_data, running_stats)
+
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class StatisticsWindow(QMainWindow):
@@ -73,6 +203,9 @@ class StatisticsWindow(QMainWindow):
         self.pdf_data = {}  # {channel: (bins, counts, fitted_params)}
         self.running_stats = {}  # {channel: {mean, std, skewness, kurtosis}}
 
+        # Background calculation thread
+        self.calc_thread = None
+
         # Distribution overlay options
         self.show_normal = True
         self.show_rayleigh = False
@@ -87,8 +220,9 @@ class StatisticsWindow(QMainWindow):
         # Create UI
         self._create_ui()
 
-        # Initial calculation
-        self._calculate_statistics()
+        # Schedule initial calculation after event loop starts (non-blocking)
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(100, self._calculate_statistics)
 
     def _apply_styling(self):
         """Apply aerospace-inspired styling."""
@@ -438,91 +572,55 @@ class StatisticsWindow(QMainWindow):
         self._update_pdf_plot()
 
     def _calculate_statistics(self):
-        """Calculate all statistics for selected channels."""
-        self.pdf_data = {}
-        self.running_stats = {}
+        """Calculate all statistics for selected channels in background thread."""
+        # Stop any running calculation
+        if self.calc_thread is not None and self.calc_thread.isRunning():
+            self.calc_thread.terminate()
+            self.calc_thread.wait()
 
-        for i, (name, signal, unit, _) in enumerate(self.channels_data):
-            if not self.channel_checkboxes[i].isChecked():
-                continue
+        # Get channel selection state
+        channel_selection = [cb.isChecked() for cb in self.channel_checkboxes]
 
-            # Calculate PDF
-            n_bins = self.bins_spin.value()
-            counts, bin_edges = np.histogram(signal, bins=n_bins, density=True)
-            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        # Check if any channel is selected
+        if not any(channel_selection):
+            self.pdf_data = {}
+            self.running_stats = {}
+            self._update_plots()
+            self._update_summary()
+            return
 
-            # Fit distributions
-            mean = np.mean(signal)
-            std = np.std(signal)
+        # Update UI to show calculating
+        self.summary_label.setText("Calculating statistics...")
+        QApplication.processEvents()
 
-            self.pdf_data[name] = {
-                'bins': bin_centers,
-                'counts': counts,
-                'mean': mean,
-                'std': std,
-                'unit': unit
-            }
+        # Create and start calculation thread
+        self.calc_thread = StatisticsCalculationThread(
+            channels_data=self.channels_data,
+            channel_selection=channel_selection,
+            n_bins=self.bins_spin.value(),
+            window_seconds=self.window_spin.value(),
+            sample_rate=self.sample_rate
+        )
+        self.calc_thread.finished.connect(self._on_calculation_finished)
+        self.calc_thread.progress.connect(self._on_calculation_progress)
+        self.calc_thread.error.connect(self._on_calculation_error)
+        self.calc_thread.start()
 
-            # Calculate running statistics
-            window_samples = int(self.window_spin.value() * self.sample_rate)
-            if window_samples < 10:
-                window_samples = 10
-
-            # Use stride tricks for efficient windowed calculation
-            n_windows = len(signal) - window_samples + 1
-            if n_windows > 0:
-                # Running mean
-                running_mean = np.convolve(signal, np.ones(window_samples)/window_samples, mode='valid')
-
-                # Running std (approximate using convolution)
-                running_sq = np.convolve(signal**2, np.ones(window_samples)/window_samples, mode='valid')
-                running_std = np.sqrt(np.maximum(running_sq - running_mean**2, 0))
-
-                # Time array for running stats
-                time = np.arange(len(running_mean)) / self.sample_rate + self.window_spin.value() / 2
-
-                # Calculate running skewness and kurtosis (sampled for efficiency)
-                sample_step = max(1, n_windows // 1000)  # Limit to ~1000 points
-                sample_indices = np.arange(0, n_windows, sample_step)
-
-                running_skewness = np.zeros(len(sample_indices))
-                running_kurtosis = np.zeros(len(sample_indices))
-
-                for j, idx in enumerate(sample_indices):
-                    window = signal[idx:idx + window_samples]
-                    running_skewness[j] = stats.skew(window)
-                    running_kurtosis[j] = stats.kurtosis(window)
-
-                sampled_time = time[sample_indices] if len(sample_indices) <= len(time) else time[::sample_step][:len(sample_indices)]
-
-                self.running_stats[name] = {
-                    'time': time,
-                    'mean': running_mean,
-                    'std': running_std,
-                    'skewness_time': sampled_time,
-                    'skewness': running_skewness,
-                    'kurtosis': running_kurtosis,
-                    'unit': unit
-                }
-
-            # Calculate overall statistics
-            rms = np.sqrt(np.mean(signal**2))
-            # Protect against division by zero for crest factor
-            crest_factor = np.max(np.abs(signal)) / rms if rms > 1e-12 else 0.0
-
-            self.pdf_data[name]['overall'] = {
-                'mean': mean,
-                'std': std,
-                'skewness': stats.skew(signal),
-                'kurtosis': stats.kurtosis(signal),
-                'min': np.min(signal),
-                'max': np.max(signal),
-                'rms': rms,
-                'crest_factor': crest_factor
-            }
-
+    def _on_calculation_finished(self, pdf_data, running_stats):
+        """Handle calculation completion."""
+        self.pdf_data = pdf_data
+        self.running_stats = running_stats
         self._update_plots()
         self._update_summary()
+
+    def _on_calculation_progress(self, percent, message):
+        """Handle calculation progress."""
+        self.summary_label.setText(f"Calculating: {message} ({percent}%)")
+
+    def _on_calculation_error(self, error_msg):
+        """Handle calculation error."""
+        self.summary_label.setText(f"Error: {error_msg}")
+        show_warning(self, "Calculation Error", f"Failed to calculate statistics: {error_msg}")
 
     def _update_plots(self):
         """Update all plots."""

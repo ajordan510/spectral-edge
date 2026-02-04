@@ -167,11 +167,11 @@ class BatchWorker(QThread):
                     self.processing_failed.emit("Processing cancelled by user")
                     return
 
-                if output_config.hdf5_enabled and self.config.data_source.source_type == 'hdf5':
+                if output_config.hdf5_writeback_enabled and self.config.source_type == 'hdf5':
                     self.progress_updated.emit(90, "Writing PSDs to HDF5...")
                     self.log_message.emit("Writing PSDs back to HDF5...")
                     hdf5_start = time.perf_counter()
-                    write_psds_to_hdf5(result, self.config.data_source.hdf5_file)
+                    write_psds_to_hdf5(result, self.config.source_files[0])
                     hdf5_time = time.perf_counter() - hdf5_start
                     output_times['hdf5'] = hdf5_time
                     self.log_message.emit(f"HDF5 write complete ({hdf5_time:.2f}s)")

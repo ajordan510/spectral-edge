@@ -130,7 +130,7 @@ class BatchProcessor:
     def __init__(self, config: BatchConfig, progress_callback: Optional[Callable] = None):
         """
         Initialize batch processor with configuration.
-        
+
         Parameters:
         -----------
         config : BatchConfig
@@ -144,6 +144,8 @@ class BatchProcessor:
         self.cancel_requested = False  # Flag for cancellation
         self.progress_callback = progress_callback
         self.progress_tracker = None
+        self._flight_to_file_cache = None  # Cache for flight -> file mapping
+        self._filter_sos_cache = {}  # Cache for filter coefficients
         
     def process(self) -> BatchProcessingResult:
         """
@@ -184,15 +186,34 @@ class BatchProcessor:
         return self.result
     
     def _process_hdf5_sources(self):
-        """Process HDF5 data sources."""
+        """Process HDF5 data sources one file at a time to minimize memory usage."""
         self.result.add_log_entry(f"Processing {len(self.config.source_files)} HDF5 file(s)")
-        
-        # Load HDF5 files
+
+        # Group selected channels by file for efficient sequential processing
+        # This allows us to open one file, process all its channels, then close it
+        channels_by_file = self._group_channels_by_file()
+
+        # Process each selected channel
+        total_channels = len(self.config.selected_channels)
+        self.progress_tracker = ProgressTracker(total_channels, self.progress_callback)
+        channel_idx = 0
+
+        # Process one HDF5 file at a time
         for file_path in self.config.source_files:
+            if self.cancel_requested:
+                self.result.add_warning("Processing cancelled by user")
+                break
+
+            # Get channels to process from this file
+            file_channels = channels_by_file.get(file_path, [])
+            if not file_channels:
+                continue
+
+            # Open HDF5 file
             try:
                 loader = HDF5FlightDataLoader(file_path)
                 self.hdf5_loaders[file_path] = loader
-                self.result.add_log_entry(f"Loaded HDF5 file: {Path(file_path).name}")
+                self.result.add_log_entry(f"Opened HDF5 file: {Path(file_path).name} ({len(file_channels)} channels)")
             except FileNotFoundError:
                 error = ErrorHandler.handle_file_not_found(file_path)
                 log_error_with_recovery(error)
@@ -203,35 +224,123 @@ class BatchProcessor:
                 log_error_with_recovery(error)
                 self.result.add_error(error.get_full_message())
                 continue
-        
-        # Process each selected channel
-        total_channels = len(self.config.selected_channels)
-        self.progress_tracker = ProgressTracker(total_channels, self.progress_callback)
-        
-        for idx, (flight_key, channel_key) in enumerate(self.config.selected_channels, 1):
-            if self.cancel_requested:
-                self.result.add_warning("Processing cancelled by user")
-                break
-            
-            self.progress_tracker.start_channel(flight_key, channel_key)
-            self.result.add_log_entry(f"Processing channel {idx}/{total_channels}: {flight_key}/{channel_key}")
-            
-            try:
-                self._process_channel_hdf5(flight_key, channel_key)
-                self.progress_tracker.finish_channel()  # Mark channel as complete
-            except Exception as e:
-                self.result.add_error(f"Failed to process {flight_key}/{channel_key}: {str(e)}")
-                self.progress_tracker.finish_channel()  # Mark channel as complete even on error
-                continue
-            finally:
-                # Clear memory after each channel
-                if idx % 5 == 0:  # Every 5 channels
+
+            # Process all channels from this file
+            for flight_key, channel_key in file_channels:
+                if self.cancel_requested:
+                    self.result.add_warning("Processing cancelled by user")
+                    break
+
+                channel_idx += 1
+                self.progress_tracker.start_channel(flight_key, channel_key)
+                self.result.add_log_entry(f"Processing channel {channel_idx}/{total_channels}: {flight_key}/{channel_key}")
+
+                try:
+                    self._process_channel_hdf5(flight_key, channel_key)
+                    self.progress_tracker.finish_channel()
+                except Exception as e:
+                    self.result.add_error(f"Failed to process {flight_key}/{channel_key}: {str(e)}")
+                    self.progress_tracker.finish_channel()
+                    continue
+                finally:
+                    # Clear memory after EVERY channel
                     MemoryManager.clear_memory()
+
+            # Close this HDF5 file before opening the next one
+            try:
+                loader.close()
+                self.result.add_log_entry(f"Closed HDF5 file: {Path(file_path).name}")
+            except Exception as e:
+                logger.warning(f"Error closing HDF5 file {file_path}: {e}")
+            finally:
+                del self.hdf5_loaders[file_path]
+                MemoryManager.clear_memory()
+
+    def _group_channels_by_file(self) -> Dict[str, List[Tuple[str, str]]]:
+        """
+        Group selected channels by their source HDF5 file.
+
+        This enables sequential file processing to minimize memory usage.
+        Uses cached flight-to-file mapping to avoid re-opening files.
+
+        Returns:
+        --------
+        dict
+            Mapping of file_path -> [(flight_key, channel_key), ...]
+        """
+        channels_by_file = {}
+
+        # Build flight-to-file mapping (cached to avoid re-opening files)
+        flight_to_file = self._get_flight_to_file_mapping()
+
+        # Group channels by file
+        for flight_key, channel_key in self.config.selected_channels:
+            file_path = flight_to_file.get(flight_key)
+            if file_path:
+                if file_path not in channels_by_file:
+                    channels_by_file[file_path] = []
+                channels_by_file[file_path].append((flight_key, channel_key))
+            else:
+                logger.warning(f"Flight {flight_key} not found in any HDF5 file")
+
+        return channels_by_file
+
+    def _get_flight_to_file_mapping(self) -> Dict[str, str]:
+        """
+        Get or build the flight-to-file mapping.
+
+        This mapping is cached to avoid re-opening HDF5 files multiple times.
+
+        Returns:
+        --------
+        dict
+            Mapping of flight_key -> file_path
+        """
+        if self._flight_to_file_cache is not None:
+            return self._flight_to_file_cache
+
+        # Build the mapping by reading metadata from each file
+        flight_to_file = {}
+        for file_path in self.config.source_files:
+            try:
+                loader = HDF5FlightDataLoader(file_path)
+                for flight_key in loader.flights.keys():
+                    flight_to_file[flight_key] = file_path
+                loader.close()
+            except Exception as e:
+                logger.warning(f"Could not read metadata from {file_path}: {e}")
+                continue
+
+        self._flight_to_file_cache = flight_to_file
+        return flight_to_file
     
+    def _get_event_time_bounds(self) -> tuple:
+        """
+        Calculate the min/max time bounds across all events.
+
+        Returns:
+        --------
+        tuple
+            (min_time, max_time) or (None, None) if full duration is requested
+        """
+        if self.config.process_full_duration:
+            return None, None
+
+        if not self.config.events:
+            return None, None
+
+        min_time = min(event.start_time for event in self.config.events)
+        max_time = max(event.end_time for event in self.config.events)
+
+        return min_time, max_time
+
     def _process_channel_hdf5(self, flight_key: str, channel_key: str):
         """
         Process a single channel from HDF5 source.
-        
+
+        Uses optimized data loading - only loads the time range needed
+        for all events when full duration is not requested.
+
         Parameters:
         -----------
         flight_key : str
@@ -245,10 +354,10 @@ class BatchProcessor:
             if flight_key in file_loader.flights:
                 loader = file_loader
                 break
-        
+
         if loader is None:
             raise ValueError(f"Flight {flight_key} not found in any loaded HDF5 file")
-        
+
         # Get channel info
         channel_info = loader.channels[flight_key][channel_key]
         sample_rate = channel_info.sample_rate
@@ -258,11 +367,31 @@ class BatchProcessor:
         if self.cancel_requested:
             raise InterruptedError("Processing cancelled by user")
 
-        # Load full time history data (not decimated)
+        # Calculate time bounds to optimize data loading
+        # Only load the data range needed for all events (with small buffer)
+        event_min_time, event_max_time = self._get_event_time_bounds()
+
+        # Add buffer for filter edge effects (use running mean window as buffer)
+        buffer_seconds = self.config.psd_config.running_mean_window * 2
+
         load_start = time.perf_counter()
-        data = loader.load_channel_data(
-            flight_key, channel_key, decimate_for_display=False
-        )
+        if event_min_time is not None and event_max_time is not None:
+            # Load only the time range needed for events (with buffer)
+            start_time = max(0, event_min_time - buffer_seconds)
+            end_time = event_max_time + buffer_seconds
+            data = loader.load_channel_data(
+                flight_key, channel_key, decimate_for_display=False,
+                start_time=start_time, end_time=end_time
+            )
+            self.result.add_log_entry(
+                f"  Optimized load: time range [{start_time:.1f}s, {end_time:.1f}s] for events"
+            )
+        else:
+            # Load full time history
+            data = loader.load_channel_data(
+                flight_key, channel_key, decimate_for_display=False
+            )
+
         time_array = data['time_full']
         signal_array = data['data_full']
         load_time = time.perf_counter() - load_start
@@ -277,7 +406,7 @@ class BatchProcessor:
                 time_array, signal_array, sample_rate, units,
                 start_time=None, end_time=None
             )
-        
+
         # Process each event
         for event in self.config.events:
             try:
@@ -290,7 +419,20 @@ class BatchProcessor:
                 self.result.add_warning(
                     f"Skipped event '{event.name}' for {flight_key}/{channel_key}: {str(e)}"
                 )
-    
+
+        # Explicitly delete large arrays to free memory immediately
+        del time_array, signal_array, data
+
+    def _close_hdf5_loaders(self):
+        """Close all HDF5 file loaders to free memory and file handles."""
+        for file_path, loader in self.hdf5_loaders.items():
+            try:
+                loader.close()
+                logger.debug(f"Closed HDF5 loader for {Path(file_path).name}")
+            except Exception as e:
+                logger.warning(f"Error closing HDF5 loader {file_path}: {e}")
+        self.hdf5_loaders.clear()
+
     def _process_csv_sources(self):
         """Process CSV data sources."""
         self.result.add_log_entry(f"Processing {len(self.config.source_files)} CSV file(s)")
@@ -511,54 +653,80 @@ class BatchProcessor:
     def _apply_filter(self, signal: np.ndarray, sample_rate: float) -> np.ndarray:
         """
         Apply digital filter to signal.
-        
+
+        Uses cached filter coefficients for performance when the same
+        filter configuration is applied to multiple signals.
+
         Parameters:
         -----------
         signal : np.ndarray
             Input signal
         sample_rate : float
             Sample rate in Hz
-            
+
         Returns:
         --------
         np.ndarray
             Filtered signal
         """
         fc = self.config.filter_config
-        nyquist = sample_rate / 2.0
-        
-        # Prepare cutoff frequencies (normalized to Nyquist)
-        if fc.filter_type == "lowpass":
-            Wn = min(fc.cutoff_high / nyquist, 0.95)
-            btype = "lowpass"
-        elif fc.filter_type == "highpass":
-            Wn = max(fc.cutoff_low / nyquist, 0.01)
-            btype = "highpass"
-        elif fc.filter_type == "bandpass":
-            Wn = [max(fc.cutoff_low / nyquist, 0.01), 
-                  min(fc.cutoff_high / nyquist, 0.95)]
-            btype = "bandpass"
+
+        # Build cache key from filter parameters and sample rate
+        cache_key = (
+            fc.filter_type,
+            fc.filter_design,
+            fc.filter_order,
+            fc.cutoff_low,
+            fc.cutoff_high,
+            sample_rate
+        )
+
+        # Check if we have cached filter coefficients
+        if cache_key in self._filter_sos_cache:
+            sos = self._filter_sos_cache[cache_key]
         else:
-            raise ValueError(f"Unknown filter type: {fc.filter_type}")
-        
-        # Design filter using SOS format for numerical stability
-        if fc.filter_design == "butterworth":
-            sos = scipy_signal.butter(fc.filter_order, Wn, btype=btype, output='sos')
-        elif fc.filter_design == "chebyshev":
-            sos = scipy_signal.cheby1(fc.filter_order, 0.5, Wn, btype=btype, output='sos')
-        elif fc.filter_design == "bessel":
-            sos = scipy_signal.bessel(fc.filter_order, Wn, btype=btype, output='sos')
-        else:
-            raise ValueError(f"Unknown filter design: {fc.filter_design}")
-        
+            # Design filter
+            nyquist = sample_rate / 2.0
+
+            # Prepare cutoff frequencies (normalized to Nyquist)
+            if fc.filter_type == "lowpass":
+                Wn = min(fc.cutoff_high / nyquist, 0.95)
+                btype = "lowpass"
+            elif fc.filter_type == "highpass":
+                Wn = max(fc.cutoff_low / nyquist, 0.01)
+                btype = "highpass"
+            elif fc.filter_type == "bandpass":
+                Wn = [max(fc.cutoff_low / nyquist, 0.01),
+                      min(fc.cutoff_high / nyquist, 0.95)]
+                btype = "bandpass"
+            else:
+                raise ValueError(f"Unknown filter type: {fc.filter_type}")
+
+            # Design filter using SOS format for numerical stability
+            if fc.filter_design == "butterworth":
+                sos = scipy_signal.butter(fc.filter_order, Wn, btype=btype, output='sos')
+            elif fc.filter_design == "chebyshev":
+                sos = scipy_signal.cheby1(fc.filter_order, 0.5, Wn, btype=btype, output='sos')
+            elif fc.filter_design == "bessel":
+                sos = scipy_signal.bessel(fc.filter_order, Wn, btype=btype, output='sos')
+            else:
+                raise ValueError(f"Unknown filter design: {fc.filter_design}")
+
+            # Cache the filter coefficients
+            self._filter_sos_cache[cache_key] = sos
+            logger.debug(f"Cached filter coefficients for {fc.filter_design} {fc.filter_type}")
+
         # Apply filter
         filtered_signal = scipy_signal.sosfiltfilt(sos, signal)
-        
+
         return filtered_signal
     
     def _remove_running_mean(self, signal: np.ndarray, sample_rate: float) -> np.ndarray:
         """
         Remove running mean from signal using configurable window.
+
+        Uses cumulative sum approach for O(n) performance instead of
+        O(n*k) convolution where k is window size.
 
         Parameters:
         -----------
@@ -579,13 +747,32 @@ class BatchProcessor:
         # Ensure minimum window size
         window_size = max(1, window_size)
 
-        if len(signal) < window_size:
+        n = len(signal)
+        if n < window_size:
             # If signal is shorter than window, just remove overall mean
             return signal - np.mean(signal)
 
-        # Calculate running mean using convolution
-        kernel = np.ones(window_size) / window_size
-        running_mean = np.convolve(signal, kernel, mode='same')
+        # Use cumulative sum for O(n) running mean calculation
+        # This is much faster than convolution for large arrays
+        cumsum = np.cumsum(signal)
+        running_mean = np.empty(n, dtype=signal.dtype)
+
+        # Handle edges: use expanding window at start
+        half_window = window_size // 2
+        for i in range(half_window):
+            # Expanding window at start
+            running_mean[i] = cumsum[i + half_window] / (i + half_window + 1)
+
+        # Middle section: full window
+        running_mean[half_window:n - half_window] = (
+            cumsum[window_size:n] - np.concatenate([[0], cumsum[:n - window_size]])
+        ) / window_size
+
+        # Handle edges: use contracting window at end
+        for i in range(n - half_window, n):
+            # Contracting window at end
+            window_start = i - half_window
+            running_mean[i] = (cumsum[n - 1] - (cumsum[window_start - 1] if window_start > 0 else 0)) / (n - window_start)
 
         return signal - running_mean
     

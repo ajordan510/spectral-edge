@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import List, Dict, Optional
 import logging
+import os
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
@@ -20,7 +21,39 @@ from PyQt6.QtWidgets import (
     QLineEdit, QTextEdit, QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QDoubleValidator
+
+
+class ScientificDoubleSpinBox(QDoubleSpinBox):
+    """
+    A QDoubleSpinBox that displays values in scientific notation.
+
+    Ideal for PSD values that span many orders of magnitude.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDecimals(10)  # Internal precision
+        self._decimals_display = 2  # Display precision for scientific notation
+
+    def textFromValue(self, value: float) -> str:
+        """Convert value to scientific notation string."""
+        if value == 0:
+            return "0.00e+00"
+        return f"{value:.{self._decimals_display}e}"
+
+    def valueFromText(self, text: str) -> float:
+        """Convert scientific notation string to value."""
+        try:
+            return float(text)
+        except ValueError:
+            return self.value()
+
+    def validate(self, text: str, pos: int):
+        """Validate scientific notation input."""
+        validator = QDoubleValidator()
+        validator.setNotation(QDoubleValidator.Notation.ScientificNotation)
+        return validator.validate(text, pos)
 
 from spectral_edge.batch.config import (
     BatchConfig, FilterConfig, PSDConfig, SpectrogramConfig,
@@ -342,10 +375,26 @@ class BatchProcessorWindow(QMainWindow):
         freq_group.setLayout(freq_layout)
         layout.addWidget(freq_group)
         
-        # Mean removal
-        self.remove_mean_checkbox = QCheckBox("Remove Running Mean (1s window)")
+        # Mean removal with configurable window
+        mean_group = QGroupBox("Running Mean Removal")
+        mean_layout = QHBoxLayout()
+
+        self.remove_mean_checkbox = QCheckBox("Remove Running Mean")
         self.remove_mean_checkbox.setChecked(True)
-        layout.addWidget(self.remove_mean_checkbox)
+        mean_layout.addWidget(self.remove_mean_checkbox)
+
+        mean_layout.addWidget(QLabel("Window:"))
+        self.running_mean_window_spin = QDoubleSpinBox()
+        self.running_mean_window_spin.setRange(0.1, 10.0)
+        self.running_mean_window_spin.setValue(1.0)
+        self.running_mean_window_spin.setSuffix(" s")
+        self.running_mean_window_spin.setDecimals(1)
+        self.running_mean_window_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
+        mean_layout.addWidget(self.running_mean_window_spin)
+        mean_layout.addStretch()
+
+        mean_group.setLayout(mean_layout)
+        layout.addWidget(mean_group)
         
         layout.addStretch()
         self.tab_widget.addTab(tab, "PSD Parameters")
@@ -484,16 +533,18 @@ class BatchProcessorWindow(QMainWindow):
         """Create the display settings tab."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        
+
         # PSD plot settings
         psd_group = QGroupBox("PSD Plot Display Settings")
         psd_layout = QVBoxLayout()
-        
+
         self.psd_auto_scale_checkbox = QCheckBox("Auto-scale axes")
+        self.psd_auto_scale_checkbox.stateChanged.connect(self._on_psd_auto_scale_changed)
         psd_layout.addWidget(self.psd_auto_scale_checkbox)
-        
+
         # X-axis limits
         x_axis_row = QHBoxLayout()
+        self.psd_x_label = QLabel("X-axis (Frequency):")
         self.psd_x_min_spin = QDoubleSpinBox()
         self.psd_x_min_spin.setRange(0.1, 100000.0)
         self.psd_x_min_spin.setValue(10.0)
@@ -504,32 +555,35 @@ class BatchProcessorWindow(QMainWindow):
         self.psd_x_max_spin.setValue(3000.0)
         self.psd_x_max_spin.setSuffix(" Hz")
         self.psd_x_max_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
-        x_axis_row.addWidget(QLabel("X-axis (Frequency):"))
+        self.psd_x_to_label = QLabel("to")
+        x_axis_row.addWidget(self.psd_x_label)
         x_axis_row.addWidget(self.psd_x_min_spin)
-        x_axis_row.addWidget(QLabel("to"))
+        x_axis_row.addWidget(self.psd_x_to_label)
         x_axis_row.addWidget(self.psd_x_max_spin)
         x_axis_row.addStretch()
         psd_layout.addLayout(x_axis_row)
-        
-        # Y-axis limits
+
+        # Y-axis limits (scientific notation for PSD values)
         y_axis_row = QHBoxLayout()
-        self.psd_y_min_spin = QDoubleSpinBox()
-        self.psd_y_min_spin.setRange(1e-10, 1000.0)
+        self.psd_y_label = QLabel("Y-axis (PSD):")
+        self.psd_y_min_spin = ScientificDoubleSpinBox()
+        self.psd_y_min_spin.setRange(1e-15, 1e10)
         self.psd_y_min_spin.setValue(1e-5)
-        self.psd_y_min_spin.setDecimals(6)
         self.psd_y_min_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
-        self.psd_y_max_spin = QDoubleSpinBox()
-        self.psd_y_max_spin.setRange(1e-10, 1000.0)
+        self.psd_y_min_spin.setMinimumWidth(100)
+        self.psd_y_max_spin = ScientificDoubleSpinBox()
+        self.psd_y_max_spin.setRange(1e-15, 1e10)
         self.psd_y_max_spin.setValue(10.0)
-        self.psd_y_max_spin.setDecimals(6)
         self.psd_y_max_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
-        y_axis_row.addWidget(QLabel("Y-axis (PSD):"))
+        self.psd_y_max_spin.setMinimumWidth(100)
+        self.psd_y_to_label = QLabel("to")
+        y_axis_row.addWidget(self.psd_y_label)
         y_axis_row.addWidget(self.psd_y_min_spin)
-        y_axis_row.addWidget(QLabel("to"))
+        y_axis_row.addWidget(self.psd_y_to_label)
         y_axis_row.addWidget(self.psd_y_max_spin)
         y_axis_row.addStretch()
         psd_layout.addLayout(y_axis_row)
-        
+
         # Legend and grid
         options_row = QHBoxLayout()
         self.psd_show_legend_checkbox = QCheckBox("Show Legend")
@@ -540,10 +594,68 @@ class BatchProcessorWindow(QMainWindow):
         options_row.addWidget(self.psd_show_grid_checkbox)
         options_row.addStretch()
         psd_layout.addLayout(options_row)
-        
+
         psd_group.setLayout(psd_layout)
         layout.addWidget(psd_group)
-        
+
+        # Spectrogram display settings
+        spec_group = QGroupBox("Spectrogram Display Settings")
+        spec_layout = QVBoxLayout()
+
+        self.spec_auto_scale_checkbox = QCheckBox("Auto-scale axes")
+        self.spec_auto_scale_checkbox.setChecked(True)
+        self.spec_auto_scale_checkbox.stateChanged.connect(self._on_spec_auto_scale_changed)
+        spec_layout.addWidget(self.spec_auto_scale_checkbox)
+
+        # Frequency limits
+        spec_freq_row = QHBoxLayout()
+        self.spec_freq_label = QLabel("Frequency Range:")
+        self.spec_freq_min_spin = QDoubleSpinBox()
+        self.spec_freq_min_spin.setRange(0.1, 100000.0)
+        self.spec_freq_min_spin.setValue(20.0)
+        self.spec_freq_min_spin.setSuffix(" Hz")
+        self.spec_freq_min_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
+        self.spec_freq_min_spin.setEnabled(False)
+        self.spec_freq_max_spin = QDoubleSpinBox()
+        self.spec_freq_max_spin.setRange(1.0, 100000.0)
+        self.spec_freq_max_spin.setValue(2000.0)
+        self.spec_freq_max_spin.setSuffix(" Hz")
+        self.spec_freq_max_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
+        self.spec_freq_max_spin.setEnabled(False)
+        self.spec_freq_to_label = QLabel("to")
+        spec_freq_row.addWidget(self.spec_freq_label)
+        spec_freq_row.addWidget(self.spec_freq_min_spin)
+        spec_freq_row.addWidget(self.spec_freq_to_label)
+        spec_freq_row.addWidget(self.spec_freq_max_spin)
+        spec_freq_row.addStretch()
+        spec_layout.addLayout(spec_freq_row)
+
+        # Time limits
+        spec_time_row = QHBoxLayout()
+        self.spec_time_label = QLabel("Time Range:")
+        self.spec_time_min_spin = QDoubleSpinBox()
+        self.spec_time_min_spin.setRange(0.0, 100000.0)
+        self.spec_time_min_spin.setValue(0.0)
+        self.spec_time_min_spin.setSuffix(" s")
+        self.spec_time_min_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
+        self.spec_time_min_spin.setEnabled(False)
+        self.spec_time_max_spin = QDoubleSpinBox()
+        self.spec_time_max_spin.setRange(0.0, 100000.0)
+        self.spec_time_max_spin.setValue(10.0)
+        self.spec_time_max_spin.setSuffix(" s")
+        self.spec_time_max_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
+        self.spec_time_max_spin.setEnabled(False)
+        self.spec_time_to_label = QLabel("to")
+        spec_time_row.addWidget(self.spec_time_label)
+        spec_time_row.addWidget(self.spec_time_min_spin)
+        spec_time_row.addWidget(self.spec_time_to_label)
+        spec_time_row.addWidget(self.spec_time_max_spin)
+        spec_time_row.addStretch()
+        spec_layout.addLayout(spec_time_row)
+
+        spec_group.setLayout(spec_layout)
+        layout.addWidget(spec_group)
+
         layout.addStretch()
         self.tab_widget.addTab(tab, "Display")
     
@@ -693,15 +805,27 @@ class BatchProcessorWindow(QMainWindow):
                 border: 1px solid #4a5568;
                 border-radius: 4px;
                 padding: 4px;
+                padding-right: 20px;
             }
             QSpinBox::up-button, QDoubleSpinBox::up-button,
             QSpinBox::down-button, QDoubleSpinBox::down-button {
-                background-color: #4a5568;
-                border: none;
+                width: 20px;
+                background-color: #3d4758;
+                border: 1px solid #4a5568;
             }
             QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
             QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
-                background-color: #60a5fa;
+                background-color: #4d5768;
+            }
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-bottom: 5px solid #e0e0e0;
+            }
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 5px solid #e0e0e0;
             }
             QComboBox {
                 background-color: #2d3748;
@@ -802,6 +926,61 @@ class BatchProcessorWindow(QMainWindow):
             }
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
                 width: 0px;
+            }
+            /* File Dialog Styling for readability */
+            QFileDialog {
+                background-color: #1a1f2e;
+                color: #e0e0e0;
+            }
+            QFileDialog QWidget {
+                background-color: #1a1f2e;
+                color: #e0e0e0;
+            }
+            QFileDialog QListView, QFileDialog QTreeView {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                selection-background-color: #2563eb;
+            }
+            QFileDialog QListView::item, QFileDialog QTreeView::item {
+                color: #e0e0e0;
+                padding: 4px;
+            }
+            QFileDialog QListView::item:selected, QFileDialog QTreeView::item:selected {
+                background-color: #2563eb;
+                color: white;
+            }
+            QFileDialog QLineEdit {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                border-radius: 4px;
+                padding: 4px;
+            }
+            QFileDialog QComboBox {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+            }
+            QFileDialog QToolButton {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+            }
+            QFileDialog QHeaderView::section {
+                background-color: #1a1f2e;
+                color: #60a5fa;
+                border: 1px solid #4a5568;
+            }
+            QFileDialog QPushButton {
+                background-color: #2563eb;
+                color: white;
+                padding: 6px 16px;
+                border: none;
+                border-radius: 4px;
+            }
+            QFileDialog QPushButton:hover {
+                background-color: #1d4ed8;
             }
         """)
 
@@ -945,13 +1124,25 @@ class BatchProcessorWindow(QMainWindow):
         try:
             # Update configuration from UI
             self._update_config_from_ui()
-            
-            # Validate configuration
+
+            # Early validation before expensive operations
+            is_valid, error_msg = self._validate_configuration_before_run()
+            if not is_valid:
+                show_warning(self, "Configuration Issues", f"Please fix the following issues:\n\n{error_msg}")
+                logger.warning(f"Pre-validation failed: {error_msg}")
+                return
+
+            # Validate full configuration
             self.config.validate()
-            
+
+            # Show pre-processing summary and get confirmation
+            if not self._show_pre_processing_summary():
+                logger.info("Batch processing cancelled by user at summary")
+                return
+
             # Start batch processing in worker thread
             self._start_batch_processing()
-            
+
         except ValueError as e:
             show_warning(self, "Invalid Configuration", f"Configuration validation failed:\n{str(e)}")
             logger.warning(f"Configuration validation failed: {str(e)}")
@@ -984,6 +1175,7 @@ class BatchProcessorWindow(QMainWindow):
         self.config.psd_config.freq_max = self.freq_max_spin.value()
         self.config.psd_config.frequency_spacing = self.freq_spacing_combo.currentText()
         self.config.psd_config.remove_running_mean = self.remove_mean_checkbox.isChecked()
+        self.config.psd_config.running_mean_window = self.running_mean_window_spin.value()
         
         # Filter config
         self.config.filter_config.enabled = self.filter_enabled_checkbox.isChecked()
@@ -1000,7 +1192,7 @@ class BatchProcessorWindow(QMainWindow):
         self.config.spectrogram_config.snr_threshold = float(self.spec_snr_spin.value())
         self.config.spectrogram_config.colormap = self.colormap_combo.currentText()
         
-        # Display config
+        # Display config - PSD
         self.config.display_config.psd_auto_scale = self.psd_auto_scale_checkbox.isChecked()
         self.config.display_config.psd_x_axis_min = self.psd_x_min_spin.value()
         self.config.display_config.psd_x_axis_max = self.psd_x_max_spin.value()
@@ -1008,6 +1200,13 @@ class BatchProcessorWindow(QMainWindow):
         self.config.display_config.psd_y_axis_max = self.psd_y_max_spin.value()
         self.config.display_config.psd_show_legend = self.psd_show_legend_checkbox.isChecked()
         self.config.display_config.psd_show_grid = self.psd_show_grid_checkbox.isChecked()
+
+        # Display config - Spectrogram
+        self.config.display_config.spectrogram_auto_scale = self.spec_auto_scale_checkbox.isChecked()
+        self.config.display_config.spectrogram_freq_min = self.spec_freq_min_spin.value()
+        self.config.display_config.spectrogram_freq_max = self.spec_freq_max_spin.value()
+        self.config.display_config.spectrogram_time_min = self.spec_time_min_spin.value()
+        self.config.display_config.spectrogram_time_max = self.spec_time_max_spin.value()
         
         # Output config
         self.config.output_config.excel_enabled = self.excel_checkbox.isChecked()
@@ -1062,6 +1261,7 @@ class BatchProcessorWindow(QMainWindow):
             self.freq_spacing_combo.setCurrentIndex(spacing_index)
 
         self.remove_mean_checkbox.setChecked(self.config.psd_config.remove_running_mean)
+        self.running_mean_window_spin.setValue(self.config.psd_config.running_mean_window)
 
         # Filter tab
         self.filter_enabled_checkbox.setChecked(self.config.filter_config.enabled)
@@ -1091,8 +1291,12 @@ class BatchProcessorWindow(QMainWindow):
         if colormap_index >= 0:
             self.colormap_combo.setCurrentIndex(colormap_index)
 
-        # Display tab
+        # Display tab - PSD settings
         self.psd_auto_scale_checkbox.setChecked(self.config.display_config.psd_auto_scale)
+        # Trigger the auto-scale handler to set initial enabled states
+        self._on_psd_auto_scale_changed(
+            Qt.CheckState.Checked.value if self.config.display_config.psd_auto_scale else Qt.CheckState.Unchecked.value
+        )
         if self.config.display_config.psd_x_axis_min is not None:
             self.psd_x_min_spin.setValue(self.config.display_config.psd_x_axis_min)
         if self.config.display_config.psd_x_axis_max is not None:
@@ -1103,6 +1307,21 @@ class BatchProcessorWindow(QMainWindow):
             self.psd_y_max_spin.setValue(self.config.display_config.psd_y_axis_max)
         self.psd_show_legend_checkbox.setChecked(self.config.display_config.psd_show_legend)
         self.psd_show_grid_checkbox.setChecked(self.config.display_config.psd_show_grid)
+
+        # Display tab - Spectrogram settings
+        self.spec_auto_scale_checkbox.setChecked(self.config.display_config.spectrogram_auto_scale)
+        # Trigger the auto-scale handler to set initial enabled states
+        self._on_spec_auto_scale_changed(
+            Qt.CheckState.Checked.value if self.config.display_config.spectrogram_auto_scale else Qt.CheckState.Unchecked.value
+        )
+        if self.config.display_config.spectrogram_freq_min is not None:
+            self.spec_freq_min_spin.setValue(self.config.display_config.spectrogram_freq_min)
+        if self.config.display_config.spectrogram_freq_max is not None:
+            self.spec_freq_max_spin.setValue(self.config.display_config.spectrogram_freq_max)
+        if self.config.display_config.spectrogram_time_min is not None:
+            self.spec_time_min_spin.setValue(self.config.display_config.spectrogram_time_min)
+        if self.config.display_config.spectrogram_time_max is not None:
+            self.spec_time_max_spin.setValue(self.config.display_config.spectrogram_time_max)
 
         # Output tab
         self.excel_checkbox.setChecked(self.config.output_config.excel_enabled)
@@ -1209,6 +1428,163 @@ class BatchProcessorWindow(QMainWindow):
         self.load_config_btn.setEnabled(enabled)
         self.save_config_btn.setEnabled(enabled)
         self.run_batch_btn.setEnabled(enabled)
+
+    def _on_psd_auto_scale_changed(self, state: int):
+        """Handle PSD auto-scale checkbox state change."""
+        is_auto = state == Qt.CheckState.Checked.value
+        # Disable manual limit controls when auto-scale is enabled
+        self.psd_x_min_spin.setEnabled(not is_auto)
+        self.psd_x_max_spin.setEnabled(not is_auto)
+        self.psd_y_min_spin.setEnabled(not is_auto)
+        self.psd_y_max_spin.setEnabled(not is_auto)
+        # Update label styling to indicate disabled state
+        style = "color: #6b7280;" if is_auto else "color: #e0e0e0;"
+        self.psd_x_label.setStyleSheet(style)
+        self.psd_x_to_label.setStyleSheet(style)
+        self.psd_y_label.setStyleSheet(style)
+        self.psd_y_to_label.setStyleSheet(style)
+
+    def _on_spec_auto_scale_changed(self, state: int):
+        """Handle spectrogram auto-scale checkbox state change."""
+        is_auto = state == Qt.CheckState.Checked.value
+        # Disable manual limit controls when auto-scale is enabled
+        self.spec_freq_min_spin.setEnabled(not is_auto)
+        self.spec_freq_max_spin.setEnabled(not is_auto)
+        self.spec_time_min_spin.setEnabled(not is_auto)
+        self.spec_time_max_spin.setEnabled(not is_auto)
+        # Update label styling to indicate disabled state
+        style = "color: #6b7280;" if is_auto else "color: #e0e0e0;"
+        self.spec_freq_label.setStyleSheet(style)
+        self.spec_freq_to_label.setStyleSheet(style)
+        self.spec_time_label.setStyleSheet(style)
+        self.spec_time_to_label.setStyleSheet(style)
+
+    def _validate_event_time(self, text: str) -> bool:
+        """Validate that event time text is a valid positive number."""
+        try:
+            value = float(text)
+            return value >= 0
+        except (ValueError, TypeError):
+            return False
+
+    def _validate_configuration_before_run(self) -> tuple:
+        """
+        Validate configuration before running batch processing.
+
+        Returns:
+        --------
+        tuple
+            (is_valid: bool, error_message: str or None)
+        """
+        errors = []
+
+        # Validate output directory exists
+        output_dir = self.output_dir_edit.text().strip()
+        if not output_dir:
+            errors.append("Output directory is not specified")
+        elif not Path(output_dir).exists():
+            errors.append(f"Output directory does not exist: {output_dir}")
+        elif not Path(output_dir).is_dir():
+            errors.append(f"Output path is not a directory: {output_dir}")
+
+        # Validate source files
+        if not self.config.source_files:
+            errors.append("No source files selected")
+
+        # Validate channels for HDF5
+        if self.config.source_type == "hdf5" and not self.selected_channels:
+            errors.append("No channels selected for HDF5 processing")
+
+        # Validate event times if events are defined
+        if not self.full_duration_checkbox.isChecked():
+            for row in range(self.events_table.rowCount()):
+                event_name = self.events_table.item(row, 0)
+                start_item = self.events_table.item(row, 1)
+                end_item = self.events_table.item(row, 2)
+
+                if event_name and start_item and end_item:
+                    name = event_name.text()
+                    if not self._validate_event_time(start_item.text()):
+                        errors.append(f"Event '{name}': Invalid start time")
+                    if not self._validate_event_time(end_item.text()):
+                        errors.append(f"Event '{name}': Invalid end time")
+                    else:
+                        try:
+                            start = float(start_item.text())
+                            end = float(end_item.text())
+                            if start >= end:
+                                errors.append(f"Event '{name}': Start time must be less than end time")
+                        except ValueError:
+                            pass  # Already caught above
+
+            if self.events_table.rowCount() == 0:
+                errors.append("No events defined and 'Process Full Duration' is unchecked")
+
+        if errors:
+            return False, "\n".join(errors)
+        return True, None
+
+    def _show_pre_processing_summary(self) -> bool:
+        """
+        Show pre-processing summary and get user confirmation.
+
+        Returns:
+        --------
+        bool
+            True if user confirms, False otherwise
+        """
+        # Build summary
+        summary_lines = []
+
+        # Source files
+        num_files = len(self.config.source_files)
+        summary_lines.append(f"Source Files: {num_files} {self.config.source_type.upper()} file(s)")
+
+        # Channels
+        num_channels = len(self.selected_channels)
+        summary_lines.append(f"Channels: {num_channels} selected")
+
+        # Events
+        if self.full_duration_checkbox.isChecked():
+            summary_lines.append("Events: Full duration processing")
+        else:
+            num_events = self.events_table.rowCount()
+            summary_lines.append(f"Events: {num_events} defined event(s)")
+
+        # Processing options
+        options = []
+        if self.config.filter_config.enabled:
+            options.append("Filtering")
+        if self.config.psd_config.remove_running_mean:
+            options.append("Mean removal")
+        if self.config.spectrogram_config.enabled:
+            options.append("Spectrograms")
+        summary_lines.append(f"Processing: {', '.join(options) if options else 'PSD only'}")
+
+        # Output formats
+        outputs = []
+        if self.excel_checkbox.isChecked():
+            outputs.append("Excel")
+        if self.csv_checkbox.isChecked():
+            outputs.append("CSV")
+        if self.powerpoint_checkbox.isChecked():
+            outputs.append("PowerPoint")
+        if self.hdf5_checkbox.isChecked():
+            outputs.append("HDF5")
+        summary_lines.append(f"Outputs: {', '.join(outputs)}")
+        summary_lines.append(f"Output Directory: {self.output_dir_edit.text()}")
+
+        # Total operations estimate
+        total_ops = num_channels * (1 if self.full_duration_checkbox.isChecked() else max(1, self.events_table.rowCount()))
+        summary_lines.append(f"\nTotal PSD calculations: ~{total_ops}")
+
+        summary_text = "\n".join(summary_lines)
+
+        return show_question(
+            self,
+            "Confirm Batch Processing",
+            f"Ready to start batch processing:\n\n{summary_text}\n\nProceed?"
+        )
 
 
 if __name__ == "__main__":

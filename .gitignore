@@ -32,6 +32,11 @@ Thumbs.db
 logs/*.log
 logs/*.log.*
 
+# Local tooling
+.claude/
+nul
+
 # Test data (large files)
 data/*.hdf5
 data/batch_test_output/
+data/sample_vibration_data.csv

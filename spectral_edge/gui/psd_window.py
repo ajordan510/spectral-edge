@@ -11,7 +11,8 @@ Author: SpectralEdge Development Team
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QFileDialog,
-    QGroupBox, QGridLayout, QMessageBox, QCheckBox, QScrollArea, QTabWidget, QLineEdit
+    QGroupBox, QGridLayout, QMessageBox, QCheckBox, QScrollArea, QTabWidget, QLineEdit,
+    QDialog
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -41,6 +42,88 @@ from spectral_edge.gui.input_validator import ParameterValidator
 from spectral_edge.gui.parameter_tooltips import apply_tooltips_to_window
 from spectral_edge.gui.parameter_presets import PresetManager, apply_preset_to_window
 
+
+class ChannelSelectorDialog(QDialog):
+    """Pop-out dialog for channel selection."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Channel Selection")
+        self.setMinimumSize(280, 300)
+        self.setModal(False)
+
+        self.channel_checkboxes = []
+        self.channel_layout = None
+
+        self._apply_styling()
+        self._create_ui()
+
+    def _apply_styling(self):
+        """Apply dark theme styling consistent with main GUI."""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1a1f2e;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+            QGroupBox {
+                color: #e0e0e0;
+                border: 2px solid #4a5568;
+                border-radius: 5px;
+                margin-top: 10px;
+                font-weight: bold;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+            }
+            QCheckBox {
+                color: #e0e0e0;
+                padding: 5px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #4a5568;
+                border-radius: 3px;
+                background-color: #2d3748;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #60a5fa;
+                border-color: #60a5fa;
+            }
+            QScrollArea {
+                border: none;
+                background-color: #1a1f2e;
+            }
+            QWidget#channelWidget {
+                background-color: #1a1f2e;
+            }
+        """)
+
+    def _create_ui(self):
+        """Create channel selector UI."""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        group = QGroupBox("Channel Selection")
+        group_layout = QVBoxLayout(group)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumHeight(200)
+
+        channel_widget = QWidget()
+        channel_widget.setObjectName("channelWidget")
+        self.channel_layout = QVBoxLayout(channel_widget)
+        self.channel_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        scroll.setWidget(channel_widget)
+        group_layout.addWidget(scroll)
+
+        layout.addWidget(group)
 
 class ScientificAxisItem(pg.AxisItem):
     """
@@ -121,6 +204,7 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Channel selection checkboxes
         self.channel_checkboxes = []
+        self.channel_selector_dialog = None
         
         # Spectrogram windows
         self.spectrogram_windows = {}
@@ -291,10 +375,6 @@ class PSDAnalysisWindow(QMainWindow):
         file_group = self._create_file_group()
         layout.addWidget(file_group)
         
-        # Channel selection group (always visible)
-        self.channel_group = self._create_channel_group()
-        layout.addWidget(self.channel_group)
-        
         # Create tabbed interface for parameters and options
         tab_widget = QTabWidget()
         tab_widget.setStyleSheet("""
@@ -417,6 +497,13 @@ class PSDAnalysisWindow(QMainWindow):
         self.event_button.setEnabled(False)
         self.event_button.clicked.connect(self._open_event_manager)
         layout.addWidget(self.event_button)
+
+        # Channel selector button
+        self.channel_selector_button = QPushButton("Channels")
+        self.channel_selector_button.setEnabled(False)
+        self.channel_selector_button.setToolTip("Open channel selection window")
+        self.channel_selector_button.clicked.connect(self._toggle_channel_selector)
+        layout.addWidget(self.channel_selector_button)
         
         # Clear Events button
         self.clear_events_button = QPushButton("Clear Events")
@@ -777,27 +864,36 @@ class PSDAnalysisWindow(QMainWindow):
             show_critical(self, "Load Failed", f"Failed to load configuration:\n{e}")
     
     def _create_channel_group(self):
-        """Create the channel selection group box."""
-        group = QGroupBox("Channel Selection")
-        layout = QVBoxLayout()
-        
-        # Scroll area for channel checkboxes
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setMinimumHeight(80)  # Minimum height for at least 2-3 channels
-        scroll.setMaximumHeight(250)  # Increased from 150 to 250 for better visibility
-        
-        self.channel_widget = QWidget()
-        self.channel_widget.setObjectName("channelWidget")  # For styling
-        self.channel_layout = QVBoxLayout(self.channel_widget)
-        self.channel_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        
-        scroll.setWidget(self.channel_widget)
-        layout.addWidget(scroll)
-        
-        group.setLayout(layout)
-        group.setVisible(False)  # Hidden until data is loaded
-        return group
+        """Deprecated: channel selection is now a pop-out dialog."""
+        return None
+
+    def _ensure_channel_selector_dialog(self):
+        """Ensure channel selector dialog exists."""
+        if self.channel_selector_dialog is None:
+            self.channel_selector_dialog = ChannelSelectorDialog(self)
+        return self.channel_selector_dialog
+
+    def _position_channel_selector(self):
+        """Position channel selector to the right of the main window."""
+        dialog = self._ensure_channel_selector_dialog()
+        main_geom = self.geometry()
+        gap = 12
+        width = max(280, int(main_geom.width() * 0.35))
+        height = int(main_geom.height() * 0.7)
+        x = main_geom.x() + main_geom.width() + gap
+        y = main_geom.y() + int(main_geom.height() * 0.1)
+        dialog.setGeometry(x, y, width, height)
+
+    def _toggle_channel_selector(self):
+        """Show or hide the channel selector dialog."""
+        dialog = self._ensure_channel_selector_dialog()
+        if dialog.isVisible():
+            dialog.hide()
+        else:
+            self._position_channel_selector()
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
     
     def _create_frequency_range_group(self):
         """Create the frequency range input group box."""
@@ -2155,17 +2251,43 @@ class PSDAnalysisWindow(QMainWindow):
         for checkbox in self.channel_checkboxes:
             checkbox.deleteLater()
         self.channel_checkboxes.clear()
+
+        dialog = self._ensure_channel_selector_dialog()
+        if dialog.channel_layout is None:
+            return
+        # Clear existing widgets in dialog layout
+        while dialog.channel_layout.count():
+            item = dialog.channel_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
         
         # Create new checkboxes
+        multi_rate = False
+        if self.channel_sample_rates:
+            multi_rate = len(set(self.channel_sample_rates)) > 1
+
         for i, channel_name in enumerate(self.channel_names):
-            checkbox = QCheckBox(channel_name)
+            unit = self.channel_units[i] if i < len(self.channel_units) else ""
+            display_name = channel_name
+            if unit:
+                display_name = f"{display_name} ({unit})"
+            if multi_rate and i < len(self.channel_sample_rates):
+                sr = self.channel_sample_rates[i]
+                if unit:
+                    display_name = f"{channel_name} ({unit}, {sr:.0f} Hz)"
+                else:
+                    display_name = f"{channel_name} ({sr:.0f} Hz)"
+
+            checkbox = QCheckBox(display_name)
             checkbox.setChecked(True)  # All channels selected by default
             checkbox.stateChanged.connect(self._on_channel_selection_changed)
-            self.channel_layout.addWidget(checkbox)
+            dialog.channel_layout.addWidget(checkbox)
             self.channel_checkboxes.append(checkbox)
         
-        # Show the channel group
-        self.channel_group.setVisible(True)
+        # Enable channel selector button
+        if self.channel_selector_button is not None:
+            self.channel_selector_button.setEnabled(True)
     
     def _on_channel_selection_changed(self):
         """Handle channel selection changes."""
@@ -3354,31 +3476,14 @@ class PSDAnalysisWindow(QMainWindow):
                     f"Channels: {len(self.channel_names)} (Full resolution)"
                 )
             
-            # Show channel selection group
-            self.channel_group.setVisible(True)
-            
-            # Clear previous channel checkboxes
-            for checkbox in self.channel_checkboxes:
-                checkbox.deleteLater()
-            self.channel_checkboxes.clear()
-            
-            # Create checkboxes for all channels
-            for i, (name, unit, sr) in enumerate(zip(self.channel_names, self.channel_units, self.channel_sample_rates)):
-                # Include sample rate if channels have different rates
-                if len(set(self.channel_sample_rates)) > 1:
-                    display_name = f"{name} ({unit}, {sr:.0f} Hz)" if unit else f"{name} ({sr:.0f} Hz)"
-                else:
-                    display_name = f"{name} ({unit})" if unit else name
-                checkbox = QCheckBox(display_name)
-                checkbox.setChecked(True)
-                checkbox.stateChanged.connect(self._plot_time_history)
-                self.channel_layout.addWidget(checkbox)
-                self.channel_checkboxes.append(checkbox)
+            # Create channel selection checkboxes
+            self._create_channel_checkboxes()
             
             # Enable buttons
             self.calc_button.setEnabled(True)
             self.spec_button.setEnabled(True)
             self.event_button.setEnabled(True)
+            self.channel_selector_button.setEnabled(True)
             self.cross_spectrum_button.setEnabled(len(self.channel_names) >= 2)
             self.report_button.setEnabled(PPTX_AVAILABLE)
             self.statistics_button.setEnabled(True)

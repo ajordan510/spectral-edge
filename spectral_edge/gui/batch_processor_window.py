@@ -1111,6 +1111,12 @@ class BatchProcessorWindow(QMainWindow):
         
         if file_path:
             try:
+                is_valid, error_msg = self._validate_events_table()
+                if not is_valid:
+                    show_warning(self, "Configuration Issues", f"Please fix the following issues:\n\n{error_msg}")
+                    logger.warning(f"Pre-validation failed: {error_msg}")
+                    return
+
                 self._update_config_from_ui()
                 self.config.save(file_path)
                 show_information(self, "Configuration Saved", f"Configuration saved to:\n{file_path}")
@@ -1496,6 +1502,18 @@ class BatchProcessorWindow(QMainWindow):
             errors.append("No channels selected for HDF5 processing")
 
         # Validate event times if events are defined
+        events_valid, events_error = self._validate_events_table()
+        if not events_valid:
+            errors.append(events_error)
+
+        if errors:
+            return False, "\n".join(errors)
+        return True, None
+
+    def _validate_events_table(self) -> tuple:
+        """Validate event table entries."""
+        errors = []
+
         if not self.full_duration_checkbox.isChecked():
             for row in range(self.events_table.rowCount()):
                 event_name = self.events_table.item(row, 0)

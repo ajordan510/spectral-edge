@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
+import json
 import pyqtgraph as pg
 import numpy as np
 from pathlib import Path
@@ -216,6 +217,13 @@ class PSDAnalysisWindow(QMainWindow):
                 border-left: 5px solid transparent;
                 border-right: 5px solid transparent;
                 border-top: 5px solid #e0e0e0;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                selection-background-color: #3b82f6;
+                selection-color: #ffffff;
+                border: 1px solid #4a5568;
             }
             QSpinBox::up-button, QDoubleSpinBox::up-button,
             QSpinBox::down-button, QDoubleSpinBox::down-button {
@@ -481,6 +489,16 @@ class PSDAnalysisWindow(QMainWindow):
         load_hdf5_button = QPushButton("Load HDF5 File")
         load_hdf5_button.clicked.connect(self._load_hdf5_file)
         layout.addWidget(load_hdf5_button)
+
+        # Configuration buttons
+        config_button_layout = QHBoxLayout()
+        self.load_config_button = QPushButton("Load Configuration")
+        self.load_config_button.clicked.connect(self._load_psd_config)
+        config_button_layout.addWidget(self.load_config_button)
+        self.save_config_button = QPushButton("Save Configuration")
+        self.save_config_button.clicked.connect(self._save_psd_config)
+        config_button_layout.addWidget(self.save_config_button)
+        layout.addLayout(config_button_layout)
         
         # File info labels
         self.info_label = QLabel("")
@@ -489,6 +507,274 @@ class PSDAnalysisWindow(QMainWindow):
         
         group.setLayout(layout)
         return group
+
+    def _get_psd_config(self):
+        """Collect current PSD GUI configuration for save."""
+        def _safe_float(text):
+            try:
+                return float(text)
+            except (TypeError, ValueError):
+                return None
+
+        events = []
+        if self.event_manager is not None:
+            for idx, event in enumerate(self.event_manager.events):
+                enabled = True
+                item = self.event_manager.table.item(idx, 0)
+                if item is not None:
+                    enabled = item.checkState() == Qt.CheckState.Checked
+                events.append({
+                    "name": event.name,
+                    "start": event.start_time,
+                    "end": event.end_time,
+                    "enabled": enabled
+                })
+        else:
+            for event in self.events:
+                events.append({
+                    "name": event.name,
+                    "start": event.start_time,
+                    "end": event.end_time,
+                    "enabled": True
+                })
+
+        return {
+            "config_version": 1,
+            "parameters": {
+                "preset_key": self.preset_combo.currentData(),
+                "window": self.window_combo.currentText().lower(),
+                "df": self.df_spin.value(),
+                "overlap": self.overlap_spin.value(),
+                "efficient_fft": self.efficient_fft_checkbox.isChecked(),
+                "maximax_enabled": self.maximax_checkbox.isChecked(),
+                "maximax_window": self.maximax_window_spin.value(),
+                "maximax_overlap": self.maximax_overlap_spin.value(),
+                "freq_min": self.freq_min_spin.value(),
+                "freq_max": self.freq_max_spin.value(),
+            },
+            "display": {
+                "show_crosshair": self.show_crosshair_checkbox.isChecked(),
+                "remove_mean": self.remove_mean_checkbox.isChecked(),
+                "octave_enabled": self.octave_checkbox.isChecked(),
+                "octave_fraction": self.octave_combo.currentData(),
+                "x_min": _safe_float(self.x_min_edit.text()),
+                "x_max": _safe_float(self.x_max_edit.text()),
+                "y_min": _safe_float(self.y_min_edit.text()),
+                "y_max": _safe_float(self.y_max_edit.text()),
+            },
+            "filters": {
+                "enabled": self.enable_filter_checkbox.isChecked(),
+                "filter_type": self.filter_type_combo.currentText().lower(),
+                "filter_design": self.filter_design_combo.currentText().lower(),
+                "filter_order": self.filter_order_spin.value(),
+                "cutoff_freq": self.cutoff_freq_spin.value(),
+                "low_cutoff": self.low_cutoff_spin.value(),
+                "high_cutoff": self.high_cutoff_spin.value(),
+            },
+            "events": events,
+        }
+
+    def _apply_psd_config(self, config: dict):
+        """Apply PSD GUI configuration from a dict."""
+        errors = []
+
+        def _set_combo(combo, value, label, transform=None):
+            if value is None:
+                return
+            text = transform(value) if transform else str(value)
+            idx = combo.findText(text)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            else:
+                errors.append(f"{label}: Unknown option '{value}'")
+
+        def _set_spin(spin, value, label):
+            if value is None:
+                return
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                errors.append(f"{label}: Invalid value '{value}'")
+                return
+            if num < spin.minimum() or num > spin.maximum():
+                errors.append(f"{label}: Value {num} out of range")
+                return
+            spin.setValue(num)
+
+        def _set_checkbox(checkbox, value, label):
+            if value is None:
+                return
+            if not isinstance(value, bool):
+                errors.append(f"{label}: Expected boolean value")
+                return
+            checkbox.setChecked(value)
+
+        params = config.get("parameters", {})
+        self.applying_preset = True
+        try:
+            _set_combo(self.window_combo, params.get("window"), "Window", lambda v: str(v).capitalize())
+            _set_spin(self.df_spin, params.get("df"), "df")
+            _set_spin(self.overlap_spin, params.get("overlap"), "Overlap")
+            _set_checkbox(self.efficient_fft_checkbox, params.get("efficient_fft"), "Efficient FFT")
+            _set_checkbox(self.maximax_checkbox, params.get("maximax_enabled"), "Maximax enabled")
+            _set_spin(self.maximax_window_spin, params.get("maximax_window"), "Maximax window")
+            _set_spin(self.maximax_overlap_spin, params.get("maximax_overlap"), "Maximax overlap")
+            _set_spin(self.freq_min_spin, params.get("freq_min"), "Frequency min")
+            _set_spin(self.freq_max_spin, params.get("freq_max"), "Frequency max")
+        finally:
+            self.applying_preset = False
+
+        # Set preset to Custom after loading explicit parameters
+        if self.preset_combo.currentData() != "custom":
+            self.preset_combo.blockSignals(True)
+            self.preset_combo.setCurrentIndex(0)
+            self.preset_combo.blockSignals(False)
+
+        display = config.get("display", {})
+        _set_checkbox(self.show_crosshair_checkbox, display.get("show_crosshair"), "Show crosshair")
+        _set_checkbox(self.remove_mean_checkbox, display.get("remove_mean"), "Remove mean")
+        _set_checkbox(self.octave_checkbox, display.get("octave_enabled"), "Octave display")
+        if display.get("octave_fraction") is not None:
+            idx = self.octave_combo.findData(display.get("octave_fraction"))
+            if idx >= 0:
+                self.octave_combo.setCurrentIndex(idx)
+            else:
+                errors.append(f"Octave fraction: Unknown value '{display.get('octave_fraction')}'")
+
+        def _set_axis_text(edit, value, label):
+            if value is None:
+                return
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                errors.append(f"{label}: Invalid value '{value}'")
+                return
+            edit.setText(str(num))
+
+        _set_axis_text(self.x_min_edit, display.get("x_min"), "X min")
+        _set_axis_text(self.x_max_edit, display.get("x_max"), "X max")
+        _set_axis_text(self.y_min_edit, display.get("y_min"), "Y min")
+        _set_axis_text(self.y_max_edit, display.get("y_max"), "Y max")
+
+        filters = config.get("filters", {})
+        _set_checkbox(self.enable_filter_checkbox, filters.get("enabled"), "Filter enabled")
+        _set_combo(self.filter_type_combo, filters.get("filter_type"), "Filter type", lambda v: str(v).capitalize())
+        _set_combo(self.filter_design_combo, filters.get("filter_design"), "Filter design", lambda v: str(v).capitalize())
+        _set_spin(self.filter_order_spin, filters.get("filter_order"), "Filter order")
+        _set_spin(self.cutoff_freq_spin, filters.get("cutoff_freq"), "Cutoff frequency")
+        _set_spin(self.low_cutoff_spin, filters.get("low_cutoff"), "Low cutoff")
+        _set_spin(self.high_cutoff_spin, filters.get("high_cutoff"), "High cutoff")
+
+        events = config.get("events", [])
+        if isinstance(events, list):
+            parsed_events = []
+            enabled_flags = []
+            max_time_limit = None
+            if self.time_data_full is not None and len(self.time_data_full) > 0:
+                max_time_limit = self.time_data_full[-1]
+
+            for idx, event in enumerate(events, start=1):
+                if not isinstance(event, dict):
+                    errors.append(f"Event {idx}: Invalid event format")
+                    continue
+                name = event.get("name") or f"Event {idx}"
+                start = event.get("start")
+                if start is None:
+                    start = event.get("start_time")
+                end = event.get("end")
+                if end is None:
+                    end = event.get("end_time")
+                try:
+                    start = float(start)
+                    end = float(end)
+                except (TypeError, ValueError):
+                    errors.append(f"{name}: Invalid start/end values")
+                    continue
+                if start < 0 or end <= start:
+                    errors.append(f"{name}: Start/end values are invalid")
+                    continue
+                if max_time_limit is not None and end > max_time_limit:
+                    errors.append(f"{name}: End time exceeds loaded data duration")
+                    continue
+                enabled = event.get("enabled", True)
+                enabled_flags.append(bool(enabled))
+                parsed_events.append(Event(name, start, end))
+
+            if events == []:
+                self._on_events_updated([])
+            elif parsed_events:
+                if max_time_limit is not None:
+                    max_time = max_time_limit
+                else:
+                    max_time = max(e.end_time for e in parsed_events)
+
+                if self.event_manager is None:
+                    self.event_manager = EventManagerWindow(max_time=max_time)
+                    self.event_manager.events_updated.connect(self._on_events_updated)
+                    self.event_manager.interactive_mode_changed.connect(self._on_interactive_mode_changed)
+                else:
+                    self.event_manager.set_max_time(max_time)
+
+                self.event_manager.events = parsed_events
+                self.event_manager._update_table()
+
+                for i, enabled in enumerate(enabled_flags):
+                    item = self.event_manager.table.item(i, 0)
+                    if item is not None:
+                        item.setCheckState(
+                            Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked
+                        )
+
+                enabled_events = [e for e, enabled in zip(parsed_events, enabled_flags) if enabled]
+                self._on_events_updated(enabled_events)
+
+        if self.signal_data_display is not None:
+            self._apply_axis_limits()
+
+        return errors
+
+    def _save_psd_config(self):
+        """Save PSD GUI configuration to JSON file."""
+        default_name = "PSD_Config.json"
+        if self.current_file:
+            default_name = f"PSD_Config_{Path(self.current_file).stem}.json"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save PSD Configuration",
+            default_name,
+            "JSON Files (*.json);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        try:
+            config = self._get_psd_config()
+            with open(file_path, "w") as f:
+                json.dump(config, f, indent=2)
+            show_information(self, "Configuration Saved", f"Configuration saved to:\n{file_path}")
+        except Exception as e:
+            show_critical(self, "Save Failed", f"Failed to save configuration:\n{e}")
+
+    def _load_psd_config(self):
+        """Load PSD GUI configuration from JSON file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load PSD Configuration",
+            "",
+            "JSON Files (*.json);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "r") as f:
+                config = json.load(f)
+            errors = self._apply_psd_config(config)
+            if errors:
+                show_warning(self, "Configuration Issues", "\n".join(errors))
+            show_information(self, "Configuration Loaded", f"Configuration loaded from:\n{file_path}")
+        except Exception as e:
+            show_critical(self, "Load Failed", f"Failed to load configuration:\n{e}")
     
     def _create_channel_group(self):
         """Create the channel selection group box."""

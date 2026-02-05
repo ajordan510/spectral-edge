@@ -345,8 +345,8 @@ class EventManagerWindow(QMainWindow):
         """Remove selected event."""
         current_row = self.table.currentRow()
         if current_row >= 0 and current_row < len(self.events):
-            # Don't allow removing the "Full" event if it's the first one
-            if current_row == 0 and self.events[0].name == "Full":
+            # Allow removing "Full" only if at least one other event exists
+            if current_row == 0 and self.events[0].name == "Full" and len(self.events) == 1:
                 show_warning(self, "Cannot Remove", "The 'Full' event cannot be removed.")
                 return
             
@@ -463,17 +463,17 @@ class EventManagerWindow(QMainWindow):
             
             elif column == 2:  # Start time
                 start_time = float(self.table.item(row, column).text())
-                if 0 <= start_time < event.end_time:
+                if start_time >= 0:
                     event.start_time = start_time
                 else:
-                    raise ValueError("Start time must be >= 0 and < end time")
+                    raise ValueError("Start time must be >= 0")
             
             elif column == 3:  # End time
                 end_time = float(self.table.item(row, column).text())
-                if end_time > event.start_time and end_time <= self.max_time:
+                if end_time <= self.max_time:
                     event.end_time = end_time
                 else:
-                    raise ValueError(f"End time must be > start time and <= {self.max_time:.3f}")
+                    raise ValueError(f"End time must be <= {self.max_time:.3f}")
             
             # Update duration
             self._update_table()
@@ -481,9 +481,27 @@ class EventManagerWindow(QMainWindow):
         except ValueError as e:
             show_warning(self, "Invalid Value", str(e))
             self._update_table()  # Reset to previous values
+
+    def _validate_events_for_apply(self):
+        """Validate events before applying or saving."""
+        errors = []
+        for idx, event in enumerate(self.events, start=1):
+            label = event.name or f"Event {idx}"
+            if event.start_time < 0:
+                errors.append(f"{label}: Start time must be >= 0")
+            if event.end_time > self.max_time:
+                errors.append(f"{label}: End time must be <= {self.max_time:.3f}")
+            if event.start_time >= event.end_time:
+                errors.append(f"{label}: Start time must be less than end time")
+        return errors
     
     def _save_events(self):
         """Save events to JSON file."""
+        errors = self._validate_events_for_apply()
+        if errors:
+            show_warning(self, "Invalid Events", "\n".join(errors))
+            return
+
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Events",
@@ -533,6 +551,11 @@ class EventManagerWindow(QMainWindow):
     
     def _apply_events(self):
         """Apply events and emit signal."""
+        errors = self._validate_events_for_apply()
+        if errors:
+            show_warning(self, "Invalid Events", "\n".join(errors))
+            return
+
         # Get enabled events
         enabled_events = []
         for i, event in enumerate(self.events):

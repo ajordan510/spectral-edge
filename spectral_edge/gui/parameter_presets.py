@@ -38,12 +38,12 @@ BUILTIN_PRESETS = {
         description='Standard aerospace vibration testing per SMC-S-016',
         parameters={
             'window': 'hann',
-            'df': 1.0,
+            'df': 5.0,
             'overlap': 50,
             'maximax_enabled': True,
             'maximax_window': 1.0,
             'maximax_overlap': 50,
-            'efficient_fft': True,
+            'efficient_fft': False,
             'freq_min': 10.0,
             'freq_max': 3000.0,
         }

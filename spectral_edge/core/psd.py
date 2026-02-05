@@ -567,10 +567,15 @@ def calculate_rms_from_psd(frequencies: np.ndarray, psd: np.ndarray,
         if freq_min >= freq_max:
             raise ValueError(f"freq_min ({freq_min}) must be less than freq_max ({freq_max})")
         
-        if freq_min < frequencies[0] or freq_max > frequencies[-1]:
+        # Clamp to available frequency range (matches plot display behavior)
+        orig_min, orig_max = freq_min, freq_max
+        freq_min = max(freq_min, frequencies[0])
+        freq_max = min(freq_max, frequencies[-1])
+
+        if freq_min >= freq_max:
             raise ValueError(
-                f"Frequency range [{freq_min}, {freq_max}] Hz is outside "
-                f"available range [{frequencies[0]}, {frequencies[-1]}] Hz"
+                f"No valid frequency range after clamping: requested [{orig_min}, {orig_max}] Hz "
+                f"does not overlap available range [{frequencies[0]}, {frequencies[-1]}] Hz"
             )
         
         # Create mask for frequency range

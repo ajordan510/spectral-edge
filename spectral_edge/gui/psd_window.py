@@ -35,6 +35,7 @@ from spectral_edge.utils.message_box import show_information, show_warning, show
 from spectral_edge.utils.report_generator import ReportGenerator, export_plot_to_image, PPTX_AVAILABLE
 from spectral_edge.gui.cross_spectrum_window import CrossSpectrumWindow
 from spectral_edge.gui.statistics_window import create_statistics_window
+from spectral_edge.utils.theme import apply_context_menu_style
 
 
 class ScientificAxisItem(pg.AxisItem):
@@ -1461,6 +1462,7 @@ class PSDAnalysisWindow(QMainWindow):
         # Time history plot
         self.time_plot_widget = pg.PlotWidget()
         self.time_plot_widget.setBackground('#1a1f2e')
+        apply_context_menu_style(self.time_plot_widget)
         self.time_plot_widget.setLabel('left', 'Amplitude', color='#e0e0e0', size='11pt')
         self.time_plot_widget.setLabel('bottom', 'Time', units='s', color='#e0e0e0', size='11pt')
         self.time_plot_widget.setTitle("Time History", color='#60a5fa', size='12pt')
@@ -1487,6 +1489,7 @@ class PSDAnalysisWindow(QMainWindow):
             'left': ScientificAxisItem(orientation='left')
         })
         self.plot_widget.setBackground('#1a1f2e')
+        apply_context_menu_style(self.plot_widget)
         self.plot_widget.setLabel('left', 'PSD', units='', color='#e0e0e0', size='12pt')
         self.plot_widget.setLabel('bottom', 'Frequency (Hz)', color='#e0e0e0', size='12pt')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)

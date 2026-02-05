@@ -139,7 +139,7 @@ class TestCSVLoading:
     def test_csv_unicode_headers(self, tmp_path):
         """Test Unicode in channel names doesn't break loading."""
         csv_path = tmp_path / "unicode.csv"
-        csv_path.write_text("time,Beschleunigung_X (m/s²),Température (°C)\n0.0,1.0,25.0\n")
+        csv_path.write_text("time,Beschleunigung_X (m/s²),Température (°C)\n0.0,1.0,25.0\n", encoding='utf-8')
 
         import pandas as pd
         df = pd.read_csv(csv_path)

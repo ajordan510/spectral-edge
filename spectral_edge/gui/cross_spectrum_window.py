@@ -23,6 +23,7 @@ from spectral_edge.core.psd import (
     calculate_psd_welch
 )
 from spectral_edge.utils.message_box import show_warning, show_critical
+from spectral_edge.utils.theme import apply_context_menu_style
 
 
 class CrossSpectrumWindow(QMainWindow):
@@ -393,6 +394,7 @@ class CrossSpectrumWindow(QMainWindow):
             plot_widget.setLabel('left', y_label, color='#e0e0e0', size='11pt')
         plot_widget.showGrid(x=True, y=True, alpha=0.3)
         plot_widget.setMouseEnabled(x=True, y=True)
+        apply_context_menu_style(plot_widget)
 
     def _calculate(self):
         """Calculate cross-spectral analysis."""

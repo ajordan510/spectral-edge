@@ -27,6 +27,7 @@ from typing import List, Tuple, Optional, Dict
 
 from spectral_edge.utils.message_box import show_information, show_warning, show_critical
 from spectral_edge.utils.report_generator import ReportGenerator, export_plot_to_image, PPTX_AVAILABLE
+from spectral_edge.utils.theme import apply_context_menu_style
 
 
 class StatisticsWindow(QMainWindow):
@@ -384,6 +385,7 @@ class StatisticsWindow(QMainWindow):
         pdf_layout = QVBoxLayout(pdf_widget)
         self.pdf_plot = pg.PlotWidget()
         self.pdf_plot.setBackground('#1a1f2e')
+        apply_context_menu_style(self.pdf_plot)
         self.pdf_plot.setLabel('left', 'Probability Density', color='#e0e0e0')
         self.pdf_plot.setLabel('bottom', 'Value', color='#e0e0e0')
         self.pdf_plot.setTitle("Probability Density Function", color='#60a5fa')
@@ -397,6 +399,7 @@ class StatisticsWindow(QMainWindow):
         stats_layout = QVBoxLayout(stats_widget)
         self.running_stats_plot = pg.PlotWidget()
         self.running_stats_plot.setBackground('#1a1f2e')
+        apply_context_menu_style(self.running_stats_plot)
         self.running_stats_plot.setLabel('left', 'Value', color='#e0e0e0')
         self.running_stats_plot.setLabel('bottom', 'Time', units='s', color='#e0e0e0')
         self.running_stats_plot.setTitle("Running Statistics", color='#60a5fa')

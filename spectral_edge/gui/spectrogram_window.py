@@ -28,6 +28,7 @@ from scipy import signal as scipy_signal
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from spectral_edge.core.psd import get_window_options
+from spectral_edge.utils.theme import apply_context_menu_style
 
 
 class ColorBarItem(pg.GraphicsObject):
@@ -319,6 +320,7 @@ class SpectrogramWindow(QMainWindow):
         # Create plot widget
         plot_widget = pg.PlotWidget()
         plot_widget.setBackground('#1a1f2e')
+        apply_context_menu_style(plot_widget)
         plot_widget.showGrid(x=True, y=True, alpha=0.3)
         
         # Set labels

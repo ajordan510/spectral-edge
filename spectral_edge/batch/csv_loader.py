@@ -260,15 +260,16 @@ def _interpolate_nans(signal: np.ndarray) -> np.ndarray:
 def detect_csv_format(file_path: str) -> Dict[str, any]:
     """
     Analyze CSV file and detect its format.
-    
+
     This function provides information about the CSV file structure
-    without loading the full data.
-    
+    without loading the full data into memory. Uses efficient line counting
+    and reads only first/last rows for time estimation.
+
     Parameters:
     -----------
     file_path : str
         Path to CSV file
-        
+
     Returns:
     --------
     Dict[str, any]
@@ -282,8 +283,8 @@ def detect_csv_format(file_path: str) -> Dict[str, any]:
     """
     if not Path(file_path).exists():
         raise FileNotFoundError(f"CSV file not found: {file_path}")
-    
-    # Read first few rows to detect format
+
+    # Read first few rows to detect format and header
     try:
         df_sample = pd.read_csv(file_path, nrows=100)
         has_header = True
@@ -292,21 +293,45 @@ def detect_csv_format(file_path: str) -> Dict[str, any]:
         df_sample = pd.read_csv(file_path, header=None, nrows=100)
         has_header = False
         column_names = [f"column_{i}" for i in range(df_sample.shape[1])]
-    
-    # Get file info
-    df_full = pd.read_csv(file_path, header=0 if has_header else None)
-    num_rows = len(df_full)
-    num_columns = df_full.shape[1]
-    
-    # Estimate sample rate from time column
-    time_array = df_full.iloc[:100, 0].values
-    dt = np.median(np.diff(time_array))
-    estimated_sample_rate = 1.0 / dt
-    
-    # Estimate duration
-    time_full = df_full.iloc[:, 0].values
-    estimated_duration = time_full[-1] - time_full[0]
-    
+
+    num_columns = df_sample.shape[1]
+
+    # Count rows efficiently without loading full file
+    with open(file_path, 'r') as f:
+        num_rows = sum(1 for _ in f)
+    if has_header:
+        num_rows -= 1  # Subtract header row
+
+    # Estimate sample rate from first few rows
+    time_array = df_sample.iloc[:, 0].values
+    if len(time_array) > 1:
+        dt = np.median(np.diff(time_array))
+        estimated_sample_rate = 1.0 / dt if dt > 0 else 0.0
+    else:
+        estimated_sample_rate = 0.0
+
+    # Estimate duration using first time and row count
+    # Duration ≈ (num_rows - 1) / sample_rate
+    if estimated_sample_rate > 0:
+        estimated_duration = (num_rows - 1) / estimated_sample_rate
+    else:
+        # Fallback: read last few rows to get end time
+        try:
+            # Use skiprows to read only last 10 rows
+            df_tail = pd.read_csv(
+                file_path,
+                header=0 if has_header else None,
+                skiprows=range(1 if has_header else 0, max(1, num_rows - 10))
+            )
+            if len(df_tail) > 0:
+                first_time = time_array[0]
+                last_time = df_tail.iloc[-1, 0]
+                estimated_duration = last_time - first_time
+            else:
+                estimated_duration = 0.0
+        except Exception:
+            estimated_duration = 0.0
+
     return {
         'has_header': has_header,
         'num_columns': num_columns,

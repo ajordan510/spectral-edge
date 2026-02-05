@@ -410,20 +410,49 @@ class EnhancedFlightNavigator(QDialog):
     
     def _load_all_channels(self):
         """Load all channels from the HDF5 file into memory for filtering"""
+        from PyQt6.QtWidgets import QProgressDialog
+        from PyQt6.QtCore import Qt
+        
         self.all_channels = []
         locations = set()
         
+        # Count total channels for progress tracking
+        total_channels = sum(
+            len(self.loader.get_channel_keys(fk)) 
+            for fk in self.loader.get_flight_keys()
+        )
+        
+        # Create progress dialog (only shows if loading takes > 500ms)
+        progress = QProgressDialog(
+            "Loading channel information...", 
+            "Cancel", 
+            0, 
+            total_channels, 
+            self
+        )
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(500)  # Only show if takes > 0.5s
+        progress.setWindowTitle("Enhanced Flight Navigator")
+        
+        channel_count = 0
+        cancelled = False
+        
         for flight_key in self.loader.get_flight_keys():
+            if cancelled:
+                break
+                
             flight_info = self.loader.get_flight_info(flight_key)
             for channel_key in self.loader.get_channel_keys(flight_key):
+                # Update progress
+                progress.setValue(channel_count)
+                if progress.wasCanceled():
+                    cancelled = True
+                    break
+                
                 channel_info = self.loader.get_channel_info(flight_key, channel_key)
                 
-                # Get time range
-                time_data = self.loader.get_time_data(flight_key, channel_key)
-                if time_data is not None and len(time_data) > 0:
-                    time_range = f"{time_data[0]:.1f}s - {time_data[-1]:.1f}s"
-                else:
-                    time_range = "N/A"
+                # Get time range (OPTIMIZED: reads only first and last values)
+                time_range = self.loader.get_time_range(flight_key, channel_key)
                 
                 # Infer sensor type from channel units and name
                 sensor_type = self._infer_sensor_type(channel_key, channel_info)
@@ -441,6 +470,15 @@ class EnhancedFlightNavigator(QDialog):
                 # Collect unique locations
                 if hasattr(channel_info, 'location') and channel_info.location:
                     locations.add(channel_info.location)
+                
+                channel_count += 1
+        
+        progress.close()
+        
+        # If cancelled, close dialog and return
+        if cancelled:
+            self.reject()
+            return
         
         # Populate location filter
         for location in sorted(locations):

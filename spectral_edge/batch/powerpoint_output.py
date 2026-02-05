@@ -22,11 +22,11 @@ logger = logging.getLogger(__name__)
 
 
 def generate_powerpoint_report(
-    results: Dict[str, Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]]],
+    results,  # BatchProcessingResult object
     output_path: str,
     config: 'BatchConfig',
     title: str = "Batch PSD Processing Report"
-) -> None:
+) -> str:
     """
     Generate a PowerPoint presentation from batch processing results.
     
@@ -38,20 +38,10 @@ def generate_powerpoint_report(
     
     Parameters:
     -----------
-    results : Dict[str, Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]]]
-        Nested dictionary structure:
-        {
-            event_name: {
-                source_identifier: {
-                    channel_name: (frequencies, psd_values),
-                    ...
-                },
-                ...
-            },
-            ...
-        }
+    results : BatchProcessingResult
+        Batch processing results object
     output_path : str
-        Path to save the PowerPoint file
+        Directory path to save the PowerPoint file
     config : BatchConfig
         Batch configuration object
     title : str, optional
@@ -59,7 +49,8 @@ def generate_powerpoint_report(
         
     Returns:
     --------
-    None
+    str
+        Path to the saved PowerPoint file
     
     Raises:
     -------
@@ -68,28 +59,49 @@ def generate_powerpoint_report(
         
     Example:
     --------
-    >>> generate_powerpoint_report(results, 'batch_report.pptx', config)
+    >>> generate_powerpoint_report(results, '/tmp/output', config)
     """
     try:
-        # Initialize report generator
-        report_gen = ReportGenerator()
+        # Initialize report generator with title
+        report_gen = ReportGenerator(title=title)
         
         # Create title slide
         report_gen.add_title_slide(
-            title=title,
             subtitle=f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         
         # Add configuration summary slide
         _add_config_slide(report_gen, config)
         
+        # Transform BatchProcessingResult into event-organized structure
+        # Group results by event with nested structure: event -> flight -> channel -> (freq, psd)
+        events_data = {}
+        for (flight_key, channel_key), event_dict in results.channel_results.items():
+            for event_name, event_result in event_dict.items():
+                if event_name not in events_data:
+                    events_data[event_name] = {}
+                
+                # Create nested structure: flight_key -> channel_key -> (frequencies, psd)
+                if flight_key not in events_data[event_name]:
+                    events_data[event_name][flight_key] = {}
+                
+                events_data[event_name][flight_key][channel_key] = (
+                    event_result['frequencies'],
+                    event_result['psd']
+                )
+        
         # Add event slides
-        for event_name, event_results in results.items():
+        for event_name, event_results in events_data.items():
             _add_event_slide(report_gen, event_name, event_results, config)
         
         # Save presentation
-        report_gen.save(output_path)
-        logger.info(f"PowerPoint report saved: {output_path}")
+        from pathlib import Path
+        output_dir = Path(output_path)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        ppt_file = output_dir / "batch_psd_report.pptx"
+        report_gen.save(str(ppt_file))
+        logger.info(f"PowerPoint report saved: {ppt_file}")
+        return str(ppt_file)
         
     except Exception as e:
         logger.error(f"Failed to generate PowerPoint report: {str(e)}")
@@ -155,21 +167,19 @@ def _add_event_slide(
     # Create PSD plot
     fig = _create_psd_plot(event_name, event_results, config)
     
-    # Save plot to temporary file
-    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
-        temp_path = tmp_file.name
-        fig.savefig(temp_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
+    # Save plot to bytes
+    import io
+    img_buffer = io.BytesIO()
+    fig.savefig(img_buffer, format='png', dpi=300, bbox_inches='tight')
+    img_buffer.seek(0)
+    image_bytes = img_buffer.read()
+    plt.close(fig)
     
-    try:
-        # Add slide with plot
-        report_gen.add_image_slide(
-            title=f"Event: {event_name}",
-            image_path=temp_path
-        )
-    finally:
-        # Clean up temporary file
-        Path(temp_path).unlink()
+    # Add slide with plot
+    report_gen.add_psd_plot(
+        image_bytes=image_bytes,
+        title=f"Event: {event_name}"
+    )
 
 
 def _create_psd_plot(

@@ -98,6 +98,14 @@ class ProgressTracker:
         self.current_event = event_name
         self._emit_progress()
     
+    def finish_channel(self):
+        """
+        Mark the current channel as finished.
+        
+        This method emits a final progress update for the completed channel.
+        """
+        self._emit_progress()
+    
     def _emit_progress(self):
         """Calculate and emit progress information."""
         if self.progress_callback is None:

@@ -903,7 +903,25 @@ def convert_psd_to_octave_bands(
     
     if freq_min >= freq_max:
         raise ValueError(f"freq_min ({freq_min}) must be less than freq_max ({freq_max})")
-    
+
+    # Build a dense log-spaced frequency grid for robust band integration
+    log_min = np.log10(freq_min)
+    log_max = np.log10(freq_max)
+    points_per_decade = 300  # Balance robustness vs performance
+    n_points = max(200, int(np.ceil((log_max - log_min) * points_per_decade)))
+    dense_freqs = np.logspace(log_min, log_max, n_points)
+
+    # Interpolate PSD onto the dense grid (linear PSD values over log-frequency)
+    # Use base-10 log frequency for interpolation stability
+    log_freqs = np.log10(frequencies)
+    dense_log_freqs = np.log10(dense_freqs)
+
+    def _interp_psd(values: np.ndarray) -> np.ndarray:
+        # Requires at least 2 points for interpolation
+        if len(values) < 2:
+            return None
+        return np.interp(dense_log_freqs, log_freqs, values, left=values[0], right=values[-1])
+
     # Reference frequency for octave band calculation (ANSI/IEC standard)
     f_ref = 1000.0  # Hz
     
@@ -933,6 +951,19 @@ def convert_psd_to_octave_bands(
     # Determine if multi-channel
     is_multichannel = psd.ndim > 1
     n_channels = psd.shape[1] if is_multichannel else 1
+
+    # Interpolate PSD for robust integration
+    if is_multichannel:
+        interpolated_psd = np.zeros((len(dense_freqs), n_channels))
+        for ch in range(n_channels):
+            interp_values = _interp_psd(psd[:, ch])
+            if interp_values is None:
+                interpolated_psd = None
+                break
+            interpolated_psd[:, ch] = interp_values
+    else:
+        interp_values = _interp_psd(psd)
+        interpolated_psd = interp_values
     
     # Initialize output array
     if is_multichannel:
@@ -946,19 +977,32 @@ def convert_psd_to_octave_bands(
         f_lower = f_center / bandwidth_factor
         f_upper = f_center * bandwidth_factor
         
-        # Find narrowband frequencies within this octave band
-        band_mask = (frequencies >= f_lower) & (frequencies <= f_upper)
+        # Find dense frequencies within this octave band
+        band_mask = (dense_freqs >= f_lower) & (dense_freqs <= f_upper)
         
         if not np.any(band_mask):
-            # No data in this band - leave as zero
+            # No data in this band - leave as NaN to avoid broken segments
+            if is_multichannel:
+                octave_psd[i, :] = np.nan
+            else:
+                octave_psd[i] = np.nan
             continue
         
         # Extract frequencies and PSD for this band
-        band_frequencies = frequencies[band_mask]
-        if is_multichannel:
-            band_psd = psd[band_mask, :]
+        band_frequencies = dense_freqs[band_mask]
+        if interpolated_psd is not None:
+            band_psd = interpolated_psd[band_mask, :] if is_multichannel else interpolated_psd[band_mask]
         else:
-            band_psd = psd[band_mask]
+            # Fallback to original data if interpolation failed
+            band_mask = (frequencies >= f_lower) & (frequencies <= f_upper)
+            if not np.any(band_mask):
+                if is_multichannel:
+                    octave_psd[i, :] = np.nan
+                else:
+                    octave_psd[i] = np.nan
+                continue
+            band_frequencies = frequencies[band_mask]
+            band_psd = psd[band_mask, :] if is_multichannel else psd[band_mask]
         
         # Check for NaN or invalid values in band
         if is_multichannel:
@@ -972,7 +1016,6 @@ def convert_psd_to_octave_bands(
         
         # Need at least 2 points for trapezoidal integration
         if len(band_frequencies) < 2:
-            # Use single point value as average for this band
             if is_multichannel:
                 octave_psd[i, :] = band_psd[0, :]
             else:

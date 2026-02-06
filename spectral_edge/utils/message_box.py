@@ -18,6 +18,7 @@ Date: 2026-01-29
 
 from PyQt6.QtWidgets import QWidget, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPalette, QColor
 from typing import Optional
 
 
@@ -51,14 +52,23 @@ class CleanDialog(QDialog):
         self.setWindowTitle(title)
         self.setModal(True)
         self.result_value = None
+
+        self.setObjectName("cleanDialog")
+        self.setAutoFillBackground(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor("#1a1a1a"))
+        self.setPalette(palette)
         
         # Professional styling - clean and minimal
         self.setStyleSheet("""
-            QDialog {
+            QDialog#cleanDialog {
                 background-color: #ffffff;
                 border: 1px solid #d0d0d0;
             }
-            QLabel {
+            QDialog#cleanDialog QLabel {
+                background-color: #ffffff;
                 color: #1a1a1a;
                 font-size: 14px;
                 line-height: 1.6;
@@ -96,6 +106,7 @@ class CleanDialog(QDialog):
         message_label.setMinimumWidth(350)
         message_label.setMaximumWidth(600)
         message_label.setTextFormat(Qt.TextFormat.PlainText)
+        message_label.setStyleSheet("background-color: #ffffff; color: #1a1a1a;")
         layout.addWidget(message_label)
         
         # Button layout
@@ -159,10 +170,18 @@ class CleanDetailDialog(QDialog):
         self.setModal(True)
         self.setMinimumWidth(500)
         self.setMaximumWidth(800)
+
+        self.setObjectName("cleanDetailDialog")
+        self.setAutoFillBackground(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor("#1a1a1a"))
+        self.setPalette(palette)
         
         # Professional styling
         self.setStyleSheet("""
-            QDialog {
+            QDialog#cleanDetailDialog {
                 background-color: #ffffff;
                 border: 1px solid #d0d0d0;
             }
@@ -170,7 +189,7 @@ class CleanDetailDialog(QDialog):
                 color: #1a1a1a;
             }
             QTextEdit {
-                background-color: #f8f8f8;
+                background-color: #ffffff;
                 color: #1a1a1a;
                 border: 1px solid #d0d0d0;
                 border-radius: 3px;

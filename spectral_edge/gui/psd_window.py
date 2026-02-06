@@ -12,11 +12,13 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QFileDialog,
     QGroupBox, QGridLayout, QMessageBox, QCheckBox, QScrollArea, QTabWidget, QLineEdit,
-    QDialog
+    QDialog, QProgressDialog, QApplication
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 import json
+import os
+import io
 import pyqtgraph as pg
 import numpy as np
 from pathlib import Path
@@ -41,6 +43,15 @@ from spectral_edge.utils.theme import apply_context_menu_style
 from spectral_edge.gui.input_validator import ParameterValidator
 from spectral_edge.gui.parameter_tooltips import apply_tooltips_to_window
 from spectral_edge.gui.parameter_presets import PresetManager, apply_preset_to_window
+from spectral_edge.batch.spectrogram_generator import generate_spectrogram
+from spectral_edge.batch.statistics import compute_statistics, plot_pdf, plot_running_stat
+from spectral_edge.utils.plot_theme import (
+    apply_light_matplotlib_theme,
+    style_axes,
+    style_colorbar,
+    apply_axis_styling,
+    BASE_FONT_SIZE,
+)
 
 
 class ChannelSelectorDialog(QDialog):
@@ -124,6 +135,84 @@ class ChannelSelectorDialog(QDialog):
         group_layout.addWidget(scroll)
 
         layout.addWidget(group)
+
+
+class PSDReportOptionsDialog(QDialog):
+    """Prompt for PowerPoint report layout/toggles before report generation."""
+
+    LAYOUT_OPTIONS = [
+        ("time_psd_spec_one_slide", "Time + PSD + Spectrogram (one slide)"),
+        ("all_plots_individual", "All plots on individual slides"),
+        ("psd_spec_side_by_side", "PSD + Spectrogram (side-by-side)"),
+        ("psd_only", "PSD only"),
+        ("spectrogram_only", "Spectrogram only"),
+        ("time_history_only", "Time history only"),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Report Options")
+        self.setMinimumWidth(500)
+        self._build_ui()
+
+    @classmethod
+    def get_default_options(cls) -> dict:
+        """Return default report options without creating UI elements."""
+        return {
+            "layout": "psd_only",
+            "include_parameters": True,
+            "include_statistics": False,
+            "include_rms_table": False,
+            "include_3sigma_columns": False,
+        }
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("PowerPoint Layout:"))
+        self.layout_combo = QComboBox()
+        for value, label in self.LAYOUT_OPTIONS:
+            self.layout_combo.addItem(label, value)
+        self.layout_combo.setCurrentIndex(3)  # PSD only default
+        layout.addWidget(self.layout_combo)
+
+        self.include_parameters_checkbox = QCheckBox("Include calculation parameters")
+        self.include_parameters_checkbox.setChecked(True)
+        layout.addWidget(self.include_parameters_checkbox)
+
+        self.include_statistics_checkbox = QCheckBox("Include statistics slides")
+        self.include_statistics_checkbox.setChecked(False)
+        layout.addWidget(self.include_statistics_checkbox)
+
+        self.include_rms_table_checkbox = QCheckBox("Include RMS summary table")
+        self.include_rms_table_checkbox.setChecked(False)
+        layout.addWidget(self.include_rms_table_checkbox)
+
+        self.include_3sigma_checkbox = QCheckBox("Include 3-sigma columns in RMS summary")
+        self.include_3sigma_checkbox.setChecked(False)
+        self.include_3sigma_checkbox.setEnabled(False)
+        layout.addWidget(self.include_3sigma_checkbox)
+
+        self.include_rms_table_checkbox.toggled.connect(self.include_3sigma_checkbox.setEnabled)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        generate_btn = QPushButton("Continue")
+        generate_btn.clicked.connect(self.accept)
+        button_row.addWidget(cancel_btn)
+        button_row.addWidget(generate_btn)
+        layout.addLayout(button_row)
+
+    def get_options(self) -> dict:
+        return {
+            "layout": self.layout_combo.currentData(),
+            "include_parameters": self.include_parameters_checkbox.isChecked(),
+            "include_statistics": self.include_statistics_checkbox.isChecked(),
+            "include_rms_table": self.include_rms_table_checkbox.isChecked(),
+            "include_3sigma_columns": self.include_3sigma_checkbox.isChecked(),
+        }
 
 class ScientificAxisItem(pg.AxisItem):
     """
@@ -683,6 +772,8 @@ class PSDAnalysisWindow(QMainWindow):
             except (TypeError, ValueError):
                 errors.append(f"{label}: Invalid value '{value}'")
                 return
+            if isinstance(spin, QSpinBox):
+                num = int(round(num))
             if num < spin.minimum() or num > spin.maximum():
                 errors.append(f"{label}: Value {num} out of range")
                 return
@@ -1802,7 +1893,14 @@ class PSDAnalysisWindow(QMainWindow):
 
         from PyQt6.QtWidgets import QFileDialog
 
-        # Get save path
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            report_options = PSDReportOptionsDialog.get_default_options()
+        else:
+            options_dialog = PSDReportOptionsDialog(self)
+            if options_dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            report_options = options_dialog.get_options()
+
         default_name = f"PSD_Report_{self.current_file or 'analysis'}.pptx"
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -1810,13 +1908,11 @@ class PSDAnalysisWindow(QMainWindow):
             default_name,
             "PowerPoint Files (*.pptx)"
         )
-
         if not file_path:
             return
 
         try:
-            # Create report generator
-            title = f"PSD Analysis Report"
+            title = "PSD Analysis Report"
             if self.flight_name:
                 subtitle = f"Flight: {self.flight_name}"
             elif self.current_file:
@@ -1827,60 +1923,194 @@ class PSDAnalysisWindow(QMainWindow):
             report = ReportGenerator(title=title)
             report.add_title_slide(subtitle=subtitle)
 
-            # Export PSD plot
-            psd_image = export_plot_to_image(self.plot_widget)
-
-            # Build parameters dict
             parameters = {
                 "Window": self.window_combo.currentText(),
-                "Δf": f"{self.df_spin.value()} Hz",
+                "df": f"{self.df_spin.value()} Hz",
                 "Overlap": f"{self.overlap_spin.value()}%",
                 "Method": "Maximax" if self.maximax_checkbox.isChecked() else "Welch",
-                "Freq Range": f"{self.freq_min_spin.value()}-{self.freq_max_spin.value()} Hz"
+                "Frequency Range": f"{self.freq_min_spin.value()}-{self.freq_max_spin.value()} Hz",
+                "Efficient FFT": "On" if self.efficient_fft_checkbox.isChecked() else "Off",
             }
-
             if self.maximax_checkbox.isChecked():
                 parameters["Maximax Window"] = f"{self.maximax_window_spin.value()} s"
+                parameters["Maximax Overlap"] = f"{self.maximax_overlap_spin.value()}%"
 
-            # Get units
-            units = self.channel_units[0] if self.channel_units else ""
+            if report_options["include_parameters"]:
+                report.add_text_slide(
+                    title="Processing Parameters",
+                    content="\n".join([f"{key}: {value}" for key, value in parameters.items()])
+                )
 
-            # Add PSD plot slide
-            report.add_psd_plot(
-                psd_image,
-                title="Power Spectral Density",
-                parameters=parameters,
-                rms_values=self.rms_values,
-                units=units
-            )
-
-            # Add summary table
-            selected_channels = [
-                self.channel_names[i]
-                for i, cb in enumerate(self.channel_checkboxes)
-                if cb.isChecked()
-            ]
-            report.add_summary_table(
-                channels=selected_channels,
-                rms_values=self.rms_values,
-                units=units
-            )
-
-            # Export time history if visible
             time_image = export_plot_to_image(self.time_plot_widget)
-            report.add_comparison_plot(
-                time_image,
-                title="Time History",
-                description="Signal time history for analyzed channels"
-            )
+            psd_image = export_plot_to_image(self.plot_widget)
+            spec_image = None
+            if report_options["layout"] in {
+                "time_psd_spec_one_slide", "all_plots_individual", "psd_spec_side_by_side", "spectrogram_only"
+            }:
+                spec_image = self._create_report_spectrogram_image(report_options["layout"])
 
-            # Save report
+            selected_indices = self._get_selected_channel_indices()
+            channel_label = self.channel_names[selected_indices[0]] if selected_indices and self.channel_names else "Selected Channels"
+            flight_label = self.flight_name or (self.current_file or "Current Data")
+            slide_title = f"{flight_label} | Current View | {channel_label}"
+
+            layout = report_options["layout"]
+            if layout == "time_psd_spec_one_slide":
+                if time_image and psd_image and spec_image:
+                    report.add_three_plot_slide(slide_title, time_image, psd_image, spec_image)
+            elif layout == "all_plots_individual":
+                report.add_single_plot_slide(time_image, f"Time History | {slide_title}")
+                report.add_single_plot_slide(psd_image, f"PSD | {slide_title}")
+                if spec_image:
+                    report.add_single_plot_slide(spec_image, f"Spectrogram | {slide_title}")
+            elif layout == "psd_spec_side_by_side":
+                if spec_image:
+                    report.add_two_plot_slide(slide_title, psd_image, spec_image)
+            elif layout == "psd_only":
+                report.add_single_plot_slide(psd_image, slide_title)
+            elif layout == "spectrogram_only":
+                if spec_image:
+                    report.add_single_plot_slide(spec_image, slide_title)
+            elif layout == "time_history_only":
+                report.add_single_plot_slide(time_image, slide_title)
+
+            if report_options["include_statistics"]:
+                stats_payload = self._create_statistics_slide_payload()
+                if stats_payload is not None:
+                    report.add_statistics_dashboard_slide(
+                        slide_title,
+                        stats_payload["pdf"],
+                        stats_payload["mean"],
+                        stats_payload["std"],
+                        stats_payload["skew"],
+                        stats_payload["kurt"],
+                        stats_payload["summary"],
+                    )
+
+            if report_options["include_rms_table"] and self.channel_names:
+                headers = ["Channel", "RMS"]
+                if report_options["include_3sigma_columns"]:
+                    headers.append("3-sigma RMS")
+                rows = []
+                for channel in self.channel_names:
+                    rms_value = self.rms_values.get(channel, None)
+                    row = [channel, "" if rms_value is None else f"{rms_value:.4f}"]
+                    if report_options["include_3sigma_columns"]:
+                        row.append("" if rms_value is None else f"{3.0 * rms_value:.4f}")
+                    rows.append(row)
+                if rows:
+                    report.add_rms_table_slide("RMS Summary", headers, rows)
+
             saved_path = report.save(file_path)
-            show_information(self, "Report Generated",
-                           f"Report saved to:\n{saved_path}")
+            show_information(self, "Report Generated", f"Report saved to:\n{saved_path}")
 
         except Exception as e:
             show_critical(self, "Report Error", f"Failed to generate report: {str(e)}")
+
+    def _get_selected_channel_indices(self):
+        """Return indices for channels currently selected in the channel checklist."""
+        if not self.channel_checkboxes:
+            return []
+        return [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
+
+    def _create_report_spectrogram_image(self, layout: str):
+        """Create a spectrogram image for report output from the first selected channel."""
+        if self.signal_data_full is None or self.sample_rate is None:
+            return None
+        selected_indices = self._get_selected_channel_indices()
+        if not selected_indices:
+            return None
+
+        channel_idx = selected_indices[0]
+        signal = self.signal_data_full if self.signal_data_full.ndim == 1 else self.signal_data_full[:, channel_idx]
+        if signal is None or len(signal) == 0:
+            return None
+
+        freqs, times, sxx = generate_spectrogram(
+            signal,
+            self.sample_rate,
+            desired_df=float(self.df_spin.value()),
+            overlap_percent=float(self.overlap_spin.value()),
+            snr_threshold=50.0,
+            use_efficient_fft=self.efficient_fft_checkbox.isChecked(),
+        )
+
+        import matplotlib.pyplot as plt
+
+        apply_light_matplotlib_theme()
+        figsize = (6.1, 5.9) if layout == "psd_spec_side_by_side" else (12.333, 6.0)
+        fig, ax = plt.subplots(figsize=figsize)
+        sxx_db = 10 * np.log10(sxx + 1e-12)
+        im = ax.pcolormesh(times, freqs, sxx_db, shading="auto", cmap="viridis")
+        style_axes(ax, "Spectrogram", "Time (s)", "Frequency (Hz)")
+        apply_axis_styling(ax, font_size=BASE_FONT_SIZE, include_grid=False)
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label("PSD (dB)")
+        style_colorbar(cbar, font_size=BASE_FONT_SIZE)
+        fig.tight_layout()
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        return buf.getvalue()
+
+    def _create_statistics_slide_payload(self):
+        """Build statistics plot bytes and summary rows for report generation."""
+        if self.signal_data_full is None or self.sample_rate is None:
+            return None
+        selected_indices = self._get_selected_channel_indices()
+        if not selected_indices:
+            return None
+        channel_idx = selected_indices[0]
+        signal = self.signal_data_full if self.signal_data_full.ndim == 1 else self.signal_data_full[:, channel_idx]
+        if signal is None or len(signal) < 10:
+            return None
+
+        class _StatsConfig:
+            pdf_bins = 50
+            running_window_seconds = 1.0
+            max_plot_points = 5000
+            show_mean = True
+            show_std = True
+            show_skewness = True
+            show_kurtosis = True
+            show_normal = True
+            show_rayleigh = False
+            show_uniform = False
+
+        stats = compute_statistics(signal, self.sample_rate, _StatsConfig())
+        pdf_fig, _ = plot_pdf(stats["pdf"], _StatsConfig())
+        mean_fig, _ = plot_running_stat(stats["running"], "mean", "Running Mean", "Mean")
+        std_fig, _ = plot_running_stat(stats["running"], "std", "Running Std", "Std")
+        skew_fig, _ = plot_running_stat(stats["running"], "skewness", "Running Skewness", "Skewness")
+        kurt_fig, _ = plot_running_stat(stats["running"], "kurtosis", "Running Kurtosis", "Kurtosis")
+
+        import matplotlib.pyplot as plt
+
+        def _fig_to_bytes(fig):
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=300, bbox_inches="tight")
+            plt.close(fig)
+            return buf.getvalue()
+
+        summary = [
+            ("Mean", f"{stats['overall']['mean']:.4f}"),
+            ("Std", f"{stats['overall']['std']:.4f}"),
+            ("Skewness", f"{stats['overall']['skewness']:.4f}"),
+            ("Kurtosis", f"{stats['overall']['kurtosis']:.4f}"),
+            ("Min", f"{stats['overall']['min']:.4f}"),
+            ("Max", f"{stats['overall']['max']:.4f}"),
+            ("RMS", f"{stats['overall']['rms']:.4f}"),
+            ("Crest Factor", f"{stats['overall']['crest_factor']:.4f}"),
+        ]
+        return {
+            "pdf": _fig_to_bytes(pdf_fig),
+            "mean": _fig_to_bytes(mean_fig),
+            "std": _fig_to_bytes(std_fig),
+            "skew": _fig_to_bytes(skew_fig),
+            "kurt": _fig_to_bytes(kurt_fig),
+            "summary": summary,
+        }
 
     def _create_plot_panel(self):
         """Create the right plot panel with time history and PSD plots."""
@@ -2427,70 +2657,102 @@ class PSDAnalysisWindow(QMainWindow):
             
             self.psd_results = {}
             self.rms_values = {}
+
+            progress = QProgressDialog("Calculating PSDs...", "Cancel", 0, num_channels, self)
+            progress.setWindowTitle("PSD Analysis")
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(500)
+            progress.setValue(0)
+            progress.setStyleSheet("""
+                QProgressDialog {
+                    background-color: #ffffff;
+                }
+                QProgressDialog QLabel {
+                    color: #000000;
+                }
+                QProgressDialog QPushButton {
+                    color: #000000;
+                }
+            """)
             
             # Calculate PSD for each channel using FULL RESOLUTION data
-            for channel_idx in range(num_channels):
-                channel_name = self.channel_names[channel_idx]
-                
-                # Get this channel's sample rate (support for multi-rate)
-                if self.channel_sample_rates and len(self.channel_sample_rates) > channel_idx:
-                    channel_sample_rate = self.channel_sample_rates[channel_idx]
-                else:
-                    channel_sample_rate = self.sample_rate  # Fallback to reference rate
-                
-                # Extract signal for this channel from FULL resolution data
-                if self.signal_data_full.ndim == 1:
-                    signal = self.signal_data_full.copy()
-                else:
-                    signal = self.signal_data_full[:, channel_idx].copy()
-                
-                # Apply optional filtering if enabled
-                if self.enable_filter_checkbox.isChecked():
-                    signal = self._apply_filter(signal, channel_sample_rate)
-                
-                # Calculate PSD (maximax or traditional)
-                if self.maximax_checkbox.isChecked():
-                    # Use maximax PSD calculation
-                    maximax_window = self.maximax_window_spin.value()
-                    maximax_overlap = self.maximax_overlap_spin.value()
+            try:
+                for channel_idx in range(num_channels):
+                    if progress.wasCanceled():
+                        self.frequencies = {}
+                        self.psd_results = {}
+                        self.rms_values = {}
+                        self._clear_psd_plot()
+                        show_warning(self, "Calculation Canceled", "PSD calculation was canceled.")
+                        return
+
+                    channel_name = self.channel_names[channel_idx]
+                    progress.setLabelText(f"Calculating: {channel_name} ({channel_idx + 1}/{num_channels})")
+                    progress.setValue(channel_idx)
+                    QApplication.processEvents()
                     
-                    frequencies, psd = calculate_psd_maximax(
-                        signal,
-                        channel_sample_rate,  # Use channel-specific sample rate
-                        df=df,
-                        maximax_window=maximax_window,
-                        overlap_percent=maximax_overlap,
-                        window=window
-                    )
-                else:
-                    # Use traditional averaged PSD
-                    # Calculate nperseg from df for overlap calculation
-                    nperseg = int(channel_sample_rate / df)  # Use channel-specific sample rate
-                    noverlap = int(nperseg * overlap_percent / 100.0)
+                    # Get this channel's sample rate (support for multi-rate)
+                    if self.channel_sample_rates and len(self.channel_sample_rates) > channel_idx:
+                        channel_sample_rate = self.channel_sample_rates[channel_idx]
+                    else:
+                        channel_sample_rate = self.sample_rate  # Fallback to reference rate
                     
-                    frequencies, psd = calculate_psd_welch(
-                        signal,
-                        channel_sample_rate,  # Use channel-specific sample rate
-                        df=df,
-                        noverlap=noverlap,
-                        window=window
+                    # Extract signal for this channel from FULL resolution data
+                    if self.signal_data_full.ndim == 1:
+                        signal = self.signal_data_full.copy()
+                    else:
+                        signal = self.signal_data_full[:, channel_idx].copy()
+                    
+                    # Apply optional filtering if enabled
+                    if self.enable_filter_checkbox.isChecked():
+                        signal = self._apply_filter(signal, channel_sample_rate)
+                    
+                    # Calculate PSD (maximax or traditional)
+                    if self.maximax_checkbox.isChecked():
+                        # Use maximax PSD calculation
+                        maximax_window = self.maximax_window_spin.value()
+                        maximax_overlap = self.maximax_overlap_spin.value()
+                        
+                        frequencies, psd = calculate_psd_maximax(
+                            signal,
+                            channel_sample_rate,  # Use channel-specific sample rate
+                            df=df,
+                            maximax_window=maximax_window,
+                            overlap_percent=maximax_overlap,
+                            window=window
+                        )
+                    else:
+                        # Use traditional averaged PSD
+                        # Calculate nperseg from df for overlap calculation
+                        nperseg = int(channel_sample_rate / df)  # Use channel-specific sample rate
+                        noverlap = int(nperseg * overlap_percent / 100.0)
+                        
+                        frequencies, psd = calculate_psd_welch(
+                            signal,
+                            channel_sample_rate,  # Use channel-specific sample rate
+                            df=df,
+                            noverlap=noverlap,
+                            window=window
+                        )
+                    
+                    # Store frequency array for this channel (may differ with different sample rates)
+                    self.frequencies[channel_name] = frequencies
+                    
+                    # Store PSD for this channel
+                    self.psd_results[channel_name] = psd
+                    
+                    # Calculate RMS over specified frequency range
+                    rms = calculate_rms_from_psd(
+                        frequencies, 
+                        psd, 
+                        freq_min=freq_min, 
+                        freq_max=freq_max
                     )
-                
-                # Store frequency array for this channel (may differ with different sample rates)
-                self.frequencies[channel_name] = frequencies
-                
-                # Store PSD for this channel
-                self.psd_results[channel_name] = psd
-                
-                # Calculate RMS over specified frequency range
-                rms = calculate_rms_from_psd(
-                    frequencies, 
-                    psd, 
-                    freq_min=freq_min, 
-                    freq_max=freq_max
-                )
-                
-                self.rms_values[channel_name] = rms
+                    
+                    self.rms_values[channel_name] = rms
+            finally:
+                progress.setValue(num_channels)
+                progress.close()
             
             # Update plot
             self._update_plot()

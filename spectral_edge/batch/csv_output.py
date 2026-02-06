@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 def export_to_csv(
     result: 'BatchProcessingResult',
-    output_directory: str
+    output_directory: str,
+    config: 'BatchConfig'
 ) -> List[str]:
     """
     Export batch processing results to CSV files.
@@ -32,6 +33,8 @@ def export_to_csv(
         Batch processing result object containing channel_results
     output_directory : str
         Directory to save the CSV files
+    config : BatchConfig
+        Batch configuration object (for spacing conversion)
 
     Returns:
     --------
@@ -50,15 +53,22 @@ def export_to_csv(
         created_files = []
 
         # Reorganize results by event
+        from spectral_edge.batch.output_psd import apply_frequency_spacing
+
         events_data = {}
         for (flight_key, channel_key), event_dict in result.channel_results.items():
             for event_name, event_result in event_dict.items():
                 if event_name not in events_data:
                     events_data[event_name] = {}
                 channel_id = f"{flight_key}_{channel_key}"
+                frequencies_out, psd_out = apply_frequency_spacing(
+                    event_result['frequencies'],
+                    event_result['psd'],
+                    config.psd_config
+                )
                 events_data[event_name][channel_id] = {
-                    'frequencies': event_result['frequencies'],
-                    'psd': event_result['psd'],
+                    'frequencies': frequencies_out,
+                    'psd': psd_out,
                     'metadata': event_result['metadata']
                 }
 

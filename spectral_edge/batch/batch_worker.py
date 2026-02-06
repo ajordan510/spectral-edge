@@ -10,6 +10,7 @@ Date: 2026-02-02
 
 import logging
 import time
+from pathlib import Path
 from typing import Dict, Any
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -109,6 +110,16 @@ class BatchWorker(QThread):
             from spectral_edge.batch.powerpoint_output import generate_powerpoint_report
             
             output_config = self.config.output_config
+
+            # Default output directory to source file location if not set
+            if not output_config.output_directory and self.config.source_files:
+                output_config.output_directory = str(Path(self.config.source_files[0]).parent)
+
+            # Ensure output directory exists
+            try:
+                Path(output_config.output_directory).mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
             
             try:
                 output_times = {}
@@ -130,7 +141,11 @@ class BatchWorker(QThread):
                     self.log_message.emit("Generating Excel output...")
                     try:
                         excel_start = time.perf_counter()
-                        excel_path = export_to_excel(result, output_config.output_directory)
+                        excel_path = export_to_excel(
+                            result,
+                            output_config.output_directory,
+                            config=self.config
+                        )
                         excel_time = time.perf_counter() - excel_start
                         output_times['excel'] = excel_time
                         self.log_message.emit(f"Excel saved: {excel_path} ({excel_time:.2f}s)")
@@ -150,7 +165,11 @@ class BatchWorker(QThread):
                     self.log_message.emit("Generating CSV outputs...")
                     try:
                         csv_start = time.perf_counter()
-                        csv_files = export_to_csv(result, output_config.output_directory)
+                        csv_files = export_to_csv(
+                            result,
+                            output_config.output_directory,
+                            config=self.config
+                        )
                         csv_time = time.perf_counter() - csv_start
                         output_times['csv'] = csv_time
                         self.log_message.emit(f"CSV files saved: {len(csv_files)} files ({csv_time:.2f}s)")
@@ -190,7 +209,7 @@ class BatchWorker(QThread):
                     self.progress_updated.emit(90, "Writing PSDs to HDF5...")
                     self.log_message.emit("Writing PSDs back to HDF5...")
                     hdf5_start = time.perf_counter()
-                    write_psds_to_hdf5(result, self.config.source_files[0])
+                    write_psds_to_hdf5(result, self.config.source_files[0], config=self.config)
                     hdf5_time = time.perf_counter() - hdf5_start
                     output_times['hdf5'] = hdf5_time
                     self.log_message.emit(f"HDF5 write complete ({hdf5_time:.2f}s)")

@@ -9,6 +9,7 @@ Date: 2026-02-02
 """
 
 import sys
+import math
 from pathlib import Path
 from typing import List, Dict, Optional
 import logging
@@ -18,10 +19,11 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QTabWidget, QFileDialog, QMessageBox, QProgressBar,
     QGroupBox, QCheckBox, QDoubleSpinBox, QSpinBox, QComboBox,
-    QLineEdit, QTextEdit, QTableWidget, QTableWidgetItem, QHeaderView
+    QLineEdit, QTextEdit, QTableWidget, QTableWidgetItem, QHeaderView,
+    QToolButton, QButtonGroup, QGridLayout
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont, QDoubleValidator
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
+from PyQt6.QtGui import QFont, QDoubleValidator, QIcon, QPixmap, QPainter, QPen, QColor, QPainterPath
 
 
 class ScientificDoubleSpinBox(QDoubleSpinBox):
@@ -129,8 +131,12 @@ class BatchProcessorWindow(QMainWindow):
         self._create_psd_parameters_tab()
         self._create_filter_tab()
         self._create_spectrogram_tab()
+        self._create_statistics_tab()
         self._create_display_tab()
         self._create_output_tab()
+
+        # Apply initial PowerPoint/spectrogram state
+        self._update_spectrogram_controls()
         
         # Progress bar
         self.progress_bar = QProgressBar()
@@ -295,6 +301,7 @@ class BatchProcessorWindow(QMainWindow):
         method_layout = QHBoxLayout()
         self.psd_method_combo = QComboBox()
         self.psd_method_combo.addItems(["welch", "maximax"])
+        self.psd_method_combo.setCurrentText("maximax")
         method_layout.addWidget(QLabel("Method:"))
         method_layout.addWidget(self.psd_method_combo)
         method_layout.addStretch()
@@ -334,7 +341,7 @@ class BatchProcessorWindow(QMainWindow):
         freq_row1 = QHBoxLayout()
         self.df_spin = QDoubleSpinBox()
         self.df_spin.setRange(0.01, 100.0)
-        self.df_spin.setValue(1.0)
+        self.df_spin.setValue(5.0)
         self.df_spin.setDecimals(2)
         self.df_spin.setSuffix(" Hz")
         self.df_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
@@ -366,7 +373,12 @@ class BatchProcessorWindow(QMainWindow):
         
         freq_row3 = QHBoxLayout()
         self.freq_spacing_combo = QComboBox()
-        self.freq_spacing_combo.addItems(["linear", "octave"])
+        self.freq_spacing_combo.addItem("Constant Bandwidth", "constant_bandwidth")
+        self.freq_spacing_combo.addItem("1/36 Octave", "1/36")
+        self.freq_spacing_combo.addItem("1/24 Octave", "1/24")
+        self.freq_spacing_combo.addItem("1/12 Octave", "1/12")
+        self.freq_spacing_combo.addItem("1/6 Octave", "1/6")
+        self.freq_spacing_combo.addItem("1/3 Octave", "1/3")
         freq_row3.addWidget(QLabel("Frequency Spacing:"))
         freq_row3.addWidget(self.freq_spacing_combo)
         freq_row3.addStretch()
@@ -471,9 +483,13 @@ class BatchProcessorWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
-        # Enable spectrograms
-        self.spectrogram_enabled_checkbox = QCheckBox("Generate Spectrograms")
-        layout.addWidget(self.spectrogram_enabled_checkbox)
+        # Spectrogram generation is controlled by the PowerPoint layout selection
+        self.spectrogram_info_label = QLabel(
+            "Spectrograms are generated when the PowerPoint layout includes them."
+        )
+        self.spectrogram_info_label.setStyleSheet("color: #9ca3af; font-size: 10pt;")
+        self.spectrogram_info_label.setWordWrap(True)
+        layout.addWidget(self.spectrogram_info_label)
         
         # Spectrogram settings
         spec_group = QGroupBox("Spectrogram Settings")
@@ -483,7 +499,7 @@ class BatchProcessorWindow(QMainWindow):
         param_row1 = QHBoxLayout()
         self.spec_df_spin = QDoubleSpinBox()
         self.spec_df_spin.setRange(0.01, 100.0)
-        self.spec_df_spin.setValue(1.0)
+        self.spec_df_spin.setValue(2.0)
         self.spec_df_spin.setDecimals(2)
         self.spec_df_spin.setSuffix(" Hz")
         self.spec_df_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
@@ -506,7 +522,7 @@ class BatchProcessorWindow(QMainWindow):
         param_row3 = QHBoxLayout()
         self.spec_snr_spin = QSpinBox()
         self.spec_snr_spin.setRange(0, 100)
-        self.spec_snr_spin.setValue(20)
+        self.spec_snr_spin.setValue(50)
         self.spec_snr_spin.setSuffix(" dB")
         self.spec_snr_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
         param_row3.addWidget(QLabel("SNR Threshold:"))
@@ -528,6 +544,106 @@ class BatchProcessorWindow(QMainWindow):
         
         layout.addStretch()
         self.tab_widget.addTab(tab, "Spectrogram")
+
+    def _create_statistics_tab(self):
+        """Create the statistics configuration tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        info = QLabel("Statistics are calculated for PowerPoint output when enabled.")
+        info.setStyleSheet("color: #9ca3af; font-size: 10pt;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        # PDF options
+        pdf_group = QGroupBox("PDF Options")
+        pdf_layout = QVBoxLayout()
+
+        bins_row = QHBoxLayout()
+        bins_row.addWidget(QLabel("Number of Bins:"))
+        self.stats_bins_spin = QSpinBox()
+        self.stats_bins_spin.setRange(10, 1000)
+        self.stats_bins_spin.setValue(50)
+        bins_row.addWidget(self.stats_bins_spin)
+        bins_row.addStretch()
+        pdf_layout.addLayout(bins_row)
+
+        overlays_label = QLabel("Distribution Overlays:")
+        overlays_label.setStyleSheet("color: #e0e0e0;")
+        pdf_layout.addWidget(overlays_label)
+
+        self.stats_normal_checkbox = QCheckBox("Normal")
+        self.stats_normal_checkbox.setChecked(True)
+        pdf_layout.addWidget(self.stats_normal_checkbox)
+
+        self.stats_rayleigh_checkbox = QCheckBox("Rayleigh")
+        self.stats_rayleigh_checkbox.setChecked(False)
+        pdf_layout.addWidget(self.stats_rayleigh_checkbox)
+
+        self.stats_uniform_checkbox = QCheckBox("Uniform")
+        self.stats_uniform_checkbox.setChecked(False)
+        pdf_layout.addWidget(self.stats_uniform_checkbox)
+
+        pdf_group.setLayout(pdf_layout)
+        layout.addWidget(pdf_group)
+
+        # Running statistics options
+        running_group = QGroupBox("Running Statistics")
+        running_layout = QVBoxLayout()
+
+        window_row = QHBoxLayout()
+        window_row.addWidget(QLabel("Window Size (s):"))
+        self.stats_window_spin = QDoubleSpinBox()
+        self.stats_window_spin.setRange(0.1, 20.0)
+        self.stats_window_spin.setValue(1.0)
+        self.stats_window_spin.setSingleStep(0.1)
+        window_row.addWidget(self.stats_window_spin)
+        window_row.addStretch()
+        running_layout.addLayout(window_row)
+
+        running_layout.addWidget(QLabel("Display:"))
+        self.stats_show_mean_checkbox = QCheckBox("Mean")
+        self.stats_show_mean_checkbox.setChecked(True)
+        running_layout.addWidget(self.stats_show_mean_checkbox)
+
+        self.stats_show_std_checkbox = QCheckBox("Standard Deviation")
+        self.stats_show_std_checkbox.setChecked(True)
+        running_layout.addWidget(self.stats_show_std_checkbox)
+
+        self.stats_show_skew_checkbox = QCheckBox("Skewness")
+        self.stats_show_skew_checkbox.setChecked(True)
+        running_layout.addWidget(self.stats_show_skew_checkbox)
+
+        self.stats_show_kurt_checkbox = QCheckBox("Kurtosis")
+        self.stats_show_kurt_checkbox.setChecked(True)
+        running_layout.addWidget(self.stats_show_kurt_checkbox)
+
+        running_group.setLayout(running_layout)
+        layout.addWidget(running_group)
+
+        # Plot settings
+        plot_group = QGroupBox("Plot Settings")
+        plot_layout = QHBoxLayout()
+        max_points_label = QLabel("Running Stats Plot Point Limit:")
+        max_points_label.setToolTip(
+            "Caps plotted samples for running-stat curves to keep report generation responsive; "
+            "does not change PSD calculations."
+        )
+        plot_layout.addWidget(max_points_label)
+        self.stats_max_points_spin = QSpinBox()
+        self.stats_max_points_spin.setRange(100, 20000)
+        self.stats_max_points_spin.setValue(5000)
+        self.stats_max_points_spin.setToolTip(
+            "Caps plotted samples for running-stat curves to keep report generation responsive; "
+            "does not change PSD calculations."
+        )
+        plot_layout.addWidget(self.stats_max_points_spin)
+        plot_layout.addStretch()
+        plot_group.setLayout(plot_layout)
+        layout.addWidget(plot_group)
+
+        layout.addStretch()
+        self.tab_widget.addTab(tab, "Statistics")
     
     def _create_display_tab(self):
         """Create the display settings tab."""
@@ -697,6 +813,69 @@ class BatchProcessorWindow(QMainWindow):
         
         format_group.setLayout(format_layout)
         layout.addWidget(format_group)
+
+        # PowerPoint report options
+        self.ppt_group = QGroupBox("PowerPoint Report Options")
+        ppt_layout = QVBoxLayout()
+
+        layout_label = QLabel("Layout:")
+        ppt_layout.addWidget(layout_label)
+
+        self.ppt_layout_buttons = QButtonGroup(self)
+        self.ppt_layout_buttons.setExclusive(True)
+
+        self.ppt_layout_labels = {
+            "time_psd_spec_one_slide": "Time + PSD + Spec",
+            "all_plots_individual": "All Plots\nIndividual",
+            "psd_spec_side_by_side": "PSD + Spec\nSide by Side",
+            "psd_only": "PSD Only",
+            "spectrogram_only": "Spectrogram Only",
+            "time_history_only": "Time History Only"
+        }
+
+        layout_grid = QGridLayout()
+        layout_grid.setHorizontalSpacing(12)
+        layout_grid.setVerticalSpacing(12)
+
+        layout_options = [
+            ("time_psd_spec_one_slide", "Time + PSD + Spectrogram (one slide)"),
+            ("all_plots_individual", "All plots on individual slides"),
+            ("psd_spec_side_by_side", "PSD + Spectrogram (side by side)"),
+            ("psd_only", "PSD only"),
+            ("spectrogram_only", "Spectrogram only"),
+            ("time_history_only", "Time history only")
+        ]
+
+        for idx, (layout_value, tooltip) in enumerate(layout_options):
+            label = self.ppt_layout_labels[layout_value]
+            button = self._create_ppt_layout_button(layout_value, label, tooltip)
+            self.ppt_layout_buttons.addButton(button)
+            row = idx // 3
+            col = idx % 3
+            layout_grid.addWidget(button, row, col)
+
+        ppt_layout.addLayout(layout_grid)
+        self._set_selected_ppt_layout(self.config.powerpoint_config.layout)
+
+        self.ppt_include_parameters_checkbox = QCheckBox("Include calculation parameters")
+        self.ppt_include_parameters_checkbox.setChecked(True)
+        ppt_layout.addWidget(self.ppt_include_parameters_checkbox)
+
+        self.ppt_include_statistics_checkbox = QCheckBox("Include statistics slides")
+        self.ppt_include_statistics_checkbox.setChecked(False)
+        ppt_layout.addWidget(self.ppt_include_statistics_checkbox)
+
+        self.ppt_include_rms_table_checkbox = QCheckBox("Include RMS summary table")
+        self.ppt_include_rms_table_checkbox.setChecked(False)
+        ppt_layout.addWidget(self.ppt_include_rms_table_checkbox)
+
+        self.ppt_include_3sigma_columns_checkbox = QCheckBox("Include 3-sigma columns in RMS table")
+        self.ppt_include_3sigma_columns_checkbox.setChecked(False)
+        self.ppt_include_3sigma_columns_checkbox.setEnabled(False)
+        ppt_layout.addWidget(self.ppt_include_3sigma_columns_checkbox)
+
+        self.ppt_group.setLayout(ppt_layout)
+        layout.addWidget(self.ppt_group)
         
         layout.addStretch()
         self.tab_widget.addTab(tab, "Output")
@@ -719,6 +898,12 @@ class BatchProcessorWindow(QMainWindow):
         # Configuration
         self.load_config_btn.clicked.connect(self._on_load_config)
         self.save_config_btn.clicked.connect(self._on_save_config)
+
+        # PowerPoint layout options
+        if hasattr(self, "ppt_layout_buttons"):
+            self.ppt_layout_buttons.buttonClicked.connect(self._on_ppt_layout_changed)
+        self.powerpoint_checkbox.stateChanged.connect(self._on_powerpoint_enabled_changed)
+        self.ppt_include_rms_table_checkbox.toggled.connect(self._on_rms_table_toggled)
 
         # Run batch and cancel
         self.run_batch_btn.clicked.connect(self._on_run_batch)
@@ -788,6 +973,20 @@ class BatchProcessorWindow(QMainWindow):
             QPushButton:disabled {
                 background-color: #4a5568;
                 color: #9ca3af;
+            }
+            QToolButton {
+                background-color: #2d3748;
+                color: #e0e0e0;
+                border: 1px solid #4a5568;
+                border-radius: 6px;
+                padding: 6px;
+            }
+            QToolButton:hover {
+                background-color: #374151;
+            }
+            QToolButton:checked {
+                border: 2px solid #60a5fa;
+                background-color: #1f2937;
             }
             QLineEdit, QTextEdit {
                 background-color: #2d3748;
@@ -999,6 +1198,10 @@ class BatchProcessorWindow(QMainWindow):
             self.files_text.setText("\n".join(files))
             self.hdf5_radio.setChecked(True)
             self.csv_radio.setChecked(False)
+            if not self.output_dir_edit.text().strip():
+                default_dir = str(Path(files[0]).parent)
+                self.output_dir_edit.setText(default_dir)
+                self.config.output_config.output_directory = default_dir
             logger.info(f"Selected {len(files)} HDF5 file(s)")
     
     def _on_select_csv(self):
@@ -1016,6 +1219,10 @@ class BatchProcessorWindow(QMainWindow):
             self.files_text.setText("\n".join(files))
             self.csv_radio.setChecked(True)
             self.hdf5_radio.setChecked(False)
+            if not self.output_dir_edit.text().strip():
+                default_dir = str(Path(files[0]).parent)
+                self.output_dir_edit.setText(default_dir)
+                self.config.output_config.output_directory = default_dir
             logger.info(f"Selected {len(files)} CSV file(s)")
     
     def _on_select_channels(self):
@@ -1080,6 +1287,177 @@ class BatchProcessorWindow(QMainWindow):
         if directory:
             self.output_dir_edit.setText(directory)
             self.config.output_config.output_directory = directory
+
+    def _build_layout_icon(self, layout_value: str) -> QIcon:
+        """Create a visual mockup icon for a PowerPoint layout option."""
+        width, height = 140, 95
+        pixmap = QPixmap(width, height)
+        pixmap.fill(QColor("#ffffff"))
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("#1f2937"))
+        pen.setWidth(2)
+        painter.setPen(pen)
+
+        # Draw slide border
+        painter.drawRect(2, 2, width - 4, height - 4)
+
+        # Helper for panels
+        def panel(x, y, w, h, fill=None):
+            if fill:
+                painter.fillRect(x, y, w, h, QColor(fill))
+            painter.drawRect(x, y, w, h)
+
+        def draw_squiggle(x, y, w, h):
+            path = QPainterPath()
+            mid = y + h / 2
+            amp = h * 0.25
+            steps = 8
+            path.moveTo(x, mid)
+            for i in range(1, steps + 1):
+                px = x + (w * i / steps)
+                py = mid + amp * math.sin(i * 1.2)
+                path.lineTo(px, py)
+            painter.drawPath(path)
+
+        def draw_time_wave(x, y, w, h):
+            path = QPainterPath()
+            mid = y + h / 2
+            amp = h * 0.35
+            steps = 10
+            path.moveTo(x, mid)
+            for i in range(1, steps + 1):
+                px = x + (w * i / steps)
+                py = mid + amp * math.sin(i * 1.6)
+                path.lineTo(px, py)
+            painter.drawPath(path)
+
+        def draw_spec_shading(x, y, w, h):
+            shades = ["#d1d5db", "#e5e7eb", "#cbd5e1", "#e5e7eb"]
+            stripe_w = max(1, int(w / len(shades)))
+            for i, shade in enumerate(shades):
+                painter.fillRect(x + i * stripe_w, y, stripe_w, h, QColor(shade))
+            painter.drawRect(x, y, w, h)
+
+        if layout_value == "time_psd_spec_one_slide":
+            panel(8, 10, width - 16, 28, "#f3f4f6")
+            draw_time_wave(14, 14, width - 28, 20)
+            panel(8, 46, (width - 20) // 2, 38, "#f9fafb")
+            draw_squiggle(12, 54, (width - 20) // 2 - 8, 22)
+            draw_spec_shading(12 + (width - 20) // 2, 46, (width - 20) // 2, 38)
+        elif layout_value == "all_plots_individual":
+            # mock three stacked mini slides with depth
+            panel(18, 18, width - 36, 18, "#f9fafb")
+            panel(14, 14, width - 36, 18, "#f3f4f6")
+            panel(10, 10, width - 36, 18, "#f9fafb")
+        elif layout_value == "psd_spec_side_by_side":
+            panel(8, 14, (width - 20) // 2, height - 26, "#f3f4f6")
+            draw_squiggle(12, 24, (width - 20) // 2 - 8, height - 46)
+            draw_spec_shading(12 + (width - 20) // 2, 14, (width - 20) // 2, height - 26)
+        elif layout_value == "psd_only":
+            panel(10, 18, width - 20, height - 32, "#f3f4f6")
+            draw_squiggle(16, 26, width - 32, height - 48)
+        elif layout_value == "spectrogram_only":
+            draw_spec_shading(10, 18, width - 20, height - 32)
+        elif layout_value == "time_history_only":
+            panel(10, 18, width - 20, height - 32, "#f9fafb")
+            draw_time_wave(16, 26, width - 32, height - 48)
+
+        painter.end()
+        return QIcon(pixmap)
+
+    def _create_ppt_layout_button(self, layout_value: str, label: str, tooltip: str) -> QToolButton:
+        """Create a checkable layout selection button with icon."""
+        button = QToolButton()
+        button.setCheckable(True)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        button.setIcon(self._build_layout_icon(layout_value))
+        button.setIconSize(QSize(120, 80))
+        button.setText(label)
+        button.setToolTip(tooltip)
+        button.setProperty("layout_value", layout_value)
+        button.setAutoRaise(False)
+        return button
+
+    def _get_selected_ppt_layout(self) -> str:
+        """Return currently selected layout value."""
+        if not hasattr(self, "ppt_layout_buttons"):
+            return self.config.powerpoint_config.layout
+        button = self.ppt_layout_buttons.checkedButton()
+        if button is None:
+            return self.config.powerpoint_config.layout
+        return button.property("layout_value")
+
+    def _set_selected_ppt_layout(self, layout_value: str) -> None:
+        """Select the layout button matching the provided value."""
+        if not hasattr(self, "ppt_layout_buttons"):
+            return
+        for button in self.ppt_layout_buttons.buttons():
+            if button.property("layout_value") == layout_value:
+                button.setChecked(True)
+                return
+        # Default to first button if not found
+        buttons = self.ppt_layout_buttons.buttons()
+        if buttons:
+            buttons[0].setChecked(True)
+
+    def _get_layout_label(self, layout_value: str) -> str:
+        if not hasattr(self, "ppt_layout_labels"):
+            return layout_value
+        label = self.ppt_layout_labels.get(layout_value, layout_value)
+        return label.replace("\n", " ")
+
+    def _layout_includes_spectrogram(self, layout_value: str) -> bool:
+        return layout_value in {
+            "time_psd_spec_one_slide",
+            "all_plots_individual",
+            "psd_spec_side_by_side",
+            "spectrogram_only"
+        }
+
+    def _update_spectrogram_controls(self):
+        """Enable/disable spectrogram controls based on layout selection."""
+        layout_value = self._get_selected_ppt_layout()
+        include_spec = self.powerpoint_checkbox.isChecked() and self._layout_includes_spectrogram(layout_value)
+
+        # Update config and UI controls
+        self.config.spectrogram_config.enabled = include_spec
+
+        for widget in [
+            self.spec_df_spin,
+            self.spec_overlap_spin,
+            self.spec_snr_spin,
+            self.colormap_combo,
+            self.spec_auto_scale_checkbox,
+            self.spec_freq_min_spin,
+            self.spec_freq_max_spin,
+            self.spec_time_min_spin,
+            self.spec_time_max_spin
+        ]:
+            widget.setEnabled(include_spec)
+
+        # Re-apply auto-scale logic for manual limits
+        self._on_spec_auto_scale_changed(
+            Qt.CheckState.Checked.value if self.spec_auto_scale_checkbox.isChecked()
+            else Qt.CheckState.Unchecked.value
+        )
+
+    def _on_ppt_layout_changed(self):
+        """Handle PowerPoint layout change."""
+        self._update_spectrogram_controls()
+
+    def _on_rms_table_toggled(self, checked: bool):
+        """Enable/disable 3-sigma columns option based on RMS table selection."""
+        self.ppt_include_3sigma_columns_checkbox.setEnabled(checked)
+        if not checked:
+            self.ppt_include_3sigma_columns_checkbox.setChecked(False)
+
+    def _on_powerpoint_enabled_changed(self):
+        """Enable/disable PowerPoint options when output is toggled."""
+        is_enabled = self.powerpoint_checkbox.isChecked()
+        self.ppt_group.setEnabled(is_enabled)
+        self._update_spectrogram_controls()
     
     def _on_load_config(self):
         """Load configuration from JSON file."""
@@ -1179,7 +1557,7 @@ class BatchProcessorWindow(QMainWindow):
         self.config.psd_config.desired_df = self.df_spin.value()
         self.config.psd_config.freq_min = self.freq_min_spin.value()
         self.config.psd_config.freq_max = self.freq_max_spin.value()
-        self.config.psd_config.frequency_spacing = self.freq_spacing_combo.currentText()
+        self.config.psd_config.frequency_spacing = self.freq_spacing_combo.currentData()
         self.config.psd_config.remove_running_mean = self.remove_mean_checkbox.isChecked()
         self.config.psd_config.running_mean_window = self.running_mean_window_spin.value()
         
@@ -1192,7 +1570,10 @@ class BatchProcessorWindow(QMainWindow):
         self.config.filter_config.cutoff_high = self.cutoff_high_spin.value()
         
         # Spectrogram config
-        self.config.spectrogram_config.enabled = self.spectrogram_enabled_checkbox.isChecked()
+        self.config.spectrogram_config.enabled = (
+            self.powerpoint_checkbox.isChecked()
+            and self._layout_includes_spectrogram(self._get_selected_ppt_layout())
+        )
         self.config.spectrogram_config.desired_df = self.spec_df_spin.value()
         self.config.spectrogram_config.overlap_percent = float(self.spec_overlap_spin.value())
         self.config.spectrogram_config.snr_threshold = float(self.spec_snr_spin.value())
@@ -1219,7 +1600,31 @@ class BatchProcessorWindow(QMainWindow):
         self.config.output_config.csv_enabled = self.csv_checkbox.isChecked()
         self.config.output_config.powerpoint_enabled = self.powerpoint_checkbox.isChecked()
         self.config.output_config.hdf5_writeback_enabled = self.hdf5_checkbox.isChecked()
-        self.config.output_config.output_directory = self.output_dir_edit.text()
+        output_dir = self.output_dir_edit.text().strip()
+        if not output_dir and self.config.source_files:
+            output_dir = str(Path(self.config.source_files[0]).parent)
+            self.output_dir_edit.setText(output_dir)
+        self.config.output_config.output_directory = output_dir
+
+        # PowerPoint config
+        self.config.powerpoint_config.layout = self._get_selected_ppt_layout()
+        self.config.powerpoint_config.include_parameters = self.ppt_include_parameters_checkbox.isChecked()
+        self.config.powerpoint_config.include_statistics = self.ppt_include_statistics_checkbox.isChecked()
+        self.config.powerpoint_config.include_rms_table = self.ppt_include_rms_table_checkbox.isChecked()
+        self.config.powerpoint_config.include_3sigma_columns = self.ppt_include_3sigma_columns_checkbox.isChecked()
+
+        # Statistics config
+        self.config.statistics_config.enabled = self.ppt_include_statistics_checkbox.isChecked()
+        self.config.statistics_config.pdf_bins = self.stats_bins_spin.value()
+        self.config.statistics_config.running_window_seconds = self.stats_window_spin.value()
+        self.config.statistics_config.show_mean = self.stats_show_mean_checkbox.isChecked()
+        self.config.statistics_config.show_std = self.stats_show_std_checkbox.isChecked()
+        self.config.statistics_config.show_skewness = self.stats_show_skew_checkbox.isChecked()
+        self.config.statistics_config.show_kurtosis = self.stats_show_kurt_checkbox.isChecked()
+        self.config.statistics_config.show_normal = self.stats_normal_checkbox.isChecked()
+        self.config.statistics_config.show_rayleigh = self.stats_rayleigh_checkbox.isChecked()
+        self.config.statistics_config.show_uniform = self.stats_uniform_checkbox.isChecked()
+        self.config.statistics_config.max_plot_points = self.stats_max_points_spin.value()
     
     def _populate_ui_from_config(self):
         """Populate UI controls from configuration object."""
@@ -1262,7 +1667,7 @@ class BatchProcessorWindow(QMainWindow):
         self.freq_min_spin.setValue(self.config.psd_config.freq_min)
         self.freq_max_spin.setValue(self.config.psd_config.freq_max)
 
-        spacing_index = self.freq_spacing_combo.findText(self.config.psd_config.frequency_spacing)
+        spacing_index = self.freq_spacing_combo.findData(self.config.psd_config.frequency_spacing)
         if spacing_index >= 0:
             self.freq_spacing_combo.setCurrentIndex(spacing_index)
 
@@ -1288,7 +1693,6 @@ class BatchProcessorWindow(QMainWindow):
             self.cutoff_high_spin.setValue(self.config.filter_config.cutoff_high)
 
         # Spectrogram tab
-        self.spectrogram_enabled_checkbox.setChecked(self.config.spectrogram_config.enabled)
         self.spec_df_spin.setValue(self.config.spectrogram_config.desired_df)
         self.spec_overlap_spin.setValue(int(self.config.spectrogram_config.overlap_percent))
         self.spec_snr_spin.setValue(int(self.config.spectrogram_config.snr_threshold))
@@ -1333,8 +1737,38 @@ class BatchProcessorWindow(QMainWindow):
         self.excel_checkbox.setChecked(self.config.output_config.excel_enabled)
         self.csv_checkbox.setChecked(self.config.output_config.csv_enabled)
         self.powerpoint_checkbox.setChecked(self.config.output_config.powerpoint_enabled)
+        self.ppt_group.setEnabled(self.powerpoint_checkbox.isChecked())
+
+        # PowerPoint report options
+        self._set_selected_ppt_layout(self.config.powerpoint_config.layout)
+        self.ppt_include_parameters_checkbox.setChecked(self.config.powerpoint_config.include_parameters)
+        self.ppt_include_statistics_checkbox.setChecked(self.config.powerpoint_config.include_statistics)
+        self.ppt_include_rms_table_checkbox.setChecked(self.config.powerpoint_config.include_rms_table)
+        self.ppt_include_3sigma_columns_checkbox.setChecked(
+            self.config.powerpoint_config.include_3sigma_columns
+        )
+        self._on_rms_table_toggled(self.config.powerpoint_config.include_rms_table)
+
+        # Statistics options
+        self.stats_bins_spin.setValue(self.config.statistics_config.pdf_bins)
+        self.stats_window_spin.setValue(self.config.statistics_config.running_window_seconds)
+        self.stats_show_mean_checkbox.setChecked(self.config.statistics_config.show_mean)
+        self.stats_show_std_checkbox.setChecked(self.config.statistics_config.show_std)
+        self.stats_show_skew_checkbox.setChecked(self.config.statistics_config.show_skewness)
+        self.stats_show_kurt_checkbox.setChecked(self.config.statistics_config.show_kurtosis)
+        self.stats_normal_checkbox.setChecked(self.config.statistics_config.show_normal)
+        self.stats_rayleigh_checkbox.setChecked(self.config.statistics_config.show_rayleigh)
+        self.stats_uniform_checkbox.setChecked(self.config.statistics_config.show_uniform)
+        self.stats_max_points_spin.setValue(self.config.statistics_config.max_plot_points)
+
+        # Ensure spectrogram controls match layout
+        self._update_spectrogram_controls()
         self.hdf5_checkbox.setChecked(self.config.output_config.hdf5_writeback_enabled)
-        self.output_dir_edit.setText(self.config.output_config.output_directory or "")
+        output_dir = self.config.output_config.output_directory
+        if not output_dir and self.config.source_files:
+            output_dir = str(Path(self.config.source_files[0]).parent)
+            self.config.output_config.output_directory = output_dir
+        self.output_dir_edit.setText(output_dir or "")
 
     def _add_event_row(self, name: str, start_time: float, end_time: float, description: str = ""):
         """Helper method to add an event row to the table."""
@@ -1453,13 +1887,17 @@ class BatchProcessorWindow(QMainWindow):
     def _on_spec_auto_scale_changed(self, state: int):
         """Handle spectrogram auto-scale checkbox state change."""
         is_auto = state == Qt.CheckState.Checked.value
+        spec_enabled = self.powerpoint_checkbox.isChecked() and self._layout_includes_spectrogram(
+            self._get_selected_ppt_layout()
+        )
         # Disable manual limit controls when auto-scale is enabled
-        self.spec_freq_min_spin.setEnabled(not is_auto)
-        self.spec_freq_max_spin.setEnabled(not is_auto)
-        self.spec_time_min_spin.setEnabled(not is_auto)
-        self.spec_time_max_spin.setEnabled(not is_auto)
+        manual_enabled = (not is_auto) and spec_enabled
+        self.spec_freq_min_spin.setEnabled(manual_enabled)
+        self.spec_freq_max_spin.setEnabled(manual_enabled)
+        self.spec_time_min_spin.setEnabled(manual_enabled)
+        self.spec_time_max_spin.setEnabled(manual_enabled)
         # Update label styling to indicate disabled state
-        style = "color: #6b7280;" if is_auto else "color: #e0e0e0;"
+        style = "color: #6b7280;" if is_auto or not spec_enabled else "color: #e0e0e0;"
         self.spec_freq_label.setStyleSheet(style)
         self.spec_freq_to_label.setStyleSheet(style)
         self.spec_time_label.setStyleSheet(style)
@@ -1505,6 +1943,20 @@ class BatchProcessorWindow(QMainWindow):
         events_valid, events_error = self._validate_events_table()
         if not events_valid:
             errors.append(events_error)
+
+        # Validate spectrogram manual ranges at run time only
+        if (
+            self.config.spectrogram_config.enabled
+            and not self.config.display_config.spectrogram_auto_scale
+        ):
+            fmin = self.config.display_config.spectrogram_freq_min
+            fmax = self.config.display_config.spectrogram_freq_max
+            tmin = self.config.display_config.spectrogram_time_min
+            tmax = self.config.display_config.spectrogram_time_max
+            if fmin is None or fmax is None or fmin >= fmax:
+                errors.append("Spectrogram frequency limits are invalid (min must be less than max)")
+            if tmin is None or tmax is None or tmin >= tmax:
+                errors.append("Spectrogram time limits are invalid (min must be less than max)")
 
         if errors:
             return False, "\n".join(errors)
@@ -1578,6 +2030,7 @@ class BatchProcessorWindow(QMainWindow):
         if self.config.spectrogram_config.enabled:
             options.append("Spectrograms")
         summary_lines.append(f"Processing: {', '.join(options) if options else 'PSD only'}")
+        summary_lines.append(f"Frequency Spacing: {self.config.psd_config.frequency_spacing}")
 
         # Output formats
         outputs = []
@@ -1590,6 +2043,15 @@ class BatchProcessorWindow(QMainWindow):
         if self.hdf5_checkbox.isChecked():
             outputs.append("HDF5")
         summary_lines.append(f"Outputs: {', '.join(outputs)}")
+        if self.powerpoint_checkbox.isChecked():
+            layout_value = self._get_selected_ppt_layout()
+            summary_lines.append(f"PPT Layout: {self._get_layout_label(layout_value)}")
+            if self.ppt_include_statistics_checkbox.isChecked():
+                summary_lines.append("PPT: Statistics slides enabled")
+            if self.ppt_include_rms_table_checkbox.isChecked():
+                summary_lines.append("PPT: RMS summary table enabled")
+                if self.ppt_include_3sigma_columns_checkbox.isChecked():
+                    summary_lines.append("PPT: 3-sigma columns included")
         summary_lines.append(f"Output Directory: {self.output_dir_edit.text()}")
 
         # Total operations estimate

@@ -485,12 +485,15 @@ class EventManagerWindow(QMainWindow):
     def _validate_events_for_apply(self):
         """Validate events before applying or saving."""
         errors = []
+        min_time = 0.0
+        max_time = self.max_time
+
         for idx, event in enumerate(self.events, start=1):
             label = event.name or f"Event {idx}"
-            if event.start_time < 0:
-                errors.append(f"{label}: Start time must be >= 0")
-            if event.end_time > self.max_time:
-                errors.append(f"{label}: End time must be <= {self.max_time:.3f}")
+            if event.start_time < min_time:
+                event.start_time = min_time
+            if event.end_time > max_time:
+                event.end_time = max_time
             if event.start_time >= event.end_time:
                 errors.append(f"{label}: Start time must be less than end time")
         return errors

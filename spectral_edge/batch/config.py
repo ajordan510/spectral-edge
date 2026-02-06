@@ -59,16 +59,37 @@ class FilterConfig:
 class PSDConfig:
     """Configuration for PSD calculation parameters."""
     
-    method: str = "welch"  # welch or maximax
+    method: str = "maximax"  # welch or maximax
     window: str = "hann"
     overlap_percent: float = 50.0
     use_efficient_fft: bool = True
-    desired_df: float = 1.0
+    desired_df: float = 5.0
     freq_min: float = 20.0
     freq_max: float = 2000.0
     remove_running_mean: bool = True
     running_mean_window: float = 1.0  # Window size in seconds for running mean removal
-    frequency_spacing: str = "linear"  # linear or octave
+    frequency_spacing: str = "constant_bandwidth"  # constant_bandwidth or fractional octaves
+
+    def __post_init__(self):
+        """Normalize legacy frequency spacing values."""
+        if self.frequency_spacing == "linear":
+            self.frequency_spacing = "constant_bandwidth"
+        elif self.frequency_spacing == "octave":
+            self.frequency_spacing = "1/3"
+
+    def get_octave_fraction(self) -> Optional[float]:
+        """
+        Return octave fraction as float for fractional octave spacing.
+        Returns None for constant bandwidth.
+        """
+        if self.frequency_spacing == "constant_bandwidth":
+            return None
+        if isinstance(self.frequency_spacing, str) and self.frequency_spacing.startswith("1/"):
+            try:
+                return float(self.frequency_spacing.split("/", 1)[1])
+            except ValueError:
+                return None
+        return None
     
     def validate(self):
         """
@@ -94,8 +115,58 @@ class PSDConfig:
         if self.freq_min >= self.freq_max:
             raise ValueError("freq_min must be less than freq_max")
             
-        if self.frequency_spacing not in ["linear", "octave"]:
+        if self.frequency_spacing not in [
+            "constant_bandwidth", "1/36", "1/24", "1/12", "1/6", "1/3"
+        ]:
             raise ValueError(f"Invalid frequency_spacing: {self.frequency_spacing}")
+
+
+@dataclass
+class PowerPointConfig:
+    """Configuration for PowerPoint report generation."""
+
+    layout: str = "psd_only"
+    include_parameters: bool = True
+    include_statistics: bool = False
+    include_rms_table: bool = False
+    include_3sigma_columns: bool = False
+
+    def validate(self):
+        valid_layouts = [
+            "time_psd_spec_one_slide",
+            "all_plots_individual",
+            "psd_spec_side_by_side",
+            "psd_only",
+            "spectrogram_only",
+            "time_history_only"
+        ]
+        if self.layout not in valid_layouts:
+            raise ValueError(f"Invalid PowerPoint layout: {self.layout}")
+
+
+@dataclass
+class StatisticsConfig:
+    """Configuration for batch statistics calculations."""
+
+    enabled: bool = False
+    pdf_bins: int = 50
+    running_window_seconds: float = 1.0
+    show_mean: bool = True
+    show_std: bool = True
+    show_skewness: bool = True
+    show_kurtosis: bool = True
+    show_normal: bool = True
+    show_rayleigh: bool = False
+    show_uniform: bool = False
+    max_plot_points: int = 5000
+
+    def validate(self):
+        if self.pdf_bins < 10 or self.pdf_bins > 1000:
+            raise ValueError(f"Invalid pdf_bins: {self.pdf_bins}")
+        if self.running_window_seconds <= 0:
+            raise ValueError("running_window_seconds must be positive")
+        if self.max_plot_points < 100:
+            raise ValueError("max_plot_points must be at least 100")
 
 
 @dataclass
@@ -103,10 +174,10 @@ class SpectrogramConfig:
     """Configuration for spectrogram generation."""
     
     enabled: bool = False
-    desired_df: float = 1.0
+    desired_df: float = 2.0
     overlap_percent: float = 50.0
     use_efficient_fft: bool = True
-    snr_threshold: float = 20.0
+    snr_threshold: float = 50.0
     freq_min: float = 20.0
     freq_max: float = 2000.0
     colormap: str = "viridis"
@@ -252,6 +323,8 @@ class BatchConfig:
     spectrogram_config: SpectrogramConfig = field(default_factory=SpectrogramConfig)
     display_config: DisplayConfig = field(default_factory=DisplayConfig)
     output_config: OutputConfig = field(default_factory=OutputConfig)
+    powerpoint_config: PowerPointConfig = field(default_factory=PowerPointConfig)
+    statistics_config: StatisticsConfig = field(default_factory=StatisticsConfig)
     
     # Metadata
     config_name: str = ""
@@ -299,6 +372,8 @@ class BatchConfig:
         self.spectrogram_config.validate()
         self.display_config.validate()
         self.output_config.validate()
+        self.powerpoint_config.validate()
+        self.statistics_config.validate()
     
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -331,6 +406,12 @@ class BatchConfig:
             data['filter_config'] = FilterConfig(**data['filter_config'])
             
         if 'psd_config' in data and isinstance(data['psd_config'], dict):
+            # Backward compatibility for legacy spacing values
+            spacing = data['psd_config'].get('frequency_spacing')
+            if spacing == "linear":
+                data['psd_config']['frequency_spacing'] = "constant_bandwidth"
+            elif spacing == "octave":
+                data['psd_config']['frequency_spacing'] = "1/3"
             data['psd_config'] = PSDConfig(**data['psd_config'])
             
         if 'spectrogram_config' in data and isinstance(data['spectrogram_config'], dict):
@@ -341,6 +422,12 @@ class BatchConfig:
             
         if 'output_config' in data and isinstance(data['output_config'], dict):
             data['output_config'] = OutputConfig(**data['output_config'])
+
+        if 'powerpoint_config' in data and isinstance(data['powerpoint_config'], dict):
+            data['powerpoint_config'] = PowerPointConfig(**data['powerpoint_config'])
+
+        if 'statistics_config' in data and isinstance(data['statistics_config'], dict):
+            data['statistics_config'] = StatisticsConfig(**data['statistics_config'])
             
         if 'events' in data and isinstance(data['events'], list):
             data['events'] = [EventDefinition(**e) if isinstance(e, dict) else e 

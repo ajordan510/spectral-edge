@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 def write_psds_to_hdf5(
     result: 'BatchProcessingResult',
-    source_file: str
+    source_file: str,
+    config: 'BatchConfig'
 ) -> None:
     """
     Write processed PSD results back to the source HDF5 file.
@@ -52,6 +53,8 @@ def write_psds_to_hdf5(
         Batch processing result object containing channel_results
     source_file : str
         Path to the HDF5 file to write to
+    config : BatchConfig
+        Batch configuration object (for spacing conversion)
         
     Returns:
     --------
@@ -84,16 +87,24 @@ def write_psds_to_hdf5(
     try:
         with h5py.File(source_file, 'a') as hdf_file:
             # Reorganize results by flight and event
+            from spectral_edge.batch.output_psd import apply_frequency_spacing
+
             for (flight_key, channel_key), event_dict in result.channel_results.items():
                 for event_name, event_result in event_dict.items():
+                    frequencies_out, psd_out = apply_frequency_spacing(
+                        event_result['frequencies'],
+                        event_result['psd'],
+                        config.psd_config
+                    )
                     _write_channel_psd_to_event(
                         hdf_file, 
                         flight_key, 
                         event_name, 
                         channel_key,
-                        event_result['frequencies'],
-                        event_result['psd'],
-                        event_result['metadata']
+                        frequencies_out,
+                        psd_out,
+                        event_result['metadata'],
+                        config.psd_config
                     )
         
         logger.info(f"PSDs written to HDF5: {source_file}")
@@ -110,7 +121,8 @@ def _write_channel_psd_to_event(
     channel_key: str,
     frequencies: np.ndarray,
     psd_values: np.ndarray,
-    metadata: Dict
+    metadata: Dict,
+    psd_config
 ) -> None:
     """
     Write a single channel's PSD data to HDF5 for a specific event.
@@ -131,6 +143,8 @@ def _write_channel_psd_to_event(
         PSD values
     metadata : Dict
         Processing metadata
+    psd_config : PSDConfig
+        PSD configuration (for spacing metadata)
     """
     # Ensure flight group exists
     if flight_key not in hdf_file:
@@ -176,6 +190,12 @@ def _write_channel_psd_to_event(
     channel_group.attrs['sample_rate'] = metadata.get('sample_rate', 0.0)
     channel_group.attrs['psd_method'] = metadata.get('method', 'unknown')
     channel_group.attrs['window'] = metadata.get('window', 'unknown')
+    channel_group.attrs['frequency_spacing'] = getattr(psd_config, "frequency_spacing", "constant_bandwidth")
+    octave_fraction = None
+    if hasattr(psd_config, "get_octave_fraction"):
+        octave_fraction = psd_config.get_octave_fraction()
+    if octave_fraction:
+        channel_group.attrs['octave_fraction'] = float(octave_fraction)
 
 
 def read_psds_from_hdf5(

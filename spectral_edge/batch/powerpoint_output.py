@@ -1,22 +1,36 @@
 """
 PowerPoint Output Module for Batch Processing
 
-This module generates PowerPoint presentations from batch PSD processing results.
-Leverages the existing report_generator utility for consistent formatting.
-
-Author: SpectralEdge Development Team
-Date: 2026-02-02
+Generates PowerPoint presentations from batch processing results with
+flexible layout options and consistent light-theme plotting.
 """
 
-import numpy as np
-import matplotlib.pyplot as plt
-from pathlib import Path
-from typing import Dict, Tuple, List
+import io
 import logging
-import tempfile
 from datetime import datetime
+from pathlib import Path
+from typing import Dict, Tuple, List, Optional
+
+import numpy as np
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from spectral_edge.utils.report_generator import ReportGenerator
+from spectral_edge.utils.plot_theme import (
+    apply_light_matplotlib_theme,
+    style_axes,
+    style_colorbar,
+    apply_axis_styling,
+    BASE_FONT_SIZE,
+    LINE_COLOR,
+)
+from spectral_edge.batch.output_psd import apply_frequency_spacing
+from spectral_edge.batch.spectrogram_generator import generate_spectrogram
+from spectral_edge.batch.statistics import compute_statistics, plot_pdf, plot_running_stat
+from spectral_edge.utils.hdf5_loader import HDF5FlightDataLoader
+from spectral_edge.batch.csv_loader import load_csv_files
 
 logger = logging.getLogger(__name__)
 
@@ -29,349 +43,581 @@ def generate_powerpoint_report(
 ) -> str:
     """
     Generate a PowerPoint presentation from batch processing results.
-    
-    Creates a professional report with:
-    - Title slide
-    - Configuration summary
-    - One slide per event showing PSD plots
-    - Summary statistics
-    
-    Parameters:
-    -----------
-    results : BatchProcessingResult
-        Batch processing results object
-    output_path : str
-        Directory path to save the PowerPoint file
-    config : BatchConfig
-        Batch configuration object
-    title : str, optional
-        Title for the presentation
-        
-    Returns:
-    --------
-    str
-        Path to the saved PowerPoint file
-    
-    Raises:
-    -------
-    IOError
-        If file cannot be written
-        
-    Example:
-    --------
-    >>> generate_powerpoint_report(results, '/tmp/output', config)
     """
     try:
-        # Initialize report generator with title
         report_gen = ReportGenerator(title=title)
-        
-        # Create title slide
         report_gen.add_title_slide(
             subtitle=f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
-        
-        # Add configuration summary slide
-        _add_config_slide(report_gen, config)
-        
-        # Transform BatchProcessingResult into event-organized structure
-        # Group results by event with nested structure: event -> flight -> channel -> (freq, psd)
-        events_data = {}
-        for (flight_key, channel_key), event_dict in results.channel_results.items():
-            for event_name, event_result in event_dict.items():
-                if event_name not in events_data:
-                    events_data[event_name] = {}
-                
-                # Create nested structure: flight_key -> channel_key -> (frequencies, psd)
-                if flight_key not in events_data[event_name]:
-                    events_data[event_name][flight_key] = {}
-                
-                events_data[event_name][flight_key][channel_key] = (
-                    event_result['frequencies'],
-                    event_result['psd']
-                )
-        
-        # Add event slides
-        for event_name, event_results in events_data.items():
-            _add_event_slide(report_gen, event_name, event_results, config)
-        
-        # Save presentation
-        from pathlib import Path
+
+        if config.powerpoint_config.include_parameters:
+            _add_config_slide(report_gen, config, results)
+
+        layout = config.powerpoint_config.layout
+        include_time = _layout_includes_time(layout)
+        include_psd = _layout_includes_psd(layout)
+        include_spec = _layout_includes_spectrogram(layout)
+        include_stats = config.powerpoint_config.include_statistics
+
+        events = _get_event_definitions(config)
+
+        time_history_cache = {}
+        if include_time or include_stats or include_spec:
+            time_history_cache = _load_time_history_cache(results, config, events)
+
+        for event_name, start_time, end_time in events:
+            for (flight_key, channel_key), event_dict in results.channel_results.items():
+                if event_name not in event_dict:
+                    continue
+
+                event_result = event_dict[event_name]
+                metadata = event_result.get('metadata', {})
+                units = metadata.get('units', '')
+                sample_rate = metadata.get('sample_rate', None)
+
+                channel_label = f"{flight_key}/{channel_key}"
+                slide_title = f"{flight_key} | {event_name} | {channel_key}"
+
+                time_data = None
+                signal_data = None
+                time_full_slice = None
+                signal_full_slice = None
+                if (flight_key, channel_key) in time_history_cache:
+                    time_full, signal_full, units_loaded, sample_rate_loaded = time_history_cache[(flight_key, channel_key)]
+                    if not units:
+                        units = units_loaded
+                    if sample_rate is None:
+                        sample_rate = sample_rate_loaded
+                    time_full_slice, signal_full_slice = _slice_event_signal(
+                        time_full, signal_full, start_time, end_time
+                    )
+                    time_data, signal_data = _decimate_time_series(time_full_slice, signal_full_slice)
+
+                if sample_rate is None and time_full_slice is not None and len(time_full_slice) > 1:
+                    sample_rate = float(1.0 / np.median(np.diff(time_full_slice)))
+
+                plot_channel_title = f"{flight_key}/{channel_key}"
+
+                # PSD plot
+                psd_image = None
+                if include_psd:
+                    psd_role = _get_slot_role(layout, "psd")
+                    psd_image = _create_psd_plot(
+                        event_result,
+                        config,
+                        units,
+                        plot_title=f"PSD | {plot_channel_title}",
+                        layout=layout,
+                        slot_role=psd_role,
+                    )
+
+                # Time history plot
+                time_image = None
+                if include_time and time_data is not None and signal_data is not None and len(time_data) > 0:
+                    time_role = _get_slot_role(layout, "time")
+                    time_image = _create_time_history_plot(
+                        time_data,
+                        signal_data,
+                        units,
+                        plot_title=f"Time History | {plot_channel_title}",
+                        layout=layout,
+                        slot_role=time_role,
+                    )
+
+                # Spectrogram plot
+                spec_image = None
+                if include_spec:
+                    spectrogram_data = event_result.get('spectrogram')
+                    if spectrogram_data is None and time_full_slice is not None and signal_full_slice is not None and sample_rate and len(time_full_slice) > 0:
+                        try:
+                            spec_freqs, spec_times, Sxx = generate_spectrogram(
+                                signal_full_slice,
+                                sample_rate,
+                                desired_df=config.spectrogram_config.desired_df,
+                                overlap_percent=config.spectrogram_config.overlap_percent,
+                                snr_threshold=config.spectrogram_config.snr_threshold,
+                                use_efficient_fft=True
+                            )
+                            spectrogram_data = {
+                                'frequencies': spec_freqs,
+                                'times': spec_times,
+                                'Sxx': Sxx
+                            }
+                        except Exception as exc:
+                            logger.warning(f"Spectrogram generation failed for {channel_label}/{event_name}: {exc}")
+
+                    if spectrogram_data is not None:
+                        spec_role = _get_slot_role(layout, "spectrogram")
+                        spec_image = _create_spectrogram_plot(
+                            spectrogram_data,
+                            config,
+                            plot_title=f"Spectrogram | {plot_channel_title}",
+                            layout=layout,
+                            slot_role=spec_role,
+                        )
+
+                # Slide generation
+                if layout == "time_psd_spec_one_slide":
+                    if time_image and psd_image and spec_image:
+                        report_gen.add_three_plot_slide(slide_title, time_image, psd_image, spec_image)
+                elif layout == "all_plots_individual":
+                    if time_image:
+                        report_gen.add_single_plot_slide(time_image, f"Time History | {slide_title}")
+                    if psd_image:
+                        report_gen.add_single_plot_slide(psd_image, f"PSD | {slide_title}")
+                    if spec_image:
+                        report_gen.add_single_plot_slide(spec_image, f"Spectrogram | {slide_title}")
+                elif layout == "psd_spec_side_by_side":
+                    if psd_image and spec_image:
+                        report_gen.add_two_plot_slide(slide_title, psd_image, spec_image)
+                elif layout == "psd_only":
+                    if psd_image:
+                        report_gen.add_single_plot_slide(psd_image, slide_title)
+                elif layout == "spectrogram_only":
+                    if spec_image:
+                        report_gen.add_single_plot_slide(spec_image, slide_title)
+                elif layout == "time_history_only":
+                    if time_image:
+                        report_gen.add_single_plot_slide(time_image, slide_title)
+
+                # Statistics slide
+                if include_stats and time_full_slice is not None and signal_full_slice is not None and len(time_full_slice) > 0:
+                    stats = compute_statistics(signal_full_slice, sample_rate, config.statistics_config)
+                    pdf_fig, _ = plot_pdf(stats['pdf'], config.statistics_config)
+                    pdf_bytes = _fig_to_bytes(pdf_fig)
+
+                    running_mean_fig, _ = plot_running_stat(stats['running'], "mean", "Running Mean", "Mean")
+                    running_std_fig, _ = plot_running_stat(stats['running'], "std", "Running Std", "Std")
+                    running_skew_fig, _ = plot_running_stat(stats['running'], "skewness", "Running Skewness", "Skewness")
+                    running_kurt_fig, _ = plot_running_stat(stats['running'], "kurtosis", "Running Kurtosis", "Kurtosis")
+
+                    mean_bytes = _fig_to_bytes(running_mean_fig)
+                    std_bytes = _fig_to_bytes(running_std_fig)
+                    skew_bytes = _fig_to_bytes(running_skew_fig)
+                    kurt_bytes = _fig_to_bytes(running_kurt_fig)
+
+                    summary = _format_stats_summary_dict(stats['overall'], units)
+                    report_gen.add_statistics_dashboard_slide(
+                        slide_title,
+                        pdf_bytes,
+                        mean_bytes,
+                        std_bytes,
+                        skew_bytes,
+                        kurt_bytes,
+                        summary
+                    )
+
+        if config.powerpoint_config.include_rms_table:
+            _add_rms_summary_slides(report_gen, results, config)
+
         output_dir = Path(output_path)
         output_dir.mkdir(parents=True, exist_ok=True)
         ppt_file = output_dir / "batch_psd_report.pptx"
         report_gen.save(str(ppt_file))
         logger.info(f"PowerPoint report saved: {ppt_file}")
         return str(ppt_file)
-        
+
     except Exception as e:
         logger.error(f"Failed to generate PowerPoint report: {str(e)}")
         raise
 
 
-def _add_config_slide(report_gen: ReportGenerator, config: 'BatchConfig') -> None:
-    """
-    Add configuration summary slide.
-    
-    Parameters:
-    -----------
-    report_gen : ReportGenerator
-        Report generator instance
-    config : BatchConfig
-        Batch configuration
-    """
-    config_text = f"""
-Processing Configuration:
+def _add_config_slide(report_gen: ReportGenerator, config: 'BatchConfig', results) -> None:
+    source_files = [Path(p).name for p in config.source_files]
+    num_channels = len(results.channel_results) if results else len(config.selected_channels)
+    event_defs = _get_event_definitions(config)
+    events_desc = "Full duration" if not event_defs else f"{len(event_defs)} event(s)"
 
-PSD Method: {config.psd_config.method}
-Window Function: {config.psd_config.window}
-Overlap: {config.psd_config.overlap_percent}%
-Frequency Range: {config.psd_config.freq_min} - {config.psd_config.freq_max} Hz
-Frequency Spacing: {config.psd_config.frequency_spacing}
-
-Filtering: {'Enabled' if config.filter_config.enabled else 'Disabled'}
-"""
-    
+    filter_desc = "None"
     if config.filter_config.enabled:
-        config_text += f"""
-Filter Type: {config.filter_config.filter_type}
-Filter Design: {config.filter_config.filter_design}
-Filter Order: {config.filter_config.filter_order}
-"""
-    
-    report_gen.add_text_slide(
+        filter_desc = (
+            f"{config.filter_config.filter_type} "
+            f"({config.filter_config.filter_design}, order {config.filter_config.filter_order})"
+        )
+
+    sections = [
+        (
+            "Ground Rules & Assumptions",
+            [
+                f"PSD method: {config.psd_config.method} with {config.psd_config.window} window",
+                f"Overlap: {config.psd_config.overlap_percent}% and df {config.psd_config.desired_df} Hz",
+                f"Frequency spacing displayed as {config.psd_config.frequency_spacing}",
+                f"Running mean removal: {'On' if config.psd_config.remove_running_mean else 'Off'}",
+                f"Filtering: {filter_desc}",
+            ],
+        ),
+        (
+            "Source Data",
+            [
+                f"Source type: {config.source_type.upper()}",
+                f"Source files: {', '.join(source_files)}",
+                f"Channels processed: {num_channels}",
+                f"Events: {events_desc}",
+            ],
+        ),
+        (
+            "Processing Parameters",
+            [
+                f"Frequency range: {config.psd_config.freq_min} to {config.psd_config.freq_max} Hz",
+                f"Efficient FFT: {'On' if config.psd_config.use_efficient_fft else 'Off'}",
+                f"Spectrograms: {'Enabled' if config.spectrogram_config.enabled else 'Disabled'}",
+                f"Statistics: {'Enabled' if config.powerpoint_config.include_statistics else 'Disabled'}",
+            ],
+        ),
+    ]
+
+    report_gen.add_bulleted_sections_slide(
         title="Processing Configuration",
-        content=config_text
+        sections=sections
     )
 
 
-def _add_event_slide(
-    report_gen: ReportGenerator,
-    event_name: str,
-    event_results: Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]],
-    config: 'BatchConfig'
-) -> None:
+def _layout_includes_time(layout: str) -> bool:
+    return layout in {
+        "time_psd_spec_one_slide",
+        "all_plots_individual",
+        "time_history_only"
+    }
+
+
+def _layout_includes_psd(layout: str) -> bool:
+    return layout in {
+        "time_psd_spec_one_slide",
+        "all_plots_individual",
+        "psd_spec_side_by_side",
+        "psd_only"
+    }
+
+
+def _layout_includes_spectrogram(layout: str) -> bool:
+    return layout in {
+        "time_psd_spec_one_slide",
+        "all_plots_individual",
+        "psd_spec_side_by_side",
+        "spectrogram_only"
+    }
+
+
+def _get_slot_role(layout: str, plot_kind: str) -> str:
     """
-    Add a slide for a specific event with PSD plots.
-    
-    Parameters:
-    -----------
-    report_gen : ReportGenerator
-        Report generator instance
-    event_name : str
-        Name of the event
-    event_results : Dict
-        Results for this event
-    config : BatchConfig
-        Batch configuration
+    Return slot role used by the report layout for a given plot kind.
+
+    Roles map to report placeholder geometry:
+    - single: 12.333 x 6.0
+    - two_col: 6.1 x 5.9
+    - three_top: 12.333 x 1.92
+    - three_bottom: 6.1 x 4.03
     """
-    # Create PSD plot
-    fig = _create_psd_plot(event_name, event_results, config)
-    
-    # Save plot to bytes
-    import io
-    img_buffer = io.BytesIO()
-    fig.savefig(img_buffer, format='png', dpi=300, bbox_inches='tight')
-    img_buffer.seek(0)
-    image_bytes = img_buffer.read()
+    if layout == "time_psd_spec_one_slide":
+        if plot_kind == "time":
+            return "three_top"
+        return "three_bottom"
+    if layout == "psd_spec_side_by_side":
+        return "two_col"
+    return "single"
+
+
+def _get_plot_figsize(layout: str, plot_kind: str, slot_role: str = "single") -> Tuple[float, float]:
+    """Return matplotlib figure size matched to the target PowerPoint slot ratio."""
+    slot_sizes = {
+        "single": (12.333, 6.0),
+        "two_col": (6.1, 5.9),
+        "three_top": (12.333, 1.92),
+        "three_bottom": (6.1, 4.03),
+    }
+    return slot_sizes.get(slot_role, slot_sizes["single"])
+
+
+def _get_event_definitions(config: 'BatchConfig') -> List[Tuple[str, Optional[float], Optional[float]]]:
+    if config.process_full_duration:
+        return [("full_duration", None, None)]
+    return [(evt.name, evt.start_time, evt.end_time) for evt in config.events]
+
+
+def _event_bounds(events: List[Tuple[str, Optional[float], Optional[float]]]) -> Tuple[Optional[float], Optional[float]]:
+    starts = [s for _, s, _ in events if s is not None]
+    ends = [e for _, _, e in events if e is not None]
+    if not starts or not ends:
+        return None, None
+    return min(starts), max(ends)
+
+
+def _build_flight_to_file_map(source_files: List[str]) -> Dict[str, str]:
+    mapping = {}
+    for file_path in source_files:
+        try:
+            loader = HDF5FlightDataLoader(file_path)
+            for flight_key in loader.flights.keys():
+                mapping[flight_key] = file_path
+            loader.close()
+        except Exception as exc:
+            logger.warning(f"Failed to read HDF5 metadata from {file_path}: {exc}")
+    return mapping
+
+
+def _load_time_history_cache(results, config: 'BatchConfig', events):
+    cache = {}
+    event_min, event_max = _event_bounds(events)
+
+    if config.source_type == "hdf5":
+        flight_map = _build_flight_to_file_map(config.source_files)
+        loader_cache = {}
+
+        def _get_loader(path):
+            if path not in loader_cache:
+                loader_cache[path] = HDF5FlightDataLoader(path)
+            return loader_cache[path]
+
+        for flight_key, channel_key in results.channel_results.keys():
+            file_path = flight_map.get(flight_key)
+            if not file_path:
+                continue
+            try:
+                loader = _get_loader(file_path)
+                data = loader.load_channel_data(
+                    flight_key,
+                    channel_key,
+                    start_time=event_min,
+                    end_time=event_max,
+                    decimate_for_display=False
+                )
+                channel_info = loader.get_channel_info(flight_key, channel_key)
+                units = channel_info.units if channel_info else ""
+                cache[(flight_key, channel_key)] = (
+                    data['time_full'],
+                    data['data_full'],
+                    units,
+                    data.get('sample_rate', None)
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to load time history for {flight_key}/{channel_key}: {exc}")
+
+        for loader in loader_cache.values():
+            try:
+                loader.close()
+            except Exception:
+                pass
+    else:
+        csv_data = load_csv_files(config.source_files)
+        for file_path, channels in csv_data.items():
+            flight_key = Path(file_path).stem
+            for channel_key, (time_array, signal_array, sample_rate, units) in channels.items():
+                if (flight_key, channel_key) in results.channel_results:
+                    cache[(flight_key, channel_key)] = (time_array, signal_array, units, sample_rate)
+
+    return cache
+
+
+def _slice_event_signal(time_array, signal_array, start_time, end_time):
+    if start_time is None or end_time is None:
+        return time_array, signal_array
+    if time_array.size == 0:
+        return time_array, signal_array
+
+    start = max(start_time, float(time_array[0]))
+    end = min(end_time, float(time_array[-1]))
+    if start >= end:
+        return np.array([]), np.array([])
+
+    mask = (time_array >= start) & (time_array <= end)
+    return time_array[mask], signal_array[mask]
+
+
+def _decimate_time_series(time_array, signal_array, max_points: int = 10000):
+    if time_array is None or signal_array is None:
+        return time_array, signal_array
+    if len(time_array) <= max_points:
+        return time_array, signal_array
+    step = max(1, len(time_array) // max_points)
+    return time_array[::step], signal_array[::step]
+
+
+def _fig_to_bytes(fig) -> bytes:
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+    buf.seek(0)
+    data = buf.read()
     plt.close(fig)
-    
-    # Add slide with plot
-    report_gen.add_psd_plot(
-        image_bytes=image_bytes,
-        title=f"Event: {event_name}"
-    )
+    return data
+
+
+def _create_time_history_plot(
+    time_array,
+    signal_array,
+    units: str,
+    plot_title: str,
+    layout: str,
+    slot_role: str = "single",
+) -> bytes:
+    apply_light_matplotlib_theme()
+    fig, ax = plt.subplots(figsize=_get_plot_figsize(layout, "time", slot_role))
+    ax.plot(time_array, signal_array, linewidth=1.3, color=LINE_COLOR)
+    ylabel = f"Amplitude ({units})" if units else "Amplitude"
+    style_axes(ax, plot_title, "Time (s)", ylabel)
+    apply_axis_styling(ax, font_size=BASE_FONT_SIZE, include_grid=True)
+    fig.tight_layout()
+    return _fig_to_bytes(fig)
 
 
 def _create_psd_plot(
-    event_name: str,
-    event_results: Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]],
-    config: 'BatchConfig'
-) -> plt.Figure:
-    """
-    Create a PSD plot for an event.
-    
-    Parameters:
-    -----------
-    event_name : str
-        Name of the event
-    event_results : Dict
-        Results for this event
-    config : BatchConfig
-        Batch configuration
-        
-    Returns:
-    --------
-    plt.Figure
-        Matplotlib figure object
-    """
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Plot each channel
-    for source_id, channels in event_results.items():
-        for channel_name, (frequencies, psd_values) in channels.items():
-            label = f"{source_id}_{channel_name}"
-            ax.loglog(frequencies, psd_values, label=label, linewidth=1.5)
-    
-    # Configure plot
-    ax.set_xlabel('Frequency (Hz)', fontsize=12)
-    ax.set_ylabel('PSD (g²/Hz)', fontsize=12)
-    ax.set_title(f'Power Spectral Density - {event_name}', fontsize=14, fontweight='bold')
-    ax.grid(True, which='both', alpha=0.3)
-    ax.legend(loc='best', fontsize=10)
-    
-    # Apply display settings if not auto-scale
+    event_result: Dict,
+    config: 'BatchConfig',
+    units: str,
+    plot_title: str,
+    layout: str,
+    slot_role: str = "single",
+) -> bytes:
+    frequencies = event_result['frequencies']
+    psd_values = event_result['psd']
+    frequencies, psd_values = apply_frequency_spacing(frequencies, psd_values, config.psd_config)
+
+    if config.psd_config.frequency_spacing == "constant_bandwidth":
+        freq_min = config.psd_config.freq_min
+        freq_max = config.psd_config.freq_max
+        mask = (frequencies >= freq_min) & (frequencies <= freq_max)
+        if np.any(mask):
+            frequencies = frequencies[mask]
+            psd_values = psd_values[mask]
+
+    apply_light_matplotlib_theme()
+    fig, ax = plt.subplots(figsize=_get_plot_figsize(layout, "psd", slot_role))
+    ax.loglog(frequencies, psd_values, linewidth=1.6, color=LINE_COLOR)
+
+    ylabel = f"PSD ({units}^2/Hz)" if units else "PSD"
+    style_axes(ax, plot_title, "Frequency (Hz)", ylabel)
+    apply_axis_styling(ax, font_size=BASE_FONT_SIZE, include_grid=config.display_config.psd_show_grid)
+    if not config.display_config.psd_show_grid:
+        ax.grid(False)
+
     if not config.display_config.psd_auto_scale:
         if config.display_config.psd_x_axis_min and config.display_config.psd_x_axis_max:
             ax.set_xlim(config.display_config.psd_x_axis_min, config.display_config.psd_x_axis_max)
         if config.display_config.psd_y_axis_min and config.display_config.psd_y_axis_max:
             ax.set_ylim(config.display_config.psd_y_axis_min, config.display_config.psd_y_axis_max)
-    
-    plt.tight_layout()
-    return fig
+
+    fig.tight_layout()
+    return _fig_to_bytes(fig)
 
 
-def generate_spectrogram_slides(
-    spectrograms: Dict[str, Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]]],
-    output_path: str,
-    config: 'BatchConfig'
-) -> None:
-    """
-    Generate PowerPoint slides for spectrograms.
-    
-    Parameters:
-    -----------
-    spectrograms : Dict[str, Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]]]
-        Nested dictionary structure:
-        {
-            event_name: {
-                source_identifier: {
-                    channel_name: (time, frequencies, Sxx),
-                    ...
-                },
-                ...
-            },
-            ...
-        }
-    output_path : str
-        Path to save the PowerPoint file
-    config : BatchConfig
-        Batch configuration
-        
-    Notes:
-    ------
-    This function creates a separate presentation for spectrograms.
-    Can be merged with PSD report if desired.
-    """
-    try:
-        report_gen = ReportGenerator()
-        
-        # Title slide
-        report_gen.add_title_slide(
-            title="Batch Spectrogram Report",
-            subtitle=f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+def _create_spectrogram_plot(
+    spectrogram_data: Dict,
+    config: 'BatchConfig',
+    plot_title: str,
+    layout: str,
+    slot_role: str = "single",
+) -> Optional[bytes]:
+    apply_light_matplotlib_theme()
+    fig, ax = plt.subplots(figsize=_get_plot_figsize(layout, "spectrogram", slot_role))
+
+    frequencies = spectrogram_data['frequencies']
+    times = spectrogram_data['times']
+    Sxx = spectrogram_data['Sxx']
+
+    Sxx_db = 10 * np.log10(Sxx + 1e-12)
+
+    if Sxx_db.shape == (len(frequencies), len(times)):
+        plot_data = Sxx_db
+    elif Sxx_db.shape == (len(times), len(frequencies)):
+        plot_data = Sxx_db.T
+    else:
+        logger.warning(
+            f"Spectrogram shape mismatch: Sxx {Sxx_db.shape}, "
+            f"freq {len(frequencies)}, time {len(times)}"
         )
-        
-        # Add spectrogram slides
-        for event_name, event_results in spectrograms.items():
-            for source_id, channels in event_results.items():
-                for channel_name, (time, frequencies, Sxx) in channels.items():
-                    _add_spectrogram_slide(
-                        report_gen,
-                        event_name,
-                        source_id,
-                        channel_name,
-                        time,
-                        frequencies,
-                        Sxx,
-                        config
-                    )
-        
-        # Save presentation
-        report_gen.save(output_path)
-        logger.info(f"Spectrogram report saved: {output_path}")
-        
-    except Exception as e:
-        logger.error(f"Failed to generate spectrogram report: {str(e)}")
-        raise
+        plt.close(fig)
+        return None
 
-
-def _add_spectrogram_slide(
-    report_gen: ReportGenerator,
-    event_name: str,
-    source_id: str,
-    channel_name: str,
-    time: np.ndarray,
-    frequencies: np.ndarray,
-    Sxx: np.ndarray,
-    config: 'BatchConfig'
-) -> None:
-    """
-    Add a slide with a spectrogram plot.
-    
-    Parameters:
-    -----------
-    report_gen : ReportGenerator
-        Report generator instance
-    event_name : str
-        Event name
-    source_id : str
-        Source identifier
-    channel_name : str
-        Channel name
-    time : np.ndarray
-        Time array
-    frequencies : np.ndarray
-        Frequency array
-    Sxx : np.ndarray
-        Spectrogram data
-    config : BatchConfig
-        Batch configuration
-    """
-    # Create spectrogram plot
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Convert to dB
-    Sxx_dB = 10 * np.log10(Sxx + 1e-12)
-    
-    # Plot spectrogram
     im = ax.pcolormesh(
-        time,
+        times,
         frequencies,
-        Sxx_dB.T,  # Transpose so frequency is on y-axis
-        shading='gouraud',
+        plot_data,
+        shading='auto',
         cmap=config.spectrogram_config.colormap
     )
-    
-    # Configure plot
-    ax.set_xlabel('Time (s)', fontsize=12)
-    ax.set_ylabel('Frequency (Hz)', fontsize=12)
-    ax.set_title(f'{event_name} - {source_id}_{channel_name}', fontsize=14, fontweight='bold')
-    
-    # Add colorbar
+
+    style_axes(ax, plot_title, "Time (s)", "Frequency (Hz)")
+    apply_axis_styling(ax, font_size=BASE_FONT_SIZE, include_grid=False)
     cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label('PSD (dB)', fontsize=10)
-    
-    # Apply display settings
+    cbar.set_label("PSD (dB)")
+    style_colorbar(cbar, font_size=BASE_FONT_SIZE)
+
     if not config.display_config.spectrogram_auto_scale:
-        if config.display_config.spectrogram_time_min and config.display_config.spectrogram_time_max:
+        if config.display_config.spectrogram_time_min is not None and config.display_config.spectrogram_time_max is not None:
             ax.set_xlim(config.display_config.spectrogram_time_min, config.display_config.spectrogram_time_max)
-        if config.display_config.spectrogram_freq_min and config.display_config.spectrogram_freq_max:
+        if config.display_config.spectrogram_freq_min is not None and config.display_config.spectrogram_freq_max is not None:
             ax.set_ylim(config.display_config.spectrogram_freq_min, config.display_config.spectrogram_freq_max)
-    
-    plt.tight_layout()
-    
-    # Save to temporary file
-    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
-        temp_path = tmp_file.name
-        fig.savefig(temp_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
-    
-    try:
-        # Add slide
-        report_gen.add_image_slide(
-            title=f"Spectrogram: {event_name}",
-            image_path=temp_path
-        )
-    finally:
-        # Clean up
-        Path(temp_path).unlink()
+
+    fig.tight_layout()
+    return _fig_to_bytes(fig)
+
+
+def _format_stats_summary(overall_stats: Dict, units: str) -> str:
+    unit_suffix = f" {units}" if units else ""
+    lines = [
+        f"Mean: {overall_stats['mean']:.4f}{unit_suffix}",
+        f"Std: {overall_stats['std']:.4f}{unit_suffix}",
+        f"Skewness: {overall_stats['skewness']:.4f}",
+        f"Kurtosis: {overall_stats['kurtosis']:.4f}",
+        f"Min: {overall_stats['min']:.4f}{unit_suffix}",
+        f"Max: {overall_stats['max']:.4f}{unit_suffix}",
+        f"RMS: {overall_stats['rms']:.4f}{unit_suffix}",
+        f"Crest Factor: {overall_stats['crest_factor']:.4f}",
+    ]
+    return "\n".join(lines)
+
+
+def _format_stats_summary_dict(overall_stats: Dict, units: str) -> List[Tuple[str, str]]:
+    unit_suffix = f" {units}" if units else ""
+    return [
+        ("Mean", f"{overall_stats['mean']:.4f}{unit_suffix}"),
+        ("Std", f"{overall_stats['std']:.4f}{unit_suffix}"),
+        ("Skewness", f"{overall_stats['skewness']:.4f}"),
+        ("Kurtosis", f"{overall_stats['kurtosis']:.4f}"),
+        ("Min", f"{overall_stats['min']:.4f}{unit_suffix}"),
+        ("Max", f"{overall_stats['max']:.4f}{unit_suffix}"),
+        ("RMS", f"{overall_stats['rms']:.4f}{unit_suffix}"),
+        ("Crest Factor", f"{overall_stats['crest_factor']:.4f}"),
+    ]
+
+
+def _add_rms_summary_slides(report_gen: ReportGenerator, results, config: 'BatchConfig') -> None:
+    events = [e[0] for e in _get_event_definitions(config)]
+    if not events:
+        return
+
+    include_3sigma = config.powerpoint_config.include_3sigma_columns
+    headers_base = ["Flight", "Channel"]
+
+    def build_headers(event_names: List[str]) -> List[str]:
+        headers = headers_base[:]
+        for event_name in event_names:
+            headers.append(f"{event_name} RMS")
+            if include_3sigma:
+                headers.append(f"{event_name} 3-sigma")
+        return headers
+
+    def build_rows(event_names: List[str]) -> List[List[str]]:
+        rows = []
+        for (flight_key, channel_key), event_dict in results.channel_results.items():
+            row = [flight_key, channel_key]
+            for event_name in event_names:
+                rms_value = None
+                if event_name in event_dict:
+                    rms_value = event_dict[event_name].get('metadata', {}).get('rms')
+                row.append("" if rms_value is None else f"{rms_value:.4f}")
+                if include_3sigma:
+                    row.append("" if rms_value is None else f"{3.0 * rms_value:.4f}")
+            rows.append(row)
+        rows.sort(key=lambda r: (r[0], r[1]))
+        return rows
+
+    if not results.channel_results:
+        return
+
+    max_events_per_slide = 4 if include_3sigma else 6
+    for idx in range(0, len(events), max_events_per_slide):
+        events_chunk = events[idx:idx + max_events_per_slide]
+        headers = build_headers(events_chunk)
+        rows = build_rows(events_chunk)
+        title = "RMS Summary" if idx == 0 else "RMS Summary (continued)"
+        report_gen.add_rms_table_slide(title, headers, rows)

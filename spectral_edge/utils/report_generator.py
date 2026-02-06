@@ -19,6 +19,9 @@ try:
     from pptx.dml.color import RGBColor
     from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
     from pptx.enum.shapes import MSO_SHAPE
+    from pptx.parts.image import Image
+    from pptx.oxml.ns import qn
+    from pptx.oxml.xmlchemy import OxmlElement
     PPTX_AVAILABLE = True
 except ImportError:
     PPTX_AVAILABLE = False
@@ -81,6 +84,58 @@ class ReportGenerator:
 
         self._slide_count = 0
 
+    def _style_slide_title(self, paragraph, size_pt: float = 28.0) -> None:
+        """Apply consistent title typography across report slides."""
+        paragraph.font.name = "Arial"
+        paragraph.font.size = Pt(size_pt)
+        paragraph.font.bold = True
+        paragraph.font.color.rgb = RGBColor(0x00, 0x39, 0xA6)
+
+    def _add_picture_fit(self, slide, image_bytes: bytes, left, top, width, height):
+        """
+        Add image to fit inside the target box while preserving aspect ratio.
+
+        Prevents font and axis distortion caused by forced width/height stretching.
+        """
+        image = Image.from_blob(image_bytes)
+        img_w_px, img_h_px = image.size
+        if img_w_px <= 0 or img_h_px <= 0:
+            return slide.shapes.add_picture(io.BytesIO(image_bytes), left, top, width, height)
+
+        slot_w = int(width)
+        slot_h = int(height)
+        scale = min(slot_w / float(img_w_px), slot_h / float(img_h_px))
+        draw_w = int(img_w_px * scale)
+        draw_h = int(img_h_px * scale)
+        draw_left = int(left) + (slot_w - draw_w) // 2
+        draw_top = int(top) + (slot_h - draw_h) // 2
+
+        return slide.shapes.add_picture(io.BytesIO(image_bytes), draw_left, draw_top, draw_w, draw_h)
+
+    def _apply_medium_style_3(self, table) -> bool:
+        """
+        Best-effort apply PowerPoint table style "Medium Style 3".
+
+        Returns True if style assignment succeeded, False otherwise.
+        """
+        # Candidate GUIDs across Office themes; first valid one wins.
+        candidate_ids = [
+            "{D7AC3CCA-C797-4891-BE02-D94E43425B78}",
+            "{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}",
+        ]
+        try:
+            tbl_pr = table._tbl.tblPr
+            if tbl_pr is None:
+                return False
+            style_node = tbl_pr.find(qn("a:tableStyleId"))
+            if style_node is None:
+                style_node = OxmlElement("a:tableStyleId")
+                tbl_pr.append(style_node)
+            style_node.text = candidate_ids[0]
+            return True
+        except Exception:
+            return False
+
     def add_title_slide(
         self,
         subtitle: str = "",
@@ -110,9 +165,7 @@ class ReportGenerator:
         title_frame = title_box.text_frame
         title_para = title_frame.paragraphs[0]
         title_para.text = self.title
-        title_para.font.size = Pt(44)
-        title_para.font.bold = True
-        title_para.font.color.rgb = RGBColor(0x1a, 0x1f, 0x2e)  # Dark blue
+        self._style_slide_title(title_para, size_pt=28.0)
         title_para.alignment = PP_ALIGN.CENTER
 
         # Add subtitle if provided
@@ -191,12 +244,7 @@ class ReportGenerator:
         title_frame = title_box.text_frame
         title_para = title_frame.paragraphs[0]
         title_para.text = title
-        title_para.font.size = Pt(28)
-        title_para.font.bold = True
-        title_para.font.color.rgb = RGBColor(0x1a, 0x1f, 0x2e)
-
-        # Add the plot image
-        image_stream = io.BytesIO(image_bytes)
+        self._style_slide_title(title_para)
 
         # Calculate image position (centered, with room for parameters)
         if parameters or rms_values:
@@ -212,9 +260,7 @@ class ReportGenerator:
             img_width = Inches(11.0)
             img_height = Inches(6.0)
 
-        slide.shapes.add_picture(
-            image_stream, img_left, img_top, img_width, img_height
-        )
+        self._add_picture_fit(slide, image_bytes, img_left, img_top, img_width, img_height)
 
         # Add parameters box if provided
         if parameters or rms_values:
@@ -262,6 +308,275 @@ class ReportGenerator:
 
         self._slide_count += 1
 
+    def add_single_plot_slide(
+        self,
+        image_bytes: bytes,
+        title: str
+    ) -> None:
+        """Add a slide with a single full-width plot image."""
+        slide_layout = self.presentation.slide_layouts[6]
+        slide = self.presentation.slides.add_slide(slide_layout)
+
+        # Title
+        title_box = slide.shapes.add_textbox(
+            Inches(0.5), Inches(0.3), Inches(12.333), Inches(0.6)
+        )
+        title_frame = title_box.text_frame
+        title_para = title_frame.paragraphs[0]
+        title_para.text = title
+        self._style_slide_title(title_para)
+
+        # Image
+        self._add_picture_fit(slide, image_bytes, Inches(0.5), Inches(1.0), Inches(12.333), Inches(6.0))
+
+        self._slide_count += 1
+
+    def add_two_plot_slide(
+        self,
+        title: str,
+        left_image: bytes,
+        right_image: bytes
+    ) -> None:
+        """Add a slide with two side-by-side plots."""
+        slide_layout = self.presentation.slide_layouts[6]
+        slide = self.presentation.slides.add_slide(slide_layout)
+
+        title_box = slide.shapes.add_textbox(
+            Inches(0.5), Inches(0.3), Inches(12.333), Inches(0.6)
+        )
+        title_frame = title_box.text_frame
+        title_para = title_frame.paragraphs[0]
+        title_para.text = title
+        self._style_slide_title(title_para)
+
+        self._add_picture_fit(slide, left_image, Inches(0.5), Inches(1.1), Inches(6.1), Inches(5.9))
+        self._add_picture_fit(slide, right_image, Inches(6.9), Inches(1.1), Inches(6.1), Inches(5.9))
+
+        self._slide_count += 1
+
+    def add_three_plot_slide(
+        self,
+        title: str,
+        top_image: bytes,
+        bottom_left_image: bytes,
+        bottom_right_image: bytes
+    ) -> None:
+        """Add a slide with a top plot and two bottom plots."""
+        slide_layout = self.presentation.slide_layouts[6]
+        slide = self.presentation.slides.add_slide(slide_layout)
+
+        title_box = slide.shapes.add_textbox(
+            Inches(0.5), Inches(0.3), Inches(12.333), Inches(0.6)
+        )
+        title_frame = title_box.text_frame
+        title_para = title_frame.paragraphs[0]
+        title_para.text = title
+        self._style_slide_title(title_para)
+
+        # Geometry tuned for Time+PSD+Spectrogram layout:
+        # bottom panels are 30% taller; top panel is reduced to maintain slide fit.
+        self._add_picture_fit(slide, top_image, Inches(0.5), Inches(0.95), Inches(12.333), Inches(1.92))
+        self._add_picture_fit(slide, bottom_left_image, Inches(0.5), Inches(3.05), Inches(6.1), Inches(4.03))
+        self._add_picture_fit(slide, bottom_right_image, Inches(6.9), Inches(3.05), Inches(6.1), Inches(4.03))
+
+        self._slide_count += 1
+
+    def add_statistics_slide(
+        self,
+        title: str,
+        pdf_image: bytes,
+        stats_image: bytes,
+        summary_text: str
+    ) -> None:
+        """Add a slide with PDF and running stats plots plus summary text."""
+        slide_layout = self.presentation.slide_layouts[6]
+        slide = self.presentation.slides.add_slide(slide_layout)
+
+        title_box = slide.shapes.add_textbox(
+            Inches(0.5), Inches(0.3), Inches(12.333), Inches(0.6)
+        )
+        title_frame = title_box.text_frame
+        title_para = title_frame.paragraphs[0]
+        title_para.text = title
+        self._style_slide_title(title_para)
+
+        self._add_picture_fit(slide, pdf_image, Inches(0.5), Inches(1.1), Inches(6.1), Inches(4.0))
+        self._add_picture_fit(slide, stats_image, Inches(6.9), Inches(1.1), Inches(6.1), Inches(4.0))
+
+        # Summary text
+        summary_box = slide.shapes.add_textbox(
+            Inches(0.5), Inches(5.3), Inches(12.333), Inches(1.7)
+        )
+        summary_frame = summary_box.text_frame
+        summary_frame.word_wrap = True
+        para = summary_frame.paragraphs[0]
+        para.text = summary_text
+        para.font.size = Pt(12)
+        para.font.color.rgb = RGBColor(0x4a, 0x55, 0x68)
+
+        self._slide_count += 1
+
+    def add_rms_table_slide(
+        self,
+        title: str,
+        headers: List[str],
+        rows: List[List[str]]
+    ) -> None:
+        """Add a slide with a single RMS summary table."""
+        slide_layout = self.presentation.slide_layouts[6]
+        slide = self.presentation.slides.add_slide(slide_layout)
+
+        title_box = slide.shapes.add_textbox(
+            Inches(0.5), Inches(0.3), Inches(12.333), Inches(0.6)
+        )
+        title_frame = title_box.text_frame
+        title_para = title_frame.paragraphs[0]
+        title_para.text = title
+        self._style_slide_title(title_para)
+
+        num_cols = max(1, len(headers))
+        num_rows = len(rows) + 1
+        table_width = Inches(12.2)
+        table_left = Inches(0.5)
+        table_top = Inches(1.1)
+        table_height = Inches(min(0.4 * num_rows, 5.9))
+
+        table = slide.shapes.add_table(
+            num_rows, num_cols, table_left, table_top, table_width, table_height
+        ).table
+
+        for col, header in enumerate(headers):
+            cell = table.cell(0, col)
+            cell.text = header
+            cell.text_frame.paragraphs[0].font.bold = True
+            cell.text_frame.paragraphs[0].font.size = Pt(11)
+            cell.text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+
+        for row_idx, row_values in enumerate(rows, start=1):
+            for col_idx in range(num_cols):
+                value = row_values[col_idx] if col_idx < len(row_values) else ""
+                cell = table.cell(row_idx, col_idx)
+                cell.text = value
+                cell.text_frame.paragraphs[0].font.size = Pt(10)
+                cell.text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+
+        self._slide_count += 1
+
+    def add_statistics_dashboard_slide(
+        self,
+        title: str,
+        pdf_image: bytes,
+        mean_image: bytes,
+        std_image: bytes,
+        skew_image: bytes,
+        kurt_image: bytes,
+        summary_rows: List[Tuple[str, str]]
+    ) -> None:
+        """Add a dashboard-style statistics slide."""
+        slide_layout = self.presentation.slide_layouts[6]
+        slide = self.presentation.slides.add_slide(slide_layout)
+
+        title_box = slide.shapes.add_textbox(
+            Inches(0.5), Inches(0.3), Inches(12.333), Inches(0.6)
+        )
+        title_frame = title_box.text_frame
+        title_para = title_frame.paragraphs[0]
+        title_para.text = title
+        self._style_slide_title(title_para)
+
+        # Expanded running-stats area on left, tighter PDF/table panel on right.
+        left_x = Inches(0.35)
+        left_w = Inches(8.35)
+        top_y = Inches(0.95)
+        plot_h = Inches(1.55)
+        gap = Inches(0.08)
+
+        plots = [mean_image, std_image, skew_image, kurt_image]
+        for idx, img in enumerate(plots):
+            y = top_y + idx * (plot_h + gap)
+            self._add_picture_fit(slide, img, left_x, y, left_w, plot_h)
+
+        right_x = Inches(8.95)
+        pdf_size = Inches(3.38)
+        self._add_picture_fit(slide, pdf_image, right_x, top_y, pdf_size, pdf_size)
+
+        table_top = top_y + pdf_size + Inches(0.14)
+        table_height = Inches(2.35)
+        table_width = Inches(2.72)
+        table_left = Inches(9.28)
+
+        num_rows = len(summary_rows) + 1
+        table = slide.shapes.add_table(
+            num_rows, 2, table_left, table_top, table_width, table_height
+        ).table
+        # Force requested column width.
+        table.columns[0].width = Inches(1.36)
+        table.columns[1].width = Inches(1.36)
+        self._apply_medium_style_3(table)
+
+        headers = ["Metric", "Value"]
+        for col, header in enumerate(headers):
+            cell = table.cell(0, col)
+            cell.text = header
+            cell.text_frame.paragraphs[0].font.bold = True
+            cell.text_frame.paragraphs[0].font.size = Pt(10)
+            cell.text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+
+        for row_idx, (metric, value) in enumerate(summary_rows, start=1):
+            table.cell(row_idx, 0).text = metric
+            table.cell(row_idx, 1).text = value
+            table.cell(row_idx, 0).text_frame.paragraphs[0].font.size = Pt(9)
+            table.cell(row_idx, 1).text_frame.paragraphs[0].font.size = Pt(9)
+            table.cell(row_idx, 1).text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+
+        self._slide_count += 1
+
+    def add_bulleted_sections_slide(
+        self,
+        title: str,
+        sections: List[Tuple[str, List[str]]]
+    ) -> None:
+        """Add a slide with section headers and bullet lists."""
+        slide_layout = self.presentation.slide_layouts[6]
+        slide = self.presentation.slides.add_slide(slide_layout)
+
+        title_box = slide.shapes.add_textbox(
+            Inches(0.5), Inches(0.3), Inches(12.333), Inches(0.6)
+        )
+        title_frame = title_box.text_frame
+        title_para = title_frame.paragraphs[0]
+        title_para.text = title
+        self._style_slide_title(title_para)
+
+        content_box = slide.shapes.add_textbox(
+            Inches(0.7), Inches(1.2), Inches(12.0), Inches(5.8)
+        )
+        content_frame = content_box.text_frame
+        content_frame.word_wrap = True
+
+        first = True
+        for section_title, bullets in sections:
+            para = content_frame.paragraphs[0] if first else content_frame.add_paragraph()
+            first = False
+            para.text = section_title
+            para.font.size = Pt(16)
+            para.font.bold = True
+            para.font.color.rgb = RGBColor(0x1a, 0x1f, 0x2e)
+            para.space_after = Pt(4)
+
+            for bullet in bullets:
+                bpara = content_frame.add_paragraph()
+                bpara.text = f"- {bullet}"
+                bpara.font.size = Pt(13)
+                bpara.font.color.rgb = RGBColor(0x4a, 0x55, 0x68)
+                bpara.level = 1
+
+        self._slide_count += 1
+
+    def add_parameters_slide(self, title: str, content: str) -> None:
+        """Add a parameters slide."""
+        self.add_text_slide(title=title, content=content)
+
     def add_spectrogram(
         self,
         image_bytes: bytes,
@@ -294,15 +609,10 @@ class ReportGenerator:
         title_frame = title_box.text_frame
         title_para = title_frame.paragraphs[0]
         title_para.text = full_title
-        title_para.font.size = Pt(28)
-        title_para.font.bold = True
-        title_para.font.color.rgb = RGBColor(0x1a, 0x1f, 0x2e)
+        self._style_slide_title(title_para)
 
         # Add the spectrogram image (full width)
-        image_stream = io.BytesIO(image_bytes)
-        slide.shapes.add_picture(
-            image_stream, Inches(0.5), Inches(1.0), Inches(12.333), Inches(6.0)
-        )
+        self._add_picture_fit(slide, image_bytes, Inches(0.5), Inches(1.0), Inches(12.333), Inches(6.0))
 
         self._slide_count += 1
 
@@ -340,9 +650,7 @@ class ReportGenerator:
         title_frame = title_box.text_frame
         title_para = title_frame.paragraphs[0]
         title_para.text = title
-        title_para.font.size = Pt(28)
-        title_para.font.bold = True
-        title_para.font.color.rgb = RGBColor(0x1a, 0x1f, 0x2e)
+        self._style_slide_title(title_para)
 
         # Determine table dimensions
         num_cols = 2  # Channel, RMS
@@ -423,15 +731,10 @@ class ReportGenerator:
         title_frame = title_box.text_frame
         title_para = title_frame.paragraphs[0]
         title_para.text = title
-        title_para.font.size = Pt(28)
-        title_para.font.bold = True
-        title_para.font.color.rgb = RGBColor(0x1a, 0x1f, 0x2e)
+        self._style_slide_title(title_para)
 
         # Add the plot image
-        image_stream = io.BytesIO(image_bytes)
-        slide.shapes.add_picture(
-            image_stream, Inches(0.5), Inches(1.0), Inches(12.333), Inches(5.5)
-        )
+        self._add_picture_fit(slide, image_bytes, Inches(0.5), Inches(1.0), Inches(12.333), Inches(5.5))
 
         # Add description if provided
         if description:
@@ -475,9 +778,7 @@ class ReportGenerator:
         title_frame = title_box.text_frame
         title_para = title_frame.paragraphs[0]
         title_para.text = title
-        title_para.font.size = Pt(28)
-        title_para.font.bold = True
-        title_para.font.color.rgb = RGBColor(0x1a, 0x1f, 0x2e)
+        self._style_slide_title(title_para)
 
         # Add content
         content_box = slide.shapes.add_textbox(

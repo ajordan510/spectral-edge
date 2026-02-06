@@ -904,11 +904,15 @@ def convert_psd_to_octave_bands(
     if freq_min >= freq_max:
         raise ValueError(f"freq_min ({freq_min}) must be less than freq_max ({freq_max})")
 
-    # Build a dense log-spaced frequency grid for robust band integration
+    # Build an adaptive dense log-spaced frequency grid for robust band integration
     log_min = np.log10(freq_min)
     log_max = np.log10(freq_max)
-    points_per_decade = 300  # Balance robustness vs performance
-    n_points = max(200, int(np.ceil((log_max - log_min) * points_per_decade)))
+    log_span = max(log_max - log_min, 1e-6)
+    points_per_band = 25
+    bands_per_decade = octave_fraction * np.log2(10.0)  # ~3.3219 * octave_fraction
+    points_per_decade = max(300, int(np.ceil(points_per_band * bands_per_decade)))
+    points_per_decade = min(points_per_decade, 5000)
+    n_points = max(200, int(np.ceil(log_span * points_per_decade)))
     dense_freqs = np.logspace(log_min, log_max, n_points)
 
     # Interpolate PSD onto the dense grid (linear PSD values over log-frequency)
@@ -964,6 +968,26 @@ def convert_psd_to_octave_bands(
     else:
         interp_values = _interp_psd(psd)
         interpolated_psd = interp_values
+
+    # Precompute cumulative integral for stability
+    if interpolated_psd is not None:
+        if is_multichannel:
+            cumulative_energy = np.zeros_like(interpolated_psd)
+            for ch in range(n_channels):
+                try:
+                    cumulative_energy[:, ch] = np.cumsum(
+                        np.diff(dense_freqs, prepend=dense_freqs[0])
+                        * interpolated_psd[:, ch]
+                    )
+                except Exception:
+                    cumulative_energy = None
+                    break
+        else:
+            cumulative_energy = np.cumsum(
+                np.diff(dense_freqs, prepend=dense_freqs[0]) * interpolated_psd
+            )
+    else:
+        cumulative_energy = None
     
     # Initialize output array
     if is_multichannel:
@@ -989,20 +1013,38 @@ def convert_psd_to_octave_bands(
             continue
         
         # Extract frequencies and PSD for this band
-        band_frequencies = dense_freqs[band_mask]
-        if interpolated_psd is not None:
-            band_psd = interpolated_psd[band_mask, :] if is_multichannel else interpolated_psd[band_mask]
-        else:
-            # Fallback to original data if interpolation failed
-            band_mask = (frequencies >= f_lower) & (frequencies <= f_upper)
-            if not np.any(band_mask):
+        if cumulative_energy is not None:
+            bandwidth = f_upper - f_lower
+            if bandwidth <= 0:
                 if is_multichannel:
                     octave_psd[i, :] = np.nan
                 else:
                     octave_psd[i] = np.nan
                 continue
-            band_frequencies = frequencies[band_mask]
-            band_psd = psd[band_mask, :] if is_multichannel else psd[band_mask]
+
+            idx_lower = np.searchsorted(dense_freqs, f_lower, side="left")
+            idx_upper = np.searchsorted(dense_freqs, f_upper, side="right") - 1
+            idx_lower = max(0, min(idx_lower, len(dense_freqs) - 1))
+            idx_upper = max(0, min(idx_upper, len(dense_freqs) - 1))
+
+            if is_multichannel:
+                energy = cumulative_energy[idx_upper, :] - cumulative_energy[idx_lower, :]
+                octave_psd[i, :] = energy / bandwidth
+            else:
+                energy = cumulative_energy[idx_upper] - cumulative_energy[idx_lower]
+                octave_psd[i] = energy / bandwidth
+            continue
+
+        # Fallback to original data if interpolation failed
+        band_mask = (frequencies >= f_lower) & (frequencies <= f_upper)
+        if not np.any(band_mask):
+            if is_multichannel:
+                octave_psd[i, :] = np.nan
+            else:
+                octave_psd[i] = np.nan
+            continue
+        band_frequencies = frequencies[band_mask]
+        band_psd = psd[band_mask, :] if is_multichannel else psd[band_mask]
         
         # Check for NaN or invalid values in band
         if is_multichannel:

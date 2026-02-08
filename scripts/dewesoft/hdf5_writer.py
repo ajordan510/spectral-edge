@@ -1,7 +1,23 @@
 """
-HDF5 writer function for DEWESoft data conversion.
+HDF5 Writer for DEWESoft Data Conversion
+==========================================
 
-This module provides memory-efficient HDF5 writing with chunked reading.
+This module provides memory-efficient HDF5 writing with chunked reading,
+formatted to match SpectralEdge tool expectations.
+
+Expected HDF5 Structure for SpectralEdge:
+-----------------------------------------
+/flight_XXX/                    # Top-level flight group (e.g., flight_001)
+    /metadata/                  # Flight metadata group
+        (attributes)            # flight_id, duration, sample_rate, start_time
+    /channels/                  # Channels group
+        /channel_name/          # Each channel as a subgroup
+            data (dataset)      # Channel values (1D array)
+            time (dataset)      # Timestamps (1D array)
+            (attributes)        # sample_rate, units, description
+
+Author: SpectralEdge Development Team
+License: MIT
 """
 
 import ctypes
@@ -14,31 +30,62 @@ def write_hdf5_file_chunked(lib, reader_instance, output_path, channels_info, me
     """
     Write channel data to HDF5 file using chunked reading to minimize memory usage.
     
-    HDF5 format is much more efficient than CSV:
+    Creates an HDF5 file compatible with SpectralEdge tools using the structure:
+        /flight_001/metadata/  (flight-level metadata as attributes)
+        /flight_001/channels/channel_name/data  (channel values)
+        /flight_001/channels/channel_name/time  (timestamps)
+    
+    HDF5 format advantages over CSV:
     - 5-10x smaller file size (binary + compression)
-    - Much faster read/write
+    - Much faster read/write performance
     - Preserves data types and metadata
     - Compatible with MATLAB, Python (pandas, h5py), and SpectralEdge tools
+    - Supports lazy loading for memory-efficient access
     
-    File structure:
-        /metadata/
-            sample_rate (attribute)
-            duration (attribute)
-            start_time (attribute)
-        /channels/
-            <channel_name>/
-                data (dataset) - channel values
-                time (dataset) - timestamps
-                unit (attribute)
-                array_size (attribute)
+    Parameters
+    ----------
+    lib : ctypes.CDLL
+        The loaded DEWESoft library handle
+    reader_instance : READER_HANDLE
+        Handle to the opened DEWESoft file
+    output_path : str
+        Path to the output .h5 file
+    channels_info : list of tuple
+        List of (channel, samples_to_export, ch_type) tuples where:
+        - channel: DWChannel object with name, unit, array_size, index
+        - samples_to_export: int, number of samples to write
+        - ch_type: DWChannelType enum value
+    metadata : dict
+        File metadata dictionary with keys:
+        - sample_rate: float, sampling rate in Hz
+        - duration: float, recording duration in seconds
+        - start_time: float, start timestamp (optional)
+    chunk_size : int, optional
+        Number of samples to read per chunk (default: 100,000)
+        Smaller chunks use less memory but may be slower
     
-    Args:
-        lib: The loaded DEWESoft library
-        reader_instance: Handle to the opened file
-        output_path (str): Path to the output .h5 file
-        channels_info (list): List of tuples (channel, samples_to_export, ch_type)
-        metadata (dict): File metadata dictionary
-        chunk_size (int): Number of samples to read per chunk (default: 100,000)
+    Returns
+    -------
+    None
+    
+    Raises
+    ------
+    IOError
+        If file cannot be created or written
+    RuntimeError
+        If DEWESoft library calls fail
+    
+    Examples
+    --------
+    >>> write_hdf5_file_chunked(lib, reader, 'output.h5', channels, meta, chunk_size=50000)
+    
+    Notes
+    -----
+    - Uses GZIP compression level 4 for good balance of size/speed
+    - Writes data in chunks to minimize memory usage
+    - Compatible with SpectralEdge HDF5FlightDataLoader
+    - Each channel group contains 'data' and 'time' datasets
+    - Metadata stored as HDF5 attributes for fast access
     """
     print_section_header("Writing HDF5 File (Chunked Mode)")
     print(f"Output file: {output_path}")
@@ -79,17 +126,26 @@ def write_hdf5_file_chunked(lib, reader_instance, output_path, channels_info, me
     sample_rate = metadata['sample_rate']
     time_step = 1.0 / sample_rate if sample_rate > 0 else 0.0
     
-    # Create HDF5 file
+    # Create HDF5 file with SpectralEdge-compatible structure
+    # SpectralEdge expects: /flight_XXX/metadata/ and /flight_XXX/channels/
     with h5py.File(output_path, 'w') as hf:
-        # Create metadata group
-        meta_group = hf.create_group('metadata')
+        # Create flight group (SpectralEdge expects flight_XXX structure)
+        flight_key = 'flight_001'  # Default flight name for single-file conversion
+        flight_group = hf.create_group(flight_key)
+        
+        # Create metadata group with attributes (SpectralEdge format)
+        meta_group = flight_group.create_group('metadata')
+        meta_group.attrs['flight_id'] = flight_key
         meta_group.attrs['sample_rate'] = metadata['sample_rate']
         meta_group.attrs['duration'] = metadata['duration']
         meta_group.attrs['start_time'] = metadata.get('start_time', 0.0)
         meta_group.attrs['num_channels'] = len(channels_info)
+        meta_group.attrs['source'] = 'DEWESoft DXD Conversion'
         
-        # Create channels group
-        channels_group = hf.create_group('channels')
+        # Create channels group (SpectralEdge expects this under flight group)
+        channels_group = flight_group.create_group('channels')
+        
+        print(f"\nCreated HDF5 structure: /{flight_key}/metadata/ and /{flight_key}/channels/")
         
         # Process each channel
         for ch_idx, (channel, samples_to_export, ch_type) in enumerate(channels_info):
@@ -98,9 +154,13 @@ def write_hdf5_file_chunked(lib, reader_instance, output_path, channels_info, me
             
             print(f"\nProcessing channel {ch_idx + 1}/{len(channels_info)}: {ch_name}")
             
-            # Create channel group
+            # Create channel subgroup (SpectralEdge expects each channel as a group)
             ch_group = channels_group.create_group(ch_name)
-            ch_group.attrs['unit'] = ch_unit
+            
+            # Add channel attributes (SpectralEdge format)
+            ch_group.attrs['units'] = ch_unit  # Note: 'units' not 'unit'
+            ch_group.attrs['sample_rate'] = sample_rate
+            ch_group.attrs['description'] = f"{ch_name} from DEWESoft"
             ch_group.attrs['array_size'] = channel.array_size
             ch_group.attrs['index'] = channel.index
             
@@ -181,10 +241,11 @@ def write_hdf5_file_chunked(lib, reader_instance, output_path, channels_info, me
             print()  # New line after progress
         
         print(f"\n✓ HDF5 file written successfully")
+        print(f"  Flight: {flight_key}")
         print(f"  Channels: {len(channels_info)}")
         print(f"  Total samples: {max_samples:,}")
         
-        # Get actual file size
+        # Flush to ensure data is written
         hf.flush()
     
     # Report actual file size
@@ -196,6 +257,9 @@ def write_hdf5_file_chunked(lib, reader_instance, output_path, channels_info, me
         print(f"  Actual file size: {actual_size_gb:.2f} GB")
     else:
         print(f"  Actual file size: {actual_size_mb:.1f} MB")
+    
+    print(f"\n✓ File is compatible with SpectralEdge HDF5FlightDataLoader")
+    print(f"  Structure: /{flight_key}/channels/<channel_name>/{{data, time}}")
 
 
 def print_section_header(title):

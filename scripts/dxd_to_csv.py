@@ -39,6 +39,16 @@ import argparse
 import csv
 from pathlib import Path
 
+# Try to import h5py for HDF5 support (optional)
+try:
+    import h5py
+    import numpy as np
+    HDF5_AVAILABLE = True
+except ImportError:
+    HDF5_AVAILABLE = False
+    print("Warning: h5py not available. HDF5 output format will be disabled.")
+    print("Install with: sudo pip3 install h5py numpy")
+
 # Add the dewesoft directory to the Python path so we can import the library wrapper
 script_dir = Path(__file__).parent
 dewesoft_dir = script_dir / "dewesoft"
@@ -422,8 +432,24 @@ def write_csv_file_chunked(lib, reader_instance, output_path, channels_info, met
     print(f"Total samples to write: {max_samples:,}")
     print(f"Number of chunks: {(max_samples + chunk_size - 1) // chunk_size}")
     
-    # Open the CSV file for writing
-    with open(output_path, 'w', newline='') as csvfile:
+    # Estimate output CSV file size
+    # Each value: ~10 bytes average (number + comma/newline)
+    # Metadata + headers: ~1 KB
+    num_columns = 1  # Time column
+    for channel, _, _ in channels_info:
+        num_columns += channel.array_size
+    
+    estimated_size_bytes = max_samples * num_columns * 10 + 1024
+    estimated_size_mb = estimated_size_bytes / (1024 * 1024)
+    estimated_size_gb = estimated_size_mb / 1024
+    
+    if estimated_size_gb >= 1.0:
+        print(f"Estimated output file size: {estimated_size_gb:.2f} GB")
+    else:
+        print(f"Estimated output file size: {estimated_size_mb:.1f} MB")
+    
+    # Open the CSV file for writing (unbuffered for real-time growth)
+    with open(output_path, 'w', newline='', buffering=1) as csvfile:
         writer = csv.writer(csvfile)
         
         # Write metadata as comments
@@ -538,6 +564,10 @@ def write_csv_file_chunked(lib, reader_instance, output_path, channels_info, met
                 
                 writer.writerow(row)
                 rows_written += 1
+            
+            # Flush to disk after each chunk for visible file growth
+            csvfile.flush()
+            os.fsync(csvfile.fileno())
         
         print()  # New line after progress
         print(f"✓ CSV file written successfully")
@@ -568,8 +598,8 @@ def write_csv_file(output_path, channels_data, metadata):
         os.makedirs(output_dir)
         print(f"Created output directory: {output_dir}")
     
-    # Open the CSV file for writing
-    with open(output_path, 'w', newline='') as csvfile:
+    # Open the CSV file for writing (unbuffered for real-time growth)
+    with open(output_path, 'w', newline='', buffering=1) as csvfile:
         writer = csv.writer(csvfile)
         
         # Write metadata as comments (some CSV readers support this)
@@ -647,9 +677,116 @@ def write_csv_file(output_path, channels_data, metadata):
         print(f"  Columns: {len(header_names)}")
 
 
+def determine_output_format(args, channels_info, max_samples):
+    """
+    Determine output format and path based on arguments or interactive selection.
+    
+    Args:
+        args: Parsed command-line arguments
+        channels_info: List of (channel, samples_to_export, ch_type) tuples
+        max_samples: Maximum number of samples across all channels
+        
+    Returns:
+        tuple: (format_str, output_path) where format_str is 'csv' or 'hdf5'
+    """
+    # Calculate size estimates
+    num_columns = 1  # Time column
+    for channel, _, _ in channels_info:
+        num_columns += channel.array_size
+    
+    # CSV estimate: ~10 bytes per value (text representation)
+    csv_size_bytes = max_samples * num_columns * 10 + 1024
+    csv_size_mb = csv_size_bytes / (1024 * 1024)
+    csv_size_gb = csv_size_mb / 1024
+    
+    # HDF5 estimate: ~4 bytes per value (compressed binary)
+    total_values = sum(samples * ch.array_size for ch, samples, _ in channels_info)
+    hdf5_size_bytes = total_values * 4 + 10240
+    hdf5_size_mb = hdf5_size_bytes / (1024 * 1024)
+    hdf5_size_gb = hdf5_size_mb / 1024
+    
+    # Interactive mode or no output file specified
+    if args.interactive or args.output_file is None:
+        print_section_header("Output Format Selection")
+        print("\nEstimated output file sizes:")
+        print("\n1. CSV Format:")
+        if csv_size_gb >= 1.0:
+            print(f"   Size: {csv_size_gb:.2f} GB")
+        else:
+            print(f"   Size: {csv_size_mb:.1f} MB")
+        print("   Pros: Universal compatibility, human-readable, works with Excel")
+        print("   Cons: Large file size, slower read/write, text-based")
+        
+        if HDF5_AVAILABLE:
+            print("\n2. HDF5 Format:")
+            if hdf5_size_gb >= 1.0:
+                print(f"   Size: {hdf5_size_gb:.2f} GB (compressed)")
+            else:
+                print(f"   Size: {hdf5_size_mb:.1f} MB (compressed)")
+            print(f"   Compression ratio: {csv_size_mb / hdf5_size_mb:.1f}x smaller than CSV")
+            print("   Pros: Compact, fast, preserves metadata, works with MATLAB/Python/SpectralEdge")
+            print("   Cons: Requires HDF5-compatible tools")
+        else:
+            print("\n2. HDF5 Format: NOT AVAILABLE (h5py not installed)")
+            print("   Install with: sudo pip3 install h5py numpy")
+        
+        # Prompt for selection
+        while True:
+            if HDF5_AVAILABLE:
+                choice = input("\nSelect format (1=CSV, 2=HDF5): ").strip()
+                if choice == '1':
+                    output_format = 'csv'
+                    break
+                elif choice == '2':
+                    output_format = 'hdf5'
+                    break
+                else:
+                    print("Invalid choice. Please enter 1 or 2.")
+            else:
+                choice = input("\nOnly CSV format available. Press Enter to continue: ")
+                output_format = 'csv'
+                break
+        
+        # Get output path
+        if args.output_file:
+            output_path = args.output_file
+        else:
+            default_ext = '.h5' if output_format == 'hdf5' else '.csv'
+            default_name = args.input_file.replace('.dxd', default_ext).replace('.dxz', default_ext)
+            output_path = input(f"\nOutput file path [{default_name}]: ").strip()
+            if not output_path:
+                output_path = default_name
+        
+        return output_format, output_path
+    
+    # Non-interactive mode: determine from arguments
+    output_path = args.output_file
+    
+    # Check if format specified explicitly
+    if args.format:
+        if args.format in ['hdf5', 'h5']:
+            if not HDF5_AVAILABLE:
+                print("ERROR: HDF5 format requested but h5py is not installed.")
+                print("Install with: sudo pip3 install h5py numpy")
+                sys.exit(1)
+            return 'hdf5', output_path
+        else:
+            return 'csv', output_path
+    
+    # Auto-detect from file extension
+    if output_path.endswith('.h5') or output_path.endswith('.hdf5'):
+        if not HDF5_AVAILABLE:
+            print("ERROR: HDF5 output requested (file extension .h5/.hdf5) but h5py is not installed.")
+            print("Install with: sudo pip3 install h5py numpy")
+            sys.exit(1)
+        return 'hdf5', output_path
+    else:
+        return 'csv', output_path
+
+
 def main():
     """
-    Main function to orchestrate the DXD to CSV conversion process.
+    Main function to orchestrate the DXD file conversion process.
     """
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
@@ -664,10 +801,12 @@ Examples:
     )
     
     parser.add_argument('input_file', help='Path to input .dxd or .dxz file')
-    parser.add_argument('output_file', help='Path to output .csv file')
+    parser.add_argument('output_file', nargs='?', help='Path to output file (extension determines format: .csv or .h5)')
+    parser.add_argument('--format', choices=['csv', 'hdf5', 'h5'], help='Output format (csv or hdf5/h5). Auto-detected from output_file extension if not specified.')
     parser.add_argument('--channels', help='Comma-separated list of channel names to export (default: all)')
     parser.add_argument('--max-samples', type=int, help='Maximum number of samples to export per channel')
     parser.add_argument('--all-channels', action='store_true', help='Export all channels (default behavior)')
+    parser.add_argument('--interactive', action='store_true', help='Interactive mode: prompts for format selection with size estimates')
     
     args = parser.parse_args()
     
@@ -740,6 +879,12 @@ Examples:
         
         print(f"\nTotal estimated data size: {total_data_size:.1f} MB")
         
+        # Calculate max samples across all channels
+        max_samples = max(samples for _, samples, _ in channels_info)
+        
+        # Step 6.5: Determine output format and file path
+        output_format, output_path = determine_output_format(args, channels_info, max_samples)
+        
         # Determine if we should use chunked reading
         # Use chunked reading if total data > 500 MB to prevent memory errors
         use_chunked = total_data_size > 500
@@ -748,9 +893,15 @@ Examples:
             print("\n⚠ Large file detected - using memory-efficient chunked reading")
             chunk_size = 100000  # Read 100k samples at a time
             
-            # Step 7: Write data to CSV file using chunked reading
-            write_csv_file_chunked(lib, reader_instance, args.output_file, 
-                                   channels_info, metadata, chunk_size)
+            # Step 7: Write data to file using chunked reading
+            if output_format == 'hdf5':
+                # Import HDF5 writer
+                from hdf5_writer import write_hdf5_file_chunked
+                write_hdf5_file_chunked(lib, reader_instance, output_path,
+                                        channels_info, metadata, chunk_size)
+            else:
+                write_csv_file_chunked(lib, reader_instance, output_path,
+                                       channels_info, metadata, chunk_size)
         else:
             print("\n✓ File size is manageable - using standard reading")
             
@@ -769,8 +920,15 @@ Examples:
                 
                 channels_data.append((channel, timestamps, values))
             
-            # Step 7: Write data to CSV file
-            write_csv_file(args.output_file, channels_data, metadata)
+            # Step 7: Write data to file
+            if output_format == 'hdf5':
+                # For small files, still use chunked HDF5 writer
+                sys.path.insert(0, str(script_dir))
+                from hdf5_writer import write_hdf5_file_chunked
+                write_hdf5_file_chunked(lib, reader_instance, output_path,
+                                        channels_info, metadata, chunk_size=100000)
+            else:
+                write_csv_file(output_path, channels_data, metadata)
         
         # Step 8: Clean up - close the file and destroy reader
         print("\nClosing file...")
@@ -784,7 +942,8 @@ Examples:
         # Success message
         print_section_header("Conversion Complete")
         print(f"✓ Successfully converted {args.input_file}")
-        print(f"✓ Output saved to {args.output_file}")
+        print(f"✓ Output saved to {output_path}")
+        print(f"✓ Format: {output_format.upper()}")
         print(f"✓ Exported {len(selected_channels)} channel(s)")
         
     except Exception as e:

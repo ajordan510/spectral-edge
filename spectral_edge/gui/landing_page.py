@@ -18,6 +18,8 @@ from PyQt6.QtGui import QFont, QIcon, QPalette, QColor
 # Import tool windows
 from spectral_edge.gui.psd_window import PSDAnalysisWindow
 from spectral_edge.gui.batch_processor_window import BatchProcessorWindow
+from spectral_edge.gui.file_converter_window import FileConverterWindow
+from spectral_edge.gui.segmented_spectrogram_viewer import SegmentedSpectrogramViewer
 
 
 class LandingPage(QMainWindow):
@@ -191,6 +193,16 @@ class LandingPage(QMainWindow):
                 "name": "Batch Processing",
                 "description": "Process Multiple\nFiles Automatically",
                 "icon": "⚡"
+            },
+            {
+                "name": "File Converter",
+                "description": "Convert DXD/HDF5\nFile Formats",
+                "icon": "🔄"
+            },
+            {
+                "name": "Spectrogram Viewer",
+                "description": "View Long-Duration\nSpectrograms",
+                "icon": "🎞️"
             }
         ]
         
@@ -301,6 +313,10 @@ class LandingPage(QMainWindow):
             self._launch_psd_tool()
         elif tool_name == "Batch Processing":
             self._launch_batch_processor()
+        elif tool_name == "File Converter":
+            self._launch_file_converter()
+        elif tool_name == "Spectrogram Viewer":
+            self._launch_spectrogram_viewer()
         else:
             # Other tools not yet implemented
             print(f"Tool clicked: {tool_name} (not yet implemented)")
@@ -344,3 +360,43 @@ class LandingPage(QMainWindow):
             batch_window = BatchProcessorWindow()
             batch_window.show()
             self.tool_windows["Batch Processing"] = batch_window
+    
+    def _launch_file_converter(self):
+        """
+        Launch the File Format Conversion tool window.
+        
+        Creates a new File Converter window if one doesn't exist, or brings
+        the existing window to the front.
+        """
+        # Check if File Converter window already exists
+        if "File Converter" in self.tool_windows:
+            # Bring existing window to front
+            window = self.tool_windows["File Converter"]
+            window.show()
+            window.raise_()
+            window.activateWindow()
+        else:
+            # Create new File Converter window
+            converter_window = FileConverterWindow()
+            converter_window.show()
+            self.tool_windows["File Converter"] = converter_window
+    
+    def _launch_spectrogram_viewer(self):
+        """
+        Launch the Segmented Spectrogram Viewer tool window.
+        
+        Creates a new Spectrogram Viewer window if one doesn't exist, or brings
+        the existing window to the front.
+        """
+        # Check if Spectrogram Viewer window already exists
+        if "Spectrogram Viewer" in self.tool_windows:
+            # Bring existing window to front
+            window = self.tool_windows["Spectrogram Viewer"]
+            window.show()
+            window.raise_()
+            window.activateWindow()
+        else:
+            # Create new Spectrogram Viewer window
+            spectrogram_window = SegmentedSpectrogramViewer()
+            spectrogram_window.show()
+            self.tool_windows["Spectrogram Viewer"] = spectrogram_window

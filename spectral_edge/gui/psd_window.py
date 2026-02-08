@@ -8,20 +8,24 @@ interactive plotting.
 Author: SpectralEdge Development Team
 """
 
+import logging
+import json
+import os
+import io
+from pathlib import Path
+
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QFileDialog,
     QGroupBox, QGridLayout, QMessageBox, QCheckBox, QScrollArea, QTabWidget, QLineEdit,
     QDialog, QProgressDialog, QApplication
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
-import json
-import os
-import io
 import pyqtgraph as pg
 import numpy as np
-from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Import our custom modules
 from spectral_edge.utils.data_loader import load_csv_data, DataLoadError
@@ -327,6 +331,13 @@ class PSDAnalysisWindow(QMainWindow):
         # Preset manager
         self.preset_manager = PresetManager()
         self.applying_preset = False  # Flag to prevent recursive preset changes
+
+        # Debounce timer for parameter changes (reduces redundant recalculations)
+        self._parameter_update_timer = QTimer()
+        self._parameter_update_timer.setSingleShot(True)
+        self._parameter_update_timer.setInterval(250)  # 250ms debounce delay
+        self._parameter_update_timer.timeout.connect(self._do_debounced_parameter_update)
+        self._pending_parameter_update = False
 
         # Apply styling
         self._apply_styling()
@@ -1743,7 +1754,7 @@ class PSDAnalysisWindow(QMainWindow):
         except Exception as e:
             import traceback
             error_details = traceback.format_exc()
-            print(f"Reference curve import error: {error_details}")
+            logger.error(f"Reference curve import error: {error_details}")
             show_critical(self, "Import Error", f"Failed to import reference curve: {str(e)}")
 
     def _update_comparison_list(self):
@@ -2277,7 +2288,28 @@ class PSDAnalysisWindow(QMainWindow):
         self._update_comparison_list()
 
     def _on_parameter_changed(self):
-        """Handle parameter changes - clear PSD results to force recalculation."""
+        """
+        Handle parameter changes with debouncing.
+
+        This method schedules an update after a short delay. If called multiple
+        times rapidly (e.g., user scrolling a spinbox), only the final update
+        is executed, reducing redundant recalculations.
+        """
+        # Mark that an update is pending
+        self._pending_parameter_update = True
+
+        # Restart the debounce timer (cancels any pending update)
+        self._parameter_update_timer.stop()
+        self._parameter_update_timer.start()
+
+    def _do_debounced_parameter_update(self):
+        """Execute the actual parameter update after debounce delay."""
+        if not self._pending_parameter_update:
+            return
+
+        self._pending_parameter_update = False
+        logger.debug("Executing debounced parameter update")
+
         # Clear PSD results
         self.frequencies = {}
         self.psd_results = {}
@@ -2350,7 +2382,7 @@ class PSDAnalysisWindow(QMainWindow):
         self.applying_preset = True
         try:
             apply_preset_to_window(self, preset)
-            print(f"Applied preset: {preset.name}")
+            logger.debug(f"Applied preset: {preset.name}")
         finally:
             self.applying_preset = False
     
@@ -3703,15 +3735,15 @@ class PSDAnalysisWindow(QMainWindow):
             List of (flight_key, channel_key, channel_info) tuples
         """
         try:
-            print("\n=== HDF5 DATA LOADING DEBUG ===")
-            print(f"Selected items: {len(selected_items)}")
-            
+            logger.debug("=== HDF5 DATA LOADING ===")
+            logger.debug(f"Selected items: {len(selected_items)}")
+
             if not selected_items:
-                print("No items selected")
+                logger.debug("No items selected")
                 return
-            
+
             # Load all selected channels
-            print(f"Loading {len(selected_items)} channel(s)...")
+            logger.info(f"Loading {len(selected_items)} channel(s)...")
             
             all_signals_full = []
             all_signals_display = []
@@ -3727,16 +3759,14 @@ class PSDAnalysisWindow(QMainWindow):
             # First pass: collect all data and find max sample rate
             channel_data_list = []
             for idx, (flight_key, channel_key, channel_info) in enumerate(selected_items):
-                print(f"\nChannel {idx+1}/{len(selected_items)}:")
-                print(f"  Flight key: {flight_key}")
-                print(f"  Channel key: {channel_key}")
-                print(f"  Sample rate: {channel_info.sample_rate} Hz")
-                
+                logger.debug(f"Channel {idx+1}/{len(selected_items)}: {flight_key}/{channel_key}")
+                logger.debug(f"  Sample rate: {channel_info.sample_rate} Hz")
+
                 # Load data - returns dict with both full and decimated data
                 result = self.hdf5_loader.load_channel_data(flight_key, channel_key, decimate_for_display=True)
-                print(f"  Full data: time shape={result['time_full'].shape}, signal shape={result['data_full'].shape}")
-                print(f"  Display data: time shape={result['time_display'].shape}, signal shape={result['data_display'].shape}")
-                print(f"  Decimation factor: {result.get('decimation_factor', 1)}")
+                logger.debug(f"  Full data: time={result['time_full'].shape}, signal={result['data_full'].shape}")
+                logger.debug(f"  Display data: time={result['time_display'].shape}, signal={result['data_display'].shape}")
+                logger.debug(f"  Decimation factor: {result.get('decimation_factor', 1)}")
                 
                 channel_data_list.append({
                     'result': result,
@@ -3750,21 +3780,23 @@ class PSDAnalysisWindow(QMainWindow):
                     sample_rate = result['sample_rate']
                     decimation_factor = result.get('decimation_factor', 1)
             
-            print(f"\nReference sample rate (max): {sample_rate} Hz")
-            
+            logger.debug(f"Reference sample rate (max): {sample_rate} Hz")
+
             # Second pass: align time data if needed
             for idx, ch_data in enumerate(channel_data_list):
                 result = ch_data['result']
-                
+
                 # Store first channel's time as reference
                 if time_data_full is None:
                     time_data_full = result['time_full']
                     time_data_display = result['time_display']
-                
+
                 # Check if sample rates differ
                 if result['sample_rate'] != sample_rate:
-                    print(f"  Channel {idx+1}: Different sample rate {result['sample_rate']} Hz (reference: {sample_rate} Hz)")
-                    print(f"    Multi-rate support: Each channel will use its own sample rate for PSD calculation")
+                    logger.info(
+                        f"Channel {idx+1}: Different sample rate {result['sample_rate']} Hz "
+                        f"(reference: {sample_rate} Hz). Multi-rate PSD will be used."
+                    )
                 
                 all_signals_full.append(result['data_full'])
                 all_signals_display.append(result['data_display'])
@@ -3787,7 +3819,7 @@ class PSDAnalysisWindow(QMainWindow):
                     if len(sig_full) < max_len_full:
                         # Pad with zeros at the end
                         padded_full = np.pad(sig_full, (0, max_len_full - len(sig_full)), mode='constant', constant_values=0)
-                        print(f"    Channel {i+1}: Padded from {len(sig_full)} to {max_len_full} samples")
+                        logger.debug(f"Channel {i+1}: Padded from {len(sig_full)} to {max_len_full} samples")
                     else:
                         padded_full = sig_full
                     
@@ -3818,8 +3850,8 @@ class PSDAnalysisWindow(QMainWindow):
             if self.sample_rate is not None:
                 nyquist_freq = self.sample_rate / 2
                 self.validator.set_nyquist_frequency(nyquist_freq)
-                print(f"Validator: Nyquist frequency set to {nyquist_freq} Hz")
-            
+                logger.debug(f"Validator: Nyquist frequency set to {nyquist_freq} Hz")
+
             # Create file label and set flight name
             if len(set(flight_info)) == 1:
                 self.current_file = f"{flight_info[0]} ({len(selected_items)} channels)"
@@ -3827,11 +3859,10 @@ class PSDAnalysisWindow(QMainWindow):
             else:
                 self.current_file = f"Multiple flights ({len(selected_items)} channels)"
                 self.flight_name = "Multiple flights"  # Multiple flights
-            
-            print(f"\nFinal full data shape: {self.signal_data_full.shape}")
-            print(f"Final display data shape: {self.signal_data_display.shape}")
-            print(f"Time data full shape: {self.time_data_full.shape}")
-            print(f"Time data display shape: {self.time_data_display.shape}")
+
+            logger.debug(f"Final full data shape: {self.signal_data_full.shape}")
+            logger.debug(f"Final display data shape: {self.signal_data_display.shape}")
+            logger.debug(f"Time data full/display shapes: {self.time_data_full.shape}, {self.time_data_display.shape}")
             
             # Calculate duration from full resolution time vector
             duration = self.time_data_full[-1] - self.time_data_full[0]
@@ -3901,11 +3932,9 @@ class PSDAnalysisWindow(QMainWindow):
         except Exception as e:
             import traceback
             error_details = traceback.format_exc()
-            print(f"\n=== ERROR IN HDF5 LOADING ===")
-            print(error_details)
-            print(f"Error type: {type(e).__name__}")
-            print(f"Error message: {str(e)}")
-            show_critical(self, "Load Error", f"Failed to load HDF5 data: {e}\n\nSee console for full traceback.")
+            logger.error(f"HDF5 loading error: {type(e).__name__}: {str(e)}")
+            logger.debug(f"Full traceback:\n{error_details}")
+            show_critical(self, "Load Error", f"Failed to load HDF5 data: {e}\n\nSee log for details.")
     
     def _on_maximax_toggled(self):
         """Handle maximax checkbox toggle."""

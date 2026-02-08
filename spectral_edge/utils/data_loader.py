@@ -7,10 +7,13 @@ file formats (CSV, HDF5) and validating the data structure.
 Author: SpectralEdge Development Team
 """
 
+import logging
 import numpy as np
 import pandas as pd
 from typing import Tuple, List, Optional, Dict
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class DataLoadError(Exception):
@@ -116,8 +119,10 @@ def load_csv_data(
     max_variation = 0.01 * median_dt
     if np.any(np.abs(time_diffs - median_dt) > max_variation):
         # Issue a warning but continue (could make this stricter if needed)
-        print(f"Warning: Time sampling is not perfectly uniform (max variation: "
-              f"{np.max(np.abs(time_diffs - median_dt)):.2e} s)")
+        logger.warning(
+            f"Time sampling is not perfectly uniform (max variation: "
+            f"{np.max(np.abs(time_diffs - median_dt)):.2e} s)"
+        )
     
     # Extract data columns (all columns except time)
     data_columns = [col for col in df.columns if col != time_column]

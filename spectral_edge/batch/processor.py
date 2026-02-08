@@ -200,7 +200,7 @@ class BatchProcessor:
         self.progress_tracker = ProgressTracker(total_channels, self.progress_callback)
         channel_idx = 0
 
-        # Process one HDF5 file at a time
+        # Process one HDF5 file at a time using context managers for safe cleanup
         for file_path in self.config.source_files:
             if self.cancel_requested:
                 self.result.add_warning("Processing cancelled by user")
@@ -211,11 +211,39 @@ class BatchProcessor:
             if not file_channels:
                 continue
 
-            # Open HDF5 file
+            # Open HDF5 file using context manager for guaranteed cleanup
             try:
-                loader = HDF5FlightDataLoader(file_path)
-                self.hdf5_loaders[file_path] = loader
-                self.result.add_log_entry(f"Opened HDF5 file: {Path(file_path).name} ({len(file_channels)} channels)")
+                with HDF5FlightDataLoader(file_path) as loader:
+                    self.hdf5_loaders[file_path] = loader
+                    self.result.add_log_entry(
+                        f"Opened HDF5 file: {Path(file_path).name} ({len(file_channels)} channels)"
+                    )
+
+                    # Process all channels from this file
+                    for flight_key, channel_key in file_channels:
+                        if self.cancel_requested:
+                            self.result.add_warning("Processing cancelled by user")
+                            break
+
+                        channel_idx += 1
+                        self.progress_tracker.start_channel(flight_key, channel_key)
+                        self.result.add_log_entry(
+                            f"Processing channel {channel_idx}/{total_channels}: {flight_key}/{channel_key}"
+                        )
+
+                        try:
+                            self._process_channel_hdf5(flight_key, channel_key)
+                            self.progress_tracker.finish_channel()
+                        except Exception as e:
+                            self.result.add_error(f"Failed to process {flight_key}/{channel_key}: {str(e)}")
+                            self.progress_tracker.finish_channel()
+                            continue
+                        finally:
+                            # Clear memory after EVERY channel
+                            MemoryManager.clear_memory()
+
+                    self.result.add_log_entry(f"Closed HDF5 file: {Path(file_path).name}")
+
             except FileNotFoundError:
                 error = ErrorHandler.handle_file_not_found(file_path)
                 log_error_with_recovery(error)
@@ -226,36 +254,9 @@ class BatchProcessor:
                 log_error_with_recovery(error)
                 self.result.add_error(error.get_full_message())
                 continue
-
-            # Process all channels from this file
-            for flight_key, channel_key in file_channels:
-                if self.cancel_requested:
-                    self.result.add_warning("Processing cancelled by user")
-                    break
-
-                channel_idx += 1
-                self.progress_tracker.start_channel(flight_key, channel_key)
-                self.result.add_log_entry(f"Processing channel {channel_idx}/{total_channels}: {flight_key}/{channel_key}")
-
-                try:
-                    self._process_channel_hdf5(flight_key, channel_key)
-                    self.progress_tracker.finish_channel()
-                except Exception as e:
-                    self.result.add_error(f"Failed to process {flight_key}/{channel_key}: {str(e)}")
-                    self.progress_tracker.finish_channel()
-                    continue
-                finally:
-                    # Clear memory after EVERY channel
-                    MemoryManager.clear_memory()
-
-            # Close this HDF5 file before opening the next one
-            try:
-                loader.close()
-                self.result.add_log_entry(f"Closed HDF5 file: {Path(file_path).name}")
-            except Exception as e:
-                logger.warning(f"Error closing HDF5 file {file_path}: {e}")
             finally:
-                del self.hdf5_loaders[file_path]
+                # Remove from loaders dict and clear memory
+                self.hdf5_loaders.pop(file_path, None)
                 MemoryManager.clear_memory()
 
     def _group_channels_by_file(self) -> Dict[str, List[Tuple[str, str]]]:

@@ -96,7 +96,13 @@ class DXDLoader:
         5: ('uint32', 4, np.uint32),
     }
 
-    def __init__(self, file_path: str):
+    def __init__(
+        self,
+        file_path: str,
+        sample_rate: Optional[float] = None,
+        data_type: Optional[str] = None,
+        num_channels: Optional[int] = None
+    ):
         """
         Initialize DXD loader.
 
@@ -104,6 +110,12 @@ class DXDLoader:
         -----------
         file_path : str
             Path to DXD/DXZ file
+        sample_rate : float, optional
+            Override sample rate (Hz). If provided, uses this instead of auto-detection.
+        data_type : str, optional
+            Override data type ('int16', 'int32', 'float32', 'float64').
+        num_channels : int, optional
+            Override number of channels. If provided, uses this instead of auto-detection.
         """
         self.file_path = Path(file_path)
         self.channels: Dict[str, DXDChannelInfo] = {}
@@ -113,6 +125,11 @@ class DXDLoader:
         self._data_offset = 0
         self._index_entries: List[Dict] = []
         self._xml_config = None
+
+        # Store user overrides
+        self._user_sample_rate = sample_rate
+        self._user_data_type = data_type
+        self._user_num_channels = num_channels
 
         # Validate and open file
         self._open_file()
@@ -218,22 +235,54 @@ class DXDLoader:
 
     def _parse_binary_header(self, content: bytes):
         """Parse channel info from binary header when XML is not found."""
-        # Look for channel count indicator
-        # DXD files typically have header info in first few KB
+        # DXD files without XML are difficult to parse correctly
+        # Be conservative and default to 1 channel
+        # The user can specify sample rate and channel count if needed
 
         header = content[:8192]
 
-        # Try to find number of channels
-        # Common patterns: 2-byte or 4-byte integer indicating channel count
-        for offset in range(0, min(500, len(header) - 4), 2):
-            num_ch = struct.unpack_from('<H', header, offset)[0]
-            if 1 <= num_ch <= 256:  # Reasonable channel count
-                # Check if this makes sense based on file size
-                self.file_metadata['possible_channels'] = num_ch
+        # Look for specific DEWESoft markers
+        # Common markers: "DEWS", "DXD", specific version strings
+        dewesoft_markers = [b'DEWS', b'Dewesoft', b'DEWESOFT', b'DWDataFile']
+        found_marker = False
+        for marker in dewesoft_markers:
+            if marker in header:
+                found_marker = True
+                logger.debug(f"Found DEWESoft marker: {marker}")
                 break
 
-        # Set data offset to after typical header size
+        if not found_marker:
+            logger.warning(
+                "No DEWESoft markers found in file header. "
+                "File may not be a valid DXD file or uses an unsupported format."
+            )
+
+        # Don't try to guess channel count from random bytes
+        # Default to 1 channel - user can adjust if needed
+        self.file_metadata['possible_channels'] = 1
+        self.file_metadata['format_detected'] = found_marker
+
+        # Try to find sample rate information
+        # Look for common sample rate values encoded as floats
+        self._try_detect_sample_rate(header)
+
+        # Set data offset conservatively
         self._data_offset = min(4096, len(content) // 10)
+
+    def _try_detect_sample_rate(self, header: bytes):
+        """Try to detect sample rate from binary header."""
+        # Common sample rates to look for (as 32-bit floats)
+        common_rates = [100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0, 50000.0]
+
+        for offset in range(0, min(1000, len(header) - 4), 4):
+            try:
+                value = struct.unpack_from('<f', header, offset)[0]
+                if value in common_rates:
+                    self.file_metadata['detected_sample_rate'] = value
+                    logger.debug(f"Possible sample rate detected: {value} Hz at offset {offset}")
+                    return
+            except struct.error:
+                continue
 
     def _find_index(self):
         """Find the data index/table of contents."""
@@ -404,23 +453,142 @@ class DXDLoader:
         content = self._file_handle.read()
         file_size = len(content)
 
-        # Estimate based on typical file structures
-        # Default to single channel if we can't determine
-        possible_channels = self.file_metadata.get('possible_channels', 1)
+        # Use user override if provided, otherwise default to single channel
+        if self._user_num_channels is not None:
+            num_channels = self._user_num_channels
+            logger.info(f"Using user-specified channel count: {num_channels}")
+        else:
+            num_channels = self.file_metadata.get('possible_channels', 1)
 
-        for i in range(possible_channels):
+        # Try to detect the best data type and sample rate
+        detected_dtype, detected_sample_rate = self._analyze_data_format(content)
+
+        # Use user override if provided, otherwise try detection
+        if self._user_data_type is not None:
+            detected_dtype = self._user_data_type
+            logger.info(f"Using user-specified data type: {detected_dtype}")
+
+        # Priority: user override > detected from header > detected from data > default
+        if self._user_sample_rate is not None:
+            sample_rate = self._user_sample_rate
+            logger.info(f"Using user-specified sample rate: {sample_rate} Hz")
+        else:
+            sample_rate = (
+                self.file_metadata.get('detected_sample_rate') or
+                detected_sample_rate or
+                1000.0
+            )
+
+        for i in range(num_channels):
             channel_info = DXDChannelInfo(
                 name=f'Channel_{i + 1}',
                 index=i,
-                sample_rate=1000.0,  # Will need to be adjusted by user
+                sample_rate=sample_rate,
                 units='',
                 scale=1.0,
                 offset=0.0,
-                data_type='int16'
+                data_type=detected_dtype
             )
             self.channels[f'Channel_{i + 1}'] = channel_info
 
-        logger.warning(f"Could not find channel definitions, inferred {len(self.channels)} channel(s)")
+        logger.warning(
+            f"Could not find channel definitions. Inferred: {num_channels} channel(s), "
+            f"{sample_rate:.1f} Hz, {detected_dtype} data type. "
+            f"Use --sample-rate and --data-type options to override if incorrect."
+        )
+
+    def _analyze_data_format(self, content: bytes) -> Tuple[str, Optional[float]]:
+        """
+        Analyze binary data to determine the most likely data format.
+
+        Returns (data_type, sample_rate) tuple.
+        """
+        data_region = content[self._data_offset:]
+        if len(data_region) < 100:
+            return 'float64', None
+
+        # Try different data types and see which produces sensible values
+        type_configs = [
+            ('float64', np.float64, 8),
+            ('float32', np.float32, 4),
+            ('int16', np.int16, 2),
+            ('int32', np.int32, 4),
+        ]
+
+        best_dtype = 'float64'
+        best_score = -1
+
+        for dtype_name, dtype, bytes_per_sample in type_configs:
+            try:
+                num_samples = min(10000, len(data_region) // bytes_per_sample)
+                if num_samples < 10:
+                    continue
+
+                test_data = np.frombuffer(
+                    data_region[:num_samples * bytes_per_sample],
+                    dtype=dtype
+                )
+
+                # Score based on how "reasonable" the data looks
+                score = self._score_data_interpretation(test_data, dtype_name)
+
+                if score > best_score:
+                    best_score = score
+                    best_dtype = dtype_name
+
+            except Exception:
+                continue
+
+        logger.debug(f"Best data type detected: {best_dtype} (score: {best_score:.2f})")
+        return best_dtype, None
+
+    def _score_data_interpretation(self, data: np.ndarray, dtype_name: str) -> float:
+        """
+        Score how reasonable a data interpretation looks.
+        Higher score = more likely to be correct interpretation.
+        """
+        if len(data) == 0:
+            return -1.0
+
+        # Check for NaN/Inf (bad sign for float types)
+        if np.issubdtype(data.dtype, np.floating):
+            nan_ratio = np.sum(~np.isfinite(data)) / len(data)
+            if nan_ratio > 0.1:
+                return -1.0  # Too many invalid values
+
+        score = 0.0
+
+        # Convert to float for analysis
+        float_data = data.astype(np.float64)
+
+        # Check if values are in a reasonable range
+        data_range = np.ptp(float_data)
+        data_std = np.std(float_data)
+        data_mean = np.mean(float_data)
+
+        # Penalize if all values are zero or constant
+        if data_std == 0:
+            return -1.0
+
+        # Prefer data with reasonable dynamic range
+        # Typical sensor data has some variation but not extreme
+        if 0 < data_std < 1e10:
+            score += 1.0
+
+        # Check if data looks like a time series (some autocorrelation)
+        if len(float_data) >= 100:
+            # Simple check: neighboring values should be somewhat related
+            diff_std = np.std(np.diff(float_data))
+            if diff_std < data_std:
+                score += 0.5  # Smooth data is good
+
+        # Float64 is commonly used for high-precision measurements
+        if dtype_name == 'float64':
+            score += 0.3
+        elif dtype_name == 'float32':
+            score += 0.2
+
+        return score
 
     def get_channel_names(self) -> List[str]:
         """Get list of all channel names."""

@@ -142,16 +142,32 @@ def open_dxd_file(lib, file_path):
     """
     print(f"\nOpening file: {file_path}")
     
-    # Create a reader instance
+    # Step 1: Create a reader instance
     # This is a handle (pointer) that will be used for all subsequent operations
     reader_instance = READER_HANDLE()
     
-    # Open the data file
+    # Call DWICreateReader to initialize the reader handle
+    # This MUST be called before DWIOpenDataFile
+    print("Creating reader instance...")
+    status = lib.DWICreateReader(ctypes.byref(reader_instance))
+    check_error(lib, status)
+    print("✓ Reader instance created")
+    
+    # Step 2: Open the data file
     # The file path is converted to bytes for the C library
-    status = lib.DWIOpenDataFile(reader_instance, file_path.encode('utf-8'), None)
+    print("Opening data file...")
+    c_filename = ctypes.c_char_p(file_path.encode('utf-8'))
+    file_info = DWFileInfo(0, 0, 0)
+    status = lib.DWIOpenDataFile(reader_instance, c_filename, ctypes.byref(file_info))
     
     # Check if the operation was successful
     check_error(lib, status)
+    
+    # Display file information
+    print("\nFile Info:")
+    print(f"  Sample rate:      {file_info.sample_rate:.2f} Hz")
+    print(f"  Start store time: {file_info.start_store_time:.6f} s")
+    print(f"  Duration:         {file_info.duration:.2f} s")
     
     print("✓ File opened successfully")
     return reader_instance
@@ -542,10 +558,14 @@ Examples:
         # Step 7: Write data to CSV file
         write_csv_file(args.output_file, channels_data, metadata)
         
-        # Step 8: Clean up - close the file
+        # Step 8: Clean up - close the file and destroy reader
         print("\nClosing file...")
         lib.DWICloseDataFile(reader_instance)
         print("✓ File closed")
+        
+        print("Destroying reader instance...")
+        lib.DWIDestroyReader(reader_instance)
+        print("✓ Reader destroyed")
         
         # Success message
         print_section_header("Conversion Complete")

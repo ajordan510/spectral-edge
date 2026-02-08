@@ -102,34 +102,45 @@ classdef DWDataReader < handle
                 return;
             end
 
-            % Path to header file and DLL
+            % Path to header file
             headerPath = fullfile(pwd, 'DWDataReaderLibFuncs.h');
 
+            % Determine library name based on architecture
             if contains(computer('arch'), '64')
                 libName = 'DWDataReaderLib64';
             else
                 libName = 'DWDataReaderLib';
             end
+            
+            % Determine library file extension based on platform
+            if ispc
+                libExt = '.dll';
+            elseif ismac
+                libExt = '.dylib';
+            elseif isunix
+                libExt = '.so';
+            else
+                error('Unsupported platform');
+            end
+            
+            % Full path to library file
+            libFile = fullfile(pwd, [libName libExt]);
 
-            if ~libisloaded(libName)
+            if ~libisloaded('DWReader')
                 % Load the library
-                
-                if ispc || ismac || isunix
-                    try
-                        [notfound, warnings] = loadlibrary(fullfile(pwd, 'DWDataReaderLib64.dll'), headerPath, 'alias', 'DWReader', 'debug');
-                        if ~isempty(notfound)
-                            warning('Some functions not found: %s', strjoin(notfound, ', '));
-                        end
-                        obj.LibraryLoaded = true;
-                        success = true;
-                        fprintf('DWDataReader library loaded successfully\n');
-                    catch ME
-                        fprintf('Error loading library: %s\n', ME.message);
-                        success = false;
-                        return;
+                try
+                    fprintf('Loading library: %s\n', libFile);
+                    [notfound, warnings] = loadlibrary(libFile, headerPath, 'alias', 'DWReader');
+                    if ~isempty(notfound)
+                        warning('Some functions not found: %s', strjoin(notfound, ', '));
                     end
-                else
-                    fprintf('Error: Unknown platform!');
+                    obj.LibraryLoaded = true;
+                    success = true;
+                    fprintf('DWDataReader library loaded successfully\n');
+                catch ME
+                    fprintf('Error loading library: %s\n', ME.message);
+                    fprintf('Library file: %s\n', libFile);
+                    fprintf('Header file: %s\n', headerPath);
                     success = false;
                     return;
                 end

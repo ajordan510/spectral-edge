@@ -8,7 +8,7 @@
 - **Modular Design:** A library of core functions separate from the GUI, allowing for easy expansion and maintenance.
 - **Advanced Plotting:** Interactive plots with features like zooming, panning, and data selection.
 - **Report Generation:** Automatically generate reports in PowerPoint format with embedded plots.
-- **Versatile Data Input:** Supports both CSV and HDF5 file formats.
+- **Versatile Data Input:** Supports CSV, HDF5, and DEWESoft (.dxd/.dxz) file formats.
 - **High-Performance:** Optimized for handling high-rate data (5000+ samples per second) and large channel counts.
 - **User-Friendly Distribution:** Packaged as a portable application that does not require admin privileges for installation.
 
@@ -65,6 +65,7 @@
 1. **Load Data:**
    - Click "Load CSV Data" for CSV files
    - Click "Load HDF5 Data" for HDF5 files
+   - For DEWESoft files (.dxd/.dxz), first convert to CSV or MAT format (see [DEWESoft Import Guide](docs/DEWESOFT_IMPORT.md))
    - Select channels to analyze
 
 2. **Calculate PSD:**
@@ -926,6 +927,69 @@ RMS = sqrt(∫ PSD(f) df)
 4. **scipy.signal.welch**: https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.welch.html
 
 5. **ANSI S1.11**: Specification for Octave-Band and Fractional-Octave-Band Analog and Digital Filters
+
+---
+
+## DEWESoft Data Import
+
+SpectralEdge supports importing data from **DEWESoft** data acquisition files (`.dxd` and `.dxz` formats) using the official DEWESoft Data Reader Library.
+
+### Quick Start
+
+**Python Script (DXD to CSV):**
+```bash
+python scripts/dxd_to_csv.py input.dxd output.csv
+```
+
+**MATLAB Script (DXD to MAT):**
+```matlab
+dxd_to_mat('input.dxd', 'output.mat');
+```
+
+### Features
+
+- ✓ Convert DEWESoft `.dxd` and `.dxz` files to CSV or MATLAB `.mat` format
+- ✓ Cross-platform support (Windows and Linux)
+- ✓ Selective channel export or full file export
+- ✓ Support for synchronous, asynchronous, and array channels
+- ✓ Large file handling with sample limiting
+- ✓ Comprehensive error handling and validation
+
+### Documentation
+
+For detailed usage instructions, examples, and troubleshooting, see:
+
+**[DEWESoft Import Guide](docs/DEWESOFT_IMPORT.md)**
+
+The guide includes:
+- Installation and setup
+- Python script usage (`dxd_to_csv.py`)
+- MATLAB script usage (`dxd_to_mat.m`)
+- Output format specifications
+- Integration with SpectralEdge workflow
+- Troubleshooting common issues
+- Platform-specific notes
+- Advanced usage and batch conversion
+
+### Example Workflow
+
+1. **Convert DEWESoft file to CSV:**
+   ```bash
+   python scripts/dxd_to_csv.py data/flight_test.dxd data/flight_test.csv
+   ```
+
+2. **Load CSV in SpectralEdge:**
+   - Open SpectralEdge Batch Processor
+   - Click "Add Files" and select the converted CSV file
+   - Select channels and perform PSD analysis
+
+### Library Files
+
+The DEWESoft Data Reader Library files are included in:
+- `scripts/dewesoft/` - Python wrapper and libraries
+- `matlab/dewesoft/` - MATLAB wrapper and libraries
+
+No additional downloads required!
 
 ---
 

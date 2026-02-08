@@ -36,10 +36,7 @@ def convert_dxd_to_csv(
     channels: Optional[List[str]] = None,
     include_time: bool = True,
     decimal_places: int = 6,
-    verbose: bool = True,
-    sample_rate: Optional[float] = None,
-    data_type: Optional[str] = None,
-    num_channels: Optional[int] = None
+    verbose: bool = True
 ) -> str:
     """
     Convert a DXD file to CSV format.
@@ -58,12 +55,6 @@ def convert_dxd_to_csv(
         Number of decimal places for numeric values (default: 6)
     verbose : bool
         Print progress messages (default: True)
-    sample_rate : float, optional
-        Override auto-detected sample rate (Hz)
-    data_type : str, optional
-        Override auto-detected data type ('int16', 'int32', 'float32', 'float64')
-    num_channels : int, optional
-        Override auto-detected number of channels
 
     Returns:
     --------
@@ -84,13 +75,8 @@ def convert_dxd_to_csv(
     if verbose:
         print(f"Loading DXD file: {input_path.name}")
 
-    # Load DXD file with optional overrides
-    with DXDLoader(
-        str(input_path),
-        sample_rate=sample_rate,
-        data_type=data_type,
-        num_channels=num_channels
-    ) as loader:
+    # Load DXD file
+    with DXDLoader(str(input_path)) as loader:
         available_channels = loader.get_channel_names()
 
         if verbose:
@@ -158,12 +144,7 @@ def convert_dxd_to_csv(
     return str(output_path)
 
 
-def show_file_info(
-    input_path: str,
-    sample_rate: Optional[float] = None,
-    data_type: Optional[str] = None,
-    num_channels: Optional[int] = None
-) -> None:
+def show_file_info(input_path: str) -> None:
     """Display information about a DXD file without converting."""
     input_path = Path(input_path)
 
@@ -172,22 +153,11 @@ def show_file_info(
         return
 
     print(f"\nFile: {input_path.name}")
-    print(f"Size: {input_path.stat().st_size / 1024:.1f} KB")
     print("-" * 50)
 
     try:
-        with DXDLoader(
-            str(input_path),
-            sample_rate=sample_rate,
-            data_type=data_type,
-            num_channels=num_channels
-        ) as loader:
+        with DXDLoader(str(input_path)) as loader:
             print(f"Channels: {len(loader.channels)}")
-
-            if loader.file_metadata:
-                print(f"Format detected: {loader.file_metadata.get('format_detected', 'Unknown')}")
-                if 'detected_sample_rate' in loader.file_metadata:
-                    print(f"Auto-detected sample rate: {loader.file_metadata['detected_sample_rate']:.1f} Hz")
             print()
 
             for name, info in loader.channels.items():
@@ -199,20 +169,6 @@ def show_file_info(
                     print(f"    Description: {info.description}")
                 print()
 
-            # Show data preview
-            if loader.channels:
-                first_channel = list(loader.channels.keys())[0]
-                try:
-                    time_arr, data_arr = loader.get_channel_data(first_channel)
-                    print(f"Data Preview ({first_channel}):")
-                    print(f"  Samples: {len(data_arr)}")
-                    print(f"  Duration: {len(data_arr) / loader.channels[first_channel].sample_rate:.2f} seconds")
-                    print(f"  Range: [{np.min(data_arr):.6g}, {np.max(data_arr):.6g}]")
-                    print(f"  Mean: {np.mean(data_arr):.6g}")
-                    print(f"  Std: {np.std(data_arr):.6g}")
-                except Exception as e:
-                    print(f"  Could not read data: {e}")
-
     except DXDFormatError as e:
         print(f"Error: Invalid DXD format - {e}")
     except Exception as e:
@@ -223,10 +179,7 @@ def batch_convert(
     input_paths: List[str],
     output_dir: Optional[str] = None,
     channels: Optional[List[str]] = None,
-    verbose: bool = True,
-    sample_rate: Optional[float] = None,
-    data_type: Optional[str] = None,
-    num_channels: Optional[int] = None
+    verbose: bool = True
 ) -> List[str]:
     """
     Convert multiple DXD files to CSV.
@@ -241,12 +194,6 @@ def batch_convert(
         Channels to export (applied to all files)
     verbose : bool
         Print progress messages
-    sample_rate : float, optional
-        Override sample rate for all files
-    data_type : str, optional
-        Override data type for all files
-    num_channels : int, optional
-        Override number of channels for all files
 
     Returns:
     --------
@@ -274,10 +221,7 @@ def batch_convert(
                 input_path,
                 output_path=str(output_path) if output_path else None,
                 channels=channels,
-                verbose=verbose,
-                sample_rate=sample_rate,
-                data_type=data_type,
-                num_channels=num_channels
+                verbose=verbose
             )
             output_files.append(csv_path)
 
@@ -308,10 +252,6 @@ Examples:
   %(prog)s *.dxd --output-dir ./csv_files      Batch convert to directory
   %(prog)s measurement.dxd --channels "Acc_X,Acc_Y,Acc_Z"
   %(prog)s measurement.dxd --info              Show file info only
-
-  # When auto-detection fails, specify format manually:
-  %(prog)s measurement.dxd --sample-rate 10000 --data-type float64
-  %(prog)s measurement.dxd --num-channels 1 --sample-rate 5000
         """
     )
 
@@ -356,24 +296,6 @@ Examples:
     )
 
     parser.add_argument(
-        '--sample-rate',
-        type=float,
-        help='Override auto-detected sample rate (Hz). Use when auto-detection fails.'
-    )
-
-    parser.add_argument(
-        '--data-type',
-        choices=['int16', 'int32', 'float32', 'float64'],
-        help='Override auto-detected data type. Use when auto-detection fails.'
-    )
-
-    parser.add_argument(
-        '--num-channels',
-        type=int,
-        help='Override auto-detected number of channels. Use when auto-detection fails.'
-    )
-
-    parser.add_argument(
         '-q', '--quiet',
         action='store_true',
         help='Suppress progress messages'
@@ -391,12 +313,7 @@ Examples:
     # Info mode
     if args.info:
         for input_file in args.input_files:
-            show_file_info(
-                input_file,
-                sample_rate=args.sample_rate,
-                data_type=args.data_type,
-                num_channels=args.num_channels
-            )
+            show_file_info(input_file)
         return 0
 
     # Single file conversion
@@ -408,10 +325,7 @@ Examples:
                 channels=channels,
                 include_time=not args.no_time,
                 decimal_places=args.decimal_places,
-                verbose=verbose,
-                sample_rate=args.sample_rate,
-                data_type=args.data_type,
-                num_channels=args.num_channels
+                verbose=verbose
             )
             return 0
         except Exception as e:
@@ -424,10 +338,7 @@ Examples:
             args.input_files,
             output_dir=args.output_dir,
             channels=channels,
-            verbose=verbose,
-            sample_rate=args.sample_rate,
-            data_type=args.data_type,
-            num_channels=args.num_channels
+            verbose=verbose
         )
         return 0 if output_files else 1
     except Exception as e:

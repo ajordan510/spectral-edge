@@ -388,6 +388,163 @@ def get_channel_data(lib, reader_instance, channel, max_samples=None):
     return timestamps, values
 
 
+def write_csv_file_chunked(lib, reader_instance, output_path, channels_info, metadata, chunk_size=100000):
+    """
+    Write channel data to CSV file using chunked reading to minimize memory usage.
+    
+    This function reads and writes data in chunks, so only a small portion of the file
+    is in memory at any given time. This allows processing of very large files that
+    would otherwise exceed available RAM.
+    
+    Args:
+        lib: The loaded DEWESoft library
+        reader_instance: Handle to the opened file
+        output_path (str): Path to the output CSV file
+        channels_info (list): List of tuples (channel, samples_to_export, ch_type)
+        metadata (dict): File metadata dictionary
+        chunk_size (int): Number of samples to read per chunk (default: 100,000)
+    """
+    print_section_header("Writing CSV File (Chunked Mode)")
+    print(f"Output file: {output_path}")
+    print(f"Chunk size: {chunk_size:,} samples")
+    
+    # Create output directory if it doesn't exist
+    output_dir = os.path.dirname(output_path)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"Created output directory: {output_dir}")
+    
+    # Determine the maximum number of samples across all channels
+    max_samples = 0
+    for _, samples_to_export, _ in channels_info:
+        max_samples = max(max_samples, samples_to_export)
+    
+    print(f"Total samples to write: {max_samples:,}")
+    print(f"Number of chunks: {(max_samples + chunk_size - 1) // chunk_size}")
+    
+    # Open the CSV file for writing
+    with open(output_path, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        
+        # Write metadata as comments
+        writer.writerow(['# DEWESoft Data Export'])
+        writer.writerow([f'# Sample Rate: {metadata["sample_rate"]:.2f} Hz'])
+        writer.writerow([f'# Duration: {metadata["duration"]:.2f} s'])
+        writer.writerow([f'# Channels: {len(channels_info)}'])
+        writer.writerow([])  # Empty row
+        
+        # Prepare header rows
+        header_names = ['Time (s)']
+        header_units = ['s']
+        
+        for channel, _, _ in channels_info:
+            ch_name = decode_bytes(channel.name)
+            ch_unit = decode_bytes(channel.unit)
+            
+            # Handle array channels (multiple values per timestamp)
+            if channel.array_size > 1:
+                for i in range(channel.array_size):
+                    header_names.append(f"{ch_name}[{i}]")
+                    header_units.append(ch_unit)
+            else:
+                header_names.append(ch_name)
+                header_units.append(ch_unit)
+        
+        # Write header rows
+        writer.writerow(header_names)
+        writer.writerow(header_units)
+        
+        # Get sample rate for timestamp generation
+        sample_rate = metadata['sample_rate']
+        time_step = 1.0 / sample_rate if sample_rate > 0 else 0.0
+        
+        # Process data in chunks
+        rows_written = 0
+        chunk_num = 0
+        
+        for chunk_start in range(0, max_samples, chunk_size):
+            chunk_num += 1
+            chunk_end = min(chunk_start + chunk_size, max_samples)
+            samples_in_chunk = chunk_end - chunk_start
+            
+            print(f"\rProcessing chunk {chunk_num}: samples {chunk_start:,} to {chunk_end:,}...", end='', flush=True)
+            
+            # Read data for all channels in this chunk
+            chunk_data = []
+            for channel, samples_to_export, ch_type in channels_info:
+                # Determine how many samples to read for this channel in this chunk
+                channel_chunk_end = min(chunk_end, samples_to_export)
+                if chunk_start >= samples_to_export:
+                    # This channel has no more data
+                    chunk_data.append((channel, [], []))
+                    continue
+                
+                channel_samples_in_chunk = channel_chunk_end - chunk_start
+                
+                # Allocate memory for this chunk only
+                total_count = channel_samples_in_chunk * channel.array_size
+                samples = (ctypes.c_double * total_count)()
+                
+                # Allocate timestamps for async channels
+                timestamps = None
+                if ch_type == DWChannelType.DW_CH_TYPE_ASYNC:
+                    timestamps = (ctypes.c_double * channel_samples_in_chunk)()
+                
+                # Read the chunk of scaled samples
+                check_error(lib, lib.DWIGetScaledSamples(reader_instance, channel.index, 
+                                                          chunk_start, channel_samples_in_chunk, 
+                                                          samples, timestamps))
+                
+                # Convert to Python lists (only for this chunk)
+                values = list(samples)
+                
+                # For synchronous channels, generate timestamps
+                if timestamps is None:
+                    timestamps_list = [chunk_start * time_step + i * time_step for i in range(channel_samples_in_chunk)]
+                else:
+                    timestamps_list = list(timestamps)
+                
+                chunk_data.append((channel, timestamps_list, values))
+            
+            # Write this chunk to CSV
+            for i in range(samples_in_chunk):
+                row = []
+                
+                # Use the first channel's timestamps as the time column
+                if chunk_data[0][1]:  # Check if first channel has data
+                    row.append(f"{chunk_data[0][1][i]:.6f}")
+                else:
+                    row.append(f"{(chunk_start + i) * time_step:.6f}")
+                
+                # Add values from each channel
+                for channel, timestamps_list, values in chunk_data:
+                    if i < len(timestamps_list):
+                        # Handle array channels
+                        if channel.array_size > 1:
+                            for j in range(channel.array_size):
+                                idx = i * channel.array_size + j
+                                if idx < len(values):
+                                    row.append(f"{values[idx]:.6f}")
+                                else:
+                                    row.append('')
+                        else:
+                            row.append(f"{values[i]:.6f}")
+                    else:
+                        # Fill with empty values if this channel has no data at this index
+                        if channel.array_size > 1:
+                            row.extend([''] * channel.array_size)
+                        else:
+                            row.append('')
+                
+                writer.writerow(row)
+                rows_written += 1
+        
+        print()  # New line after progress
+        print(f"✓ CSV file written successfully")
+        print(f"  Rows: {rows_written:,}")
+        print(f"  Columns: {len(header_names)}")
+
+
 def write_csv_file(output_path, channels_data, metadata):
     """
     Write channel data to a CSV file.
@@ -539,24 +696,81 @@ Examples:
         # Step 5: Select channels to export
         selected_channels = select_channels(channel_list, args.channels)
         
-        # Step 6: Read data from each selected channel
-        print_section_header("Reading Channel Data")
-        channels_data = []
+        # Step 6: Get channel information (without loading all data)
+        print_section_header("Analyzing Channels")
+        channels_info = []
+        total_data_size = 0
         
         for i, channel in enumerate(selected_channels):
             ch_name = decode_bytes(channel.name)
-            print(f"\nReading channel {i+1}/{len(selected_channels)}: {ch_name}")
+            print(f"\nChannel {i+1}/{len(selected_channels)}: {ch_name}")
             
-            timestamps, values = get_channel_data(lib, reader_instance, channel, 
-                                                   args.max_samples)
+            # Get sample count and type without loading data
+            sample_cnt = ctypes.c_longlong()
+            check_error(lib, lib.DWIGetScaledSamplesCount(reader_instance, channel.index, 
+                                                            ctypes.byref(sample_cnt)))
+            total_samples = sample_cnt.value
             
-            print(f"  Samples read: {len(timestamps)}")
+            # Limit samples if requested
+            if args.max_samples is not None and total_samples > args.max_samples:
+                samples_to_export = args.max_samples
+                print(f"  Total samples: {total_samples:,} (limiting to {args.max_samples:,})")
+            else:
+                samples_to_export = total_samples
+                print(f"  Total samples: {total_samples:,}")
+            
             print(f"  Array size: {channel.array_size}")
             
-            channels_data.append((channel, timestamps, values))
+            # Get channel type
+            buf_len = ctypes.c_int(INT_SIZE)
+            buff = create_string_buffer('', buf_len.value)
+            p_buff = ctypes.cast(buff, ctypes.POINTER(ctypes.c_void_p))
+            check_error(lib, lib.DWIGetChannelProps(reader_instance, channel.index, 
+                                                     DWChannelProps.DW_CH_TYPE, p_buff, 
+                                                     ctypes.byref(buf_len)))
+            ch_type_val = ctypes.cast(p_buff, ctypes.POINTER(ctypes.c_int)).contents
+            ch_type = DWChannelType(ch_type_val.value)
+            
+            # Estimate memory usage
+            data_size_mb = (samples_to_export * channel.array_size * 8) / (1024 * 1024)  # 8 bytes per double
+            total_data_size += data_size_mb
+            print(f"  Estimated data size: {data_size_mb:.1f} MB")
+            
+            channels_info.append((channel, samples_to_export, ch_type))
         
-        # Step 7: Write data to CSV file
-        write_csv_file(args.output_file, channels_data, metadata)
+        print(f"\nTotal estimated data size: {total_data_size:.1f} MB")
+        
+        # Determine if we should use chunked reading
+        # Use chunked reading if total data > 500 MB to prevent memory errors
+        use_chunked = total_data_size > 500
+        
+        if use_chunked:
+            print("\n⚠ Large file detected - using memory-efficient chunked reading")
+            chunk_size = 100000  # Read 100k samples at a time
+            
+            # Step 7: Write data to CSV file using chunked reading
+            write_csv_file_chunked(lib, reader_instance, args.output_file, 
+                                   channels_info, metadata, chunk_size)
+        else:
+            print("\n✓ File size is manageable - using standard reading")
+            
+            # Step 6b: Read all data into memory (original method)
+            print_section_header("Reading Channel Data")
+            channels_data = []
+            
+            for i, (channel, samples_to_export, ch_type) in enumerate(channels_info):
+                ch_name = decode_bytes(channel.name)
+                print(f"\nReading channel {i+1}/{len(selected_channels)}: {ch_name}")
+                
+                timestamps, values = get_channel_data(lib, reader_instance, channel, 
+                                                       samples_to_export)
+                
+                print(f"  Samples read: {len(timestamps)}")
+                
+                channels_data.append((channel, timestamps, values))
+            
+            # Step 7: Write data to CSV file
+            write_csv_file(args.output_file, channels_data, metadata)
         
         # Step 8: Clean up - close the file and destroy reader
         print("\nClosing file...")

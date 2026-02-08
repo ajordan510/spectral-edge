@@ -15,13 +15,10 @@ Author: SpectralEdge Development Team
 Date: 2025-01-21
 """
 
-import logging
 import h5py
 import numpy as np
 import json
 from typing import Dict, List, Tuple, Optional
-
-logger = logging.getLogger(__name__)
 
 
 class FlightInfo:
@@ -79,45 +76,7 @@ class ChannelInfo:
         self.range_max = attributes.get('range_max', None)
         self.location = attributes.get('location', '')
         self.attributes = attributes
-
-        # Validate critical metadata
-        self._validate_metadata()
-
-    def _validate_metadata(self):
-        """Validate channel metadata and log warnings for issues."""
-        # Check sample rate
-        if self.sample_rate <= 0:
-            logger.warning(
-                f"Channel '{self.full_path}' has invalid sample_rate: {self.sample_rate}. "
-                "Using default of 1000 Hz."
-            )
-            self.sample_rate = 1000.0
-
-        if self.sample_rate > 1e6:
-            logger.warning(
-                f"Channel '{self.full_path}' has unusually high sample_rate: {self.sample_rate} Hz"
-            )
-
-        # Check start time
-        if self.start_time < 0:
-            logger.warning(
-                f"Channel '{self.full_path}' has negative start_time: {self.start_time}. "
-                "Using 0.0 instead."
-            )
-            self.start_time = 0.0
-
-        # Check range values
-        if self.range_min is not None and self.range_max is not None:
-            if self.range_min >= self.range_max:
-                logger.warning(
-                    f"Channel '{self.full_path}' has invalid range: "
-                    f"min={self.range_min}, max={self.range_max}"
-                )
-
-        # Log if units are missing (informational)
-        if not self.units:
-            logger.debug(f"Channel '{self.full_path}' has no units specified")
-
+    
     def __str__(self):
         return f"{self.channel_key} ({self.sample_rate:.0f} Hz, {self.units})"
     

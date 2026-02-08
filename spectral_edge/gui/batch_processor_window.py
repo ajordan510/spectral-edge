@@ -225,17 +225,7 @@ class BatchProcessorWindow(QMainWindow):
         csv_layout.addWidget(self.select_csv_btn)
         csv_layout.addStretch()
         source_layout.addLayout(csv_layout)
-
-        # DXD option (DEWESoft)
-        dxd_layout = QHBoxLayout()
-        self.dxd_radio = QCheckBox("DXD File(s) (DEWESoft)")
-        self.select_dxd_btn = QPushButton("Select DXD Files")
-        self.select_dxd_btn.setToolTip("Load DEWESoft DXD/DXZ data files")
-        dxd_layout.addWidget(self.dxd_radio)
-        dxd_layout.addWidget(self.select_dxd_btn)
-        dxd_layout.addStretch()
-        source_layout.addLayout(dxd_layout)
-
+        
         # Selected files display
         self.files_text = QTextEdit()
         self.files_text.setReadOnly(True)
@@ -895,7 +885,6 @@ class BatchProcessorWindow(QMainWindow):
         # File selection
         self.select_hdf5_btn.clicked.connect(self._on_select_hdf5)
         self.select_csv_btn.clicked.connect(self._on_select_csv)
-        self.select_dxd_btn.clicked.connect(self._on_select_dxd)
         self.select_channels_btn.clicked.connect(self._on_select_channels)
         
         # Events
@@ -1209,7 +1198,6 @@ class BatchProcessorWindow(QMainWindow):
             self.files_text.setText("\n".join(files))
             self.hdf5_radio.setChecked(True)
             self.csv_radio.setChecked(False)
-            self.dxd_radio.setChecked(False)
             if not self.output_dir_edit.text().strip():
                 default_dir = str(Path(files[0]).parent)
                 self.output_dir_edit.setText(default_dir)
@@ -1231,35 +1219,12 @@ class BatchProcessorWindow(QMainWindow):
             self.files_text.setText("\n".join(files))
             self.csv_radio.setChecked(True)
             self.hdf5_radio.setChecked(False)
-            self.dxd_radio.setChecked(False)
             if not self.output_dir_edit.text().strip():
                 default_dir = str(Path(files[0]).parent)
                 self.output_dir_edit.setText(default_dir)
                 self.config.output_config.output_directory = default_dir
             logger.info(f"Selected {len(files)} CSV file(s)")
-
-    def _on_select_dxd(self):
-        """Handle DXD file selection."""
-        files, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Select DEWESoft Files",
-            "",
-            "DEWESoft Files (*.dxd *.dxz *.d7d *.d7z);;All Files (*)"
-        )
-
-        if files:
-            self.config.source_type = "dxd"
-            self.config.source_files = files
-            self.files_text.setText("\n".join(files))
-            self.dxd_radio.setChecked(True)
-            self.hdf5_radio.setChecked(False)
-            self.csv_radio.setChecked(False)
-            if not self.output_dir_edit.text().strip():
-                default_dir = str(Path(files[0]).parent)
-                self.output_dir_edit.setText(default_dir)
-                self.config.output_config.output_directory = default_dir
-            logger.info(f"Selected {len(files)} DXD file(s)")
-
+    
     def _on_select_channels(self):
         """Open Enhanced Flight Navigator for channel selection."""
         if not self.config.source_files or self.config.source_type != "hdf5":
@@ -1664,16 +1629,12 @@ class BatchProcessorWindow(QMainWindow):
     def _populate_ui_from_config(self):
         """Populate UI controls from configuration object."""
         # Data Source tab
-        self.hdf5_radio.setChecked(False)
-        self.csv_radio.setChecked(False)
-        self.dxd_radio.setChecked(False)
-
         if self.config.source_type == "hdf5":
             self.hdf5_radio.setChecked(True)
-        elif self.config.source_type == "csv":
+            self.csv_radio.setChecked(False)
+        else:
             self.csv_radio.setChecked(True)
-        elif self.config.source_type == "dxd":
-            self.dxd_radio.setChecked(True)
+            self.hdf5_radio.setChecked(False)
 
         # Update files display
         if self.config.source_files:

@@ -348,7 +348,7 @@ class BatchConfig:
             If any configuration parameters are invalid
         """
         # Validate source
-        if self.source_type not in ["hdf5", "csv", "dxd"]:
+        if self.source_type not in ["hdf5", "csv"]:
             raise ValueError(f"Invalid source_type: {self.source_type}")
             
         if not self.source_files:

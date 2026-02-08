@@ -22,102 +22,9 @@ Author: SpectralEdge Development Team
 Date: 2025-01-22
 """
 
-import logging
-from functools import lru_cache
 import numpy as np
 from scipy import signal
-from typing import Optional, Tuple, Union, Dict, Any
-
-logger = logging.getLogger(__name__)
-
-
-# Cache for octave band frequency grids to avoid recomputation
-_octave_cache: Dict[Tuple, Any] = {}
-_OCTAVE_CACHE_MAX_SIZE = 32
-
-
-def _get_cached_octave_grid(
-    freq_min: float,
-    freq_max: float,
-    octave_fraction: float
-) -> Tuple[np.ndarray, np.ndarray, float]:
-    """
-    Get or compute cached octave band center frequencies and dense grid.
-
-    Returns cached result if available, otherwise computes and caches.
-
-    Parameters:
-    -----------
-    freq_min : float
-        Minimum frequency in Hz
-    freq_max : float
-        Maximum frequency in Hz
-    octave_fraction : float
-        Octave fraction (e.g., 3 for 1/3 octave)
-
-    Returns:
-    --------
-    Tuple containing:
-        - dense_freqs: Dense log-spaced frequency grid for interpolation
-        - octave_frequencies: Octave band center frequencies
-        - bandwidth_factor: Factor for calculating band edges
-    """
-    # Create cache key (round to avoid floating point issues)
-    cache_key = (round(freq_min, 6), round(freq_max, 6), round(octave_fraction, 6))
-
-    if cache_key in _octave_cache:
-        logger.debug(f"Using cached octave grid for {cache_key}")
-        return _octave_cache[cache_key]
-
-    # Compute the grid
-    logger.debug(f"Computing octave grid for freq_min={freq_min}, freq_max={freq_max}, fraction={octave_fraction}")
-
-    # Build dense log-spaced frequency grid
-    log_min = np.log10(freq_min)
-    log_max = np.log10(freq_max)
-    log_span = max(log_max - log_min, 1e-6)
-    points_per_band = 25
-    bands_per_decade = octave_fraction * np.log2(10.0)
-    points_per_decade = max(300, int(np.ceil(points_per_band * bands_per_decade)))
-    points_per_decade = min(points_per_decade, 5000)
-    n_points = max(200, int(np.ceil(log_span * points_per_decade)))
-    dense_freqs = np.logspace(log_min, log_max, n_points)
-
-    # Reference frequency for octave band calculation (ANSI/IEC standard)
-    f_ref = 1000.0  # Hz
-
-    # Calculate band width factor
-    bandwidth_factor = 2.0 ** (1.0 / (2.0 * octave_fraction))
-
-    # Find range of octave band indices needed
-    n_min = int(np.floor(octave_fraction * np.log2(freq_min / f_ref)))
-    n_max = int(np.ceil(octave_fraction * np.log2(freq_max / f_ref)))
-
-    # Generate octave band center frequencies
-    octave_indices = np.arange(n_min, n_max + 1)
-    octave_frequencies = f_ref * 2.0 ** (octave_indices / octave_fraction)
-
-    # Filter to only include bands within frequency range
-    valid_bands = (octave_frequencies >= freq_min) & (octave_frequencies <= freq_max)
-    octave_frequencies = octave_frequencies[valid_bands]
-
-    # Cache the result
-    if len(_octave_cache) >= _OCTAVE_CACHE_MAX_SIZE:
-        # Remove oldest entry (simple FIFO eviction)
-        oldest_key = next(iter(_octave_cache))
-        del _octave_cache[oldest_key]
-
-    result = (dense_freqs, octave_frequencies, bandwidth_factor)
-    _octave_cache[cache_key] = result
-
-    return result
-
-
-def clear_octave_cache():
-    """Clear the octave band calculation cache."""
-    global _octave_cache
-    _octave_cache = {}
-    logger.debug("Octave band cache cleared")
+from typing import Optional, Tuple, Union
 
 
 def calculate_psd_welch(
@@ -249,19 +156,10 @@ def calculate_psd_welch(
     # Input validation
     if time_data.size == 0:
         raise ValueError("Input time_data cannot be empty")
-
+    
     if sample_rate <= 0:
         raise ValueError("sample_rate must be positive")
-
-    # Data quality validation
-    if not np.all(np.isfinite(time_data)):
-        nan_count = np.sum(np.isnan(time_data))
-        inf_count = np.sum(np.isinf(time_data))
-        raise ValueError(
-            f"Input signal contains invalid values: {nan_count} NaN, {inf_count} Inf. "
-            "Please clean or interpolate the data before PSD calculation."
-        )
-
+    
     # Calculate nperseg from df if provided
     if df is not None:
         if df <= 0:
@@ -465,19 +363,10 @@ def calculate_psd_maximax(
     # Input validation
     if time_data.size == 0:
         raise ValueError("Input time_data cannot be empty")
-
+    
     if sample_rate <= 0:
         raise ValueError("sample_rate must be positive")
-
-    # Data quality validation
-    if not np.all(np.isfinite(time_data)):
-        nan_count = np.sum(np.isnan(time_data))
-        inf_count = np.sum(np.isinf(time_data))
-        raise ValueError(
-            f"Input signal contains invalid values: {nan_count} NaN, {inf_count} Inf. "
-            "Please clean or interpolate the data before PSD calculation."
-        )
-
+    
     if maximax_window <= 0:
         raise ValueError("maximax_window must be positive")
     
@@ -1015,15 +904,16 @@ def convert_psd_to_octave_bands(
     if freq_min >= freq_max:
         raise ValueError(f"freq_min ({freq_min}) must be less than freq_max ({freq_max})")
 
-    # Get cached octave grid (dense frequencies and band centers)
-    dense_freqs, octave_frequencies, bandwidth_factor = _get_cached_octave_grid(
-        freq_min, freq_max, octave_fraction
-    )
-
-    if len(octave_frequencies) == 0:
-        raise ValueError(
-            f"No octave bands found in frequency range [{freq_min}, {freq_max}] Hz"
-        )
+    # Build an adaptive dense log-spaced frequency grid for robust band integration
+    log_min = np.log10(freq_min)
+    log_max = np.log10(freq_max)
+    log_span = max(log_max - log_min, 1e-6)
+    points_per_band = 25
+    bands_per_decade = octave_fraction * np.log2(10.0)  # ~3.3219 * octave_fraction
+    points_per_decade = max(300, int(np.ceil(points_per_band * bands_per_decade)))
+    points_per_decade = min(points_per_decade, 5000)
+    n_points = max(200, int(np.ceil(log_span * points_per_decade)))
+    dense_freqs = np.logspace(log_min, log_max, n_points)
 
     # Interpolate PSD onto the dense grid (linear PSD values over log-frequency)
     # Use base-10 log frequency for interpolation stability
@@ -1035,6 +925,32 @@ def convert_psd_to_octave_bands(
         if len(values) < 2:
             return None
         return np.interp(dense_log_freqs, log_freqs, values, left=values[0], right=values[-1])
+
+    # Reference frequency for octave band calculation (ANSI/IEC standard)
+    f_ref = 1000.0  # Hz
+    
+    # Calculate band width factor
+    # For 1/N octave: bandwidth = f_c * (2^(1/(2N)) - 2^(-1/(2N)))
+    bandwidth_factor = 2.0 ** (1.0 / (2.0 * octave_fraction))
+    
+    # Find range of octave band indices needed
+    # f_c = f_ref * 2^(n / octave_fraction)
+    # n = octave_fraction * log2(f_c / f_ref)
+    n_min = int(np.floor(octave_fraction * np.log2(freq_min / f_ref)))
+    n_max = int(np.ceil(octave_fraction * np.log2(freq_max / f_ref)))
+    
+    # Generate octave band center frequencies
+    octave_indices = np.arange(n_min, n_max + 1)
+    octave_frequencies = f_ref * 2.0 ** (octave_indices / octave_fraction)
+    
+    # Filter to only include bands within frequency range
+    valid_bands = (octave_frequencies >= freq_min) & (octave_frequencies <= freq_max)
+    octave_frequencies = octave_frequencies[valid_bands]
+    
+    if len(octave_frequencies) == 0:
+        raise ValueError(
+            f"No octave bands found in frequency range [{freq_min}, {freq_max}] Hz"
+        )
     
     # Determine if multi-channel
     is_multichannel = psd.ndim > 1
@@ -1063,11 +979,7 @@ def convert_psd_to_octave_bands(
                         np.diff(dense_freqs, prepend=dense_freqs[0])
                         * interpolated_psd[:, ch]
                     )
-                except Exception as e:
-                    logger.warning(
-                        f"Cumulative energy calculation failed for channel {ch}: {e}. "
-                        "Falling back to direct integration method."
-                    )
+                except Exception:
                     cumulative_energy = None
                     break
         else:

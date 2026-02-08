@@ -170,6 +170,8 @@ class BatchProcessor:
                 self._process_hdf5_sources()
             elif self.config.source_type == "csv":
                 self._process_csv_sources()
+            elif self.config.source_type == "dxd":
+                self._process_dxd_sources()
             else:
                 raise ValueError(f"Unsupported source type: {self.config.source_type}")
                 
@@ -499,7 +501,100 @@ class BatchProcessor:
                 self.result.add_warning(
                     f"Skipped event '{event.name}' for {flight_key}/{channel_key}: {str(e)}"
                 )
-    
+
+    def _process_dxd_sources(self):
+        """Process DEWESoft DXD/DXZ data sources."""
+        self.result.add_log_entry(f"Processing {len(self.config.source_files)} DXD file(s)")
+
+        # Import DXD loader
+        from ..utils.dxd_loader import load_dxd_files
+
+        # Load all DXD files
+        dxd_data = load_dxd_files(self.config.source_files)
+
+        # Count total channels for progress tracking
+        total_channels = sum(len(channels) for channels in dxd_data.values())
+        self.progress_tracker = ProgressTracker(total_channels, self.progress_callback)
+        channel_idx = 0
+
+        # Process each channel found in DXD files
+        for file_path, channels_data in dxd_data.items():
+            if self.cancel_requested:
+                self.result.add_warning("Processing cancelled by user")
+                break
+
+            self.result.add_log_entry(f"Processing DXD file: {Path(file_path).name}")
+
+            for channel_key, (time_array, signal_array, sample_rate, units) in channels_data.items():
+                if self.cancel_requested:
+                    self.result.add_warning("Processing cancelled by user")
+                    break
+
+                channel_idx += 1
+                flight_key = Path(file_path).stem  # Use filename as flight key
+                self.progress_tracker.start_channel(flight_key, channel_key)
+                self.result.add_log_entry(
+                    f"Processing channel {channel_idx}/{total_channels}: {flight_key}/{channel_key}"
+                )
+
+                try:
+                    self._process_channel_dxd(
+                        file_path, channel_key, time_array, signal_array,
+                        sample_rate, units
+                    )
+                    self.progress_tracker.finish_channel()
+                except Exception as e:
+                    self.result.add_error(
+                        f"Failed to process {file_path}/{channel_key}: {str(e)}"
+                    )
+                    self.progress_tracker.finish_channel()
+                finally:
+                    MemoryManager.clear_memory()
+
+    def _process_channel_dxd(self, file_path: str, channel_key: str,
+                             time_array: np.ndarray, signal_array: np.ndarray,
+                             sample_rate: float, units: str):
+        """
+        Process a single channel from DXD source.
+
+        Parameters:
+        -----------
+        file_path : str
+            Source DXD file path
+        channel_key : str
+            Channel identifier
+        time_array : np.ndarray
+            Time array
+        signal_array : np.ndarray
+            Signal data array
+        sample_rate : float
+            Sample rate in Hz
+        units : str
+            Signal units
+        """
+        flight_key = Path(file_path).stem  # Use filename as flight key
+
+        # Process full duration if requested
+        if self.config.process_full_duration:
+            self._process_event(
+                flight_key, channel_key, "full_duration",
+                time_array, signal_array, sample_rate, units,
+                start_time=None, end_time=None
+            )
+
+        # Process each event
+        for event in self.config.events:
+            try:
+                self._process_event(
+                    flight_key, channel_key, event.name,
+                    time_array, signal_array, sample_rate, units,
+                    start_time=event.start_time, end_time=event.end_time
+                )
+            except Exception as e:
+                self.result.add_warning(
+                    f"Skipped event '{event.name}' for {flight_key}/{channel_key}: {str(e)}"
+                )
+
     def _process_event(self, flight_key: str, channel_key: str, event_name: str,
                       time_array: np.ndarray, signal_array: np.ndarray,
                       sample_rate: float, units: str,

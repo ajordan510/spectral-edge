@@ -26,6 +26,7 @@ from pathlib import Path
 # Import our custom modules
 from spectral_edge.utils.data_loader import load_csv_data, DataLoadError
 from spectral_edge.utils.hdf5_loader import HDF5FlightDataLoader
+from spectral_edge.utils.dxd_loader import DXDLoader, DXDFormatError, is_dxd_file
 from spectral_edge.core.psd import (
     calculate_psd_welch, calculate_psd_maximax, psd_to_db, calculate_rms_from_psd,
     get_window_options, convert_psd_to_octave_bands,
@@ -666,6 +667,12 @@ class PSDAnalysisWindow(QMainWindow):
         load_hdf5_button.clicked.connect(self._load_hdf5_file)
         layout.addWidget(load_hdf5_button)
 
+        # Load DXD button (DEWESoft format)
+        load_dxd_button = QPushButton("Load DXD File")
+        load_dxd_button.setToolTip("Load DEWESoft DXD/DXZ data files")
+        load_dxd_button.clicked.connect(self._load_dxd_file)
+        layout.addWidget(load_dxd_button)
+
         # Configuration buttons
         config_button_layout = QHBoxLayout()
         self.load_config_button = QPushButton("Load Configuration")
@@ -675,7 +682,7 @@ class PSDAnalysisWindow(QMainWindow):
         self.save_config_button.clicked.connect(self._save_psd_config)
         config_button_layout.addWidget(self.save_config_button)
         layout.addLayout(config_button_layout)
-        
+
         # File info labels
         self.info_label = QLabel("")
         self.info_label.setStyleSheet("color: #9ca3af; font-size: 10px;")
@@ -2474,7 +2481,114 @@ class PSDAnalysisWindow(QMainWindow):
             show_critical(self, "Error Loading File", str(e))
         except Exception as e:
             show_critical(self, "Unexpected Error", f"An error occurred: {e}")
-    
+
+    def _load_dxd_file(self):
+        """Handle DXD/DXZ file loading button click."""
+        # Open file dialog for DEWESoft files
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select DEWESoft Data File",
+            "",
+            "DEWESoft Files (*.dxd *.dxz *.d7d *.d7z);;All Files (*)"
+        )
+
+        if not file_path:
+            return  # User cancelled
+
+        try:
+            # Load the DXD file
+            loader = DXDLoader(file_path)
+
+            # Get channel information
+            channel_names = loader.get_channel_names()
+
+            if not channel_names:
+                show_warning(self, "No Channels", "No channels found in the DXD file.")
+                loader.close()
+                return
+
+            # Load all channel data
+            all_data = loader.load_all_channels()
+
+            # Get sample rate from first channel
+            first_channel = channel_names[0]
+            first_info = loader.get_channel_info(first_channel)
+            self.sample_rate = first_info.sample_rate
+
+            # Build arrays in the format expected by the GUI
+            time_data, first_signal, _, _ = all_data[first_channel]
+            num_samples = len(first_signal)
+
+            # Create signal array with shape (num_samples, num_channels)
+            signal_data = np.zeros((num_samples, len(channel_names)))
+            self.channel_names = []
+            self.channel_units = []
+
+            for i, ch_name in enumerate(channel_names):
+                ch_time, ch_data, ch_rate, ch_units = all_data[ch_name]
+
+                # Ensure all channels have same length (truncate if needed)
+                samples_to_use = min(num_samples, len(ch_data))
+                signal_data[:samples_to_use, i] = ch_data[:samples_to_use]
+
+                self.channel_names.append(ch_name)
+                self.channel_units.append(ch_units)
+
+            loader.close()
+
+            # Store data for analysis
+            self.time_data_full = time_data
+            self.signal_data_full = signal_data
+            self.time_data_display = time_data
+            self.signal_data_display = signal_data
+
+            self.current_file = Path(file_path).name
+            self.flight_name = ""  # DXD data has no flight name
+            self.channel_flight_names = []
+
+            # Update UI
+            self.file_label.setText(f"Loaded: {self.current_file}")
+            self.file_label.setStyleSheet("color: #10b981;")
+
+            # Display file info
+            num_channels = len(self.channel_names)
+            duration = self.time_data_full[-1] - self.time_data_full[0] if len(self.time_data_full) > 1 else 0
+            info_text = (f"Channels: {num_channels}\n"
+                        f"Sample Rate: {self.sample_rate:.1f} Hz\n"
+                        f"Duration: {duration:.2f} s\n"
+                        f"Samples: {len(self.time_data_full)} (Full resolution)\n"
+                        f"Format: DEWESoft DXD")
+            self.info_label.setText(info_text)
+
+            # Update nperseg calculation
+            self._update_nperseg_from_df()
+
+            # Create channel selection checkboxes
+            self._create_channel_checkboxes()
+
+            # Enable calculate buttons
+            self.calc_button.setEnabled(True)
+            self.spec_button.setEnabled(True)
+            self.event_button.setEnabled(True)
+            self.cross_spectrum_button.setEnabled(len(self.channel_names) >= 2)
+            self.report_button.setEnabled(PPTX_AVAILABLE)
+            self.statistics_button.setEnabled(True)
+
+            # Clear previous results
+            self.frequencies = {}
+            self.psd_results = {}
+            self.rms_values = {}
+
+            # Plot time history
+            self._plot_time_history()
+
+        except DXDFormatError as e:
+            show_critical(self, "DXD Format Error", f"Invalid DXD file format: {e}")
+        except FileNotFoundError as e:
+            show_critical(self, "File Not Found", str(e))
+        except Exception as e:
+            show_critical(self, "Error Loading DXD File", f"An error occurred: {e}")
+
     def _create_channel_checkboxes(self):
         """Create checkboxes for channel selection."""
         # Clear existing checkboxes

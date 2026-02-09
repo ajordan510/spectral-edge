@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QFileDialog,
     QGroupBox, QGridLayout, QMessageBox, QCheckBox, QRadioButton,
     QProgressBar, QTextEdit, QScrollArea, QButtonGroup, QLineEdit,
-    QTableWidget, QTableWidgetItem, QHeaderView
+    QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -116,12 +116,24 @@ class FileConverterWindow(QMainWindow):
     
     def _create_ui(self):
         """Create the user interface."""
-        # Create central widget and main layout
+        # Create central widget and scrollable main layout
         central_widget = QWidget()
+        central_layout = QVBoxLayout(central_widget)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        scroll_contents = QWidget()
+        scroll_area.setWidget(scroll_contents)
+        central_layout.addWidget(scroll_area)
+
         self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(15)
-        main_layout.setContentsMargins(20, 20, 20, 20)
+
+        main_layout = QVBoxLayout(scroll_contents)
+        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(12, 12, 12, 12)
         
         # Title
         title_label = QLabel("File Format Conversion Tool")
@@ -184,9 +196,6 @@ class FileConverterWindow(QMainWindow):
         button_layout.addWidget(close_button)
         
         main_layout.addLayout(button_layout)
-        
-        # Add stretch at bottom
-        main_layout.addStretch()
     
     def _create_mode_selection(self) -> QGroupBox:
         """Create conversion mode selection group."""
@@ -218,6 +227,7 @@ class FileConverterWindow(QMainWindow):
         """Create input file selection group."""
         group = QGroupBox("Input File")
         layout = QVBoxLayout()
+        group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         
         # File path selection
         file_layout = QHBoxLayout()
@@ -246,6 +256,7 @@ class FileConverterWindow(QMainWindow):
         """Create output settings group."""
         group = QGroupBox("Output Settings")
         layout = QGridLayout()
+        group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         
         # Output format selection
         layout.addWidget(QLabel("Format:"), 0, 0)
@@ -277,6 +288,7 @@ class FileConverterWindow(QMainWindow):
         """Create DXD splitting options group."""
         group = QGroupBox("Splitting Options")
         layout = QVBoxLayout()
+        group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         
         # Splitting mode selection
         self.split_button_group = QButtonGroup()
@@ -364,6 +376,7 @@ class FileConverterWindow(QMainWindow):
         """Create HDF5 splitting options group."""
         group = QGroupBox("HDF5 Splitting Options")
         layout = QVBoxLayout()
+        group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         
         # Splitting mode selection
         self.hdf5_split_button_group = QButtonGroup()
@@ -380,6 +393,7 @@ class FileConverterWindow(QMainWindow):
         self.hdf5_segment_count_spin.setMaximum(1000)
         self.hdf5_segment_count_spin.setValue(10)
         self.hdf5_segment_count_spin.setSuffix(" equal segments")
+        self.hdf5_segment_count_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
         count_layout.addWidget(self.hdf5_segment_count_spin)
         count_layout.addStretch()
         

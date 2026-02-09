@@ -643,14 +643,26 @@ def split_hdf5_by_count(
         flight_key = flight_keys[0]
         flight_group = f_in[flight_key]
         
-        # Get first channel to determine total samples
+        # Get channel metadata to determine total samples
         channel_keys = list(flight_group['channels'].keys())
         if not channel_keys:
             raise ValueError("No channels found in flight")
-        
+
+        channel_lengths = []
+        for channel_key in channel_keys:
+            channel_lengths.append(len(flight_group['channels'][channel_key]['data']))
+
+        total_samples = min(channel_lengths)
+        if total_samples == 0:
+            raise ValueError("No samples found in flight channels")
+
+        if num_segments > total_samples:
+            raise ValueError(
+                f"num_segments ({num_segments}) exceeds available samples ({total_samples})"
+            )
+
         first_channel = flight_group['channels'][channel_keys[0]]
-        total_samples = len(first_channel['data'])
-        sample_rate = first_channel.attrs['sample_rate']
+        sample_rate = float(first_channel.attrs['sample_rate'])
         
         # Calculate segment boundaries
         samples_per_segment = total_samples // num_segments
@@ -693,7 +705,10 @@ def split_hdf5_by_count(
                     
                     # Copy sliced data
                     ch_out.create_dataset('data', data=ch_in['data'][start_idx:end_idx])
-                    ch_out.create_dataset('time', data=ch_in['time'][start_idx:end_idx] - ch_in['time'][start_idx])
+                    time_slice = ch_in['time'][start_idx:end_idx]
+                    if len(time_slice) > 0:
+                        time_slice = time_slice - ch_in['time'][start_idx]
+                    ch_out.create_dataset('time', data=time_slice)
                     
                     # Copy attributes
                     for key, value in ch_in.attrs.items():
@@ -763,14 +778,34 @@ def split_hdf5_by_time_slices(
         
         # Get channel info
         channel_keys = list(flight_group['channels'].keys())
+        if not channel_keys:
+            raise ValueError("No channels found in flight")
+
+        channel_lengths = []
+        for channel_key in channel_keys:
+            channel_lengths.append(len(flight_group['channels'][channel_key]['data']))
+
+        total_samples = min(channel_lengths)
+        if total_samples == 0:
+            raise ValueError("No samples found in flight channels")
+
         first_channel = flight_group['channels'][channel_keys[0]]
-        sample_rate = first_channel.attrs['sample_rate']
+        sample_rate = float(first_channel.attrs['sample_rate'])
+        max_duration = total_samples / sample_rate
         
         # Create output files
         base_name = Path(input_path).stem
         output_files = []
         
         for slice_idx, (start_time, end_time) in enumerate(time_slices):
+            if start_time < 0 or end_time <= start_time:
+                raise ValueError(f"Invalid time slice ({start_time}, {end_time})")
+
+            if end_time > max_duration:
+                raise ValueError(
+                    f"Time slice ({start_time}, {end_time}) exceeds available duration ({max_duration:.2f}s)"
+                )
+
             # Convert time to sample indices
             start_idx = int(start_time * sample_rate)
             end_idx = int(end_time * sample_rate)
@@ -797,7 +832,10 @@ def split_hdf5_by_time_slices(
                     ch_out = channels_out.create_group(ch_name)
                     
                     ch_out.create_dataset('data', data=ch_in['data'][start_idx:end_idx])
-                    ch_out.create_dataset('time', data=ch_in['time'][start_idx:end_idx] - start_time)
+                    time_slice = ch_in['time'][start_idx:end_idx]
+                    if len(time_slice) > 0:
+                        time_slice = time_slice - ch_in['time'][start_idx]
+                    ch_out.create_dataset('time', data=time_slice)
                     
                     for key, value in ch_in.attrs.items():
                         ch_out.attrs[key] = value

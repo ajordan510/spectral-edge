@@ -203,7 +203,7 @@ class ParameterValidator:
             if not result.is_valid:
                 errors.append(result.message)
         
-        if 'maximax_window' in params:
+        if 'maximax_window' in params and params['maximax_window'] is not None:
             data_duration = params.get('data_duration')
             result = self.validate_maximax_window(params['maximax_window'], data_duration)
             if not result.is_valid:

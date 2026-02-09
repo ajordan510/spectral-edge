@@ -18,6 +18,7 @@ Date: 2026-02-08
 import os
 import sys
 import ctypes
+import warnings
 import numpy as np
 import h5py
 from typing import Optional, List, Tuple, Callable, Dict, Any
@@ -161,7 +162,7 @@ def convert_dxd_to_format(
     time_range: Optional[Tuple[float, float]] = None,
     channels: Optional[List[str]] = None,
     progress_callback: Optional[Callable[[int, str], None]] = None
-) -> None:
+) -> List[str]:
     """
     Convert DXD file to CSV or HDF5 format with optional time slicing.
     
@@ -197,6 +198,12 @@ def convert_dxd_to_format(
         If specified channels don't exist in file
     RuntimeError
         If conversion fails
+
+    Returns
+    -------
+    list of str
+        Paths to created output files. CSV conversion may return multiple files
+        when channels have different time vectors.
     
     Examples
     --------
@@ -294,15 +301,37 @@ def convert_dxd_to_format(
             ch_info = next(ch for ch in file_info['channels'] if ch['name'] == channel_name)
             sample_rate = ch_info['sample_rate']
             total_samples = ch_info['sample_count']
+
+            if sample_rate <= 0:
+                raise ValueError(f"Invalid sample rate for channel '{channel_name}': {sample_rate}")
+            if total_samples <= 0:
+                raise ValueError(f"No samples available for channel '{channel_name}'")
             
             # Calculate sample range for time slicing
             if time_range:
                 start_sample = int(time_range[0] * sample_rate)
-                end_sample = int(time_range[1] * sample_rate)
+                requested_end_sample = int(time_range[1] * sample_rate)
+                if start_sample >= total_samples:
+                    raise ValueError(
+                        f"Time range starts after channel '{channel_name}' ends "
+                        f"({time_range[0]}s >= {total_samples / sample_rate:.2f}s)"
+                    )
+                if requested_end_sample > total_samples:
+                    warnings.warn(
+                        f"Time range end exceeds channel '{channel_name}' duration; "
+                        f"clamping to {total_samples / sample_rate:.2f}s.",
+                        RuntimeWarning
+                    )
+                end_sample = min(requested_end_sample, total_samples)
                 num_samples = end_sample - start_sample
             else:
                 start_sample = 0
                 num_samples = total_samples
+
+            if num_samples <= 0:
+                raise ValueError(
+                    f"No samples to extract for channel '{channel_name}' with time range {time_range}"
+                )
             
             # Get channel index
             channel_list_count = ctypes.c_int()
@@ -375,21 +404,31 @@ def convert_dxd_to_format(
         if progress_callback:
             progress_callback(85, f"Writing {output_format.upper()} file...")
         
+        output_files: List[str] = []
         if output_format == 'csv':
-            _write_csv_file(output_path, channel_data_dict, selected_channels)
+            output_files = _write_csv_files(output_path, channel_data_dict, selected_channels)
         else:  # hdf5
             write_hdf5_file_chunked(
                 lib, reader_instance, output_path, selected_channels,
                 time_range=time_range,
                 progress_callback=lambda p, m: progress_callback(85 + int(p * 0.15), m) if progress_callback else None
             )
+            output_files = [output_path]
         
         if progress_callback:
             progress_callback(100, "Conversion complete!")
+
+        return output_files
     
     finally:
         lib.DWICloseDataFile(reader_instance)
         lib.DWIDestroyReader(reader_instance)
+
+
+def _sanitize_filename(value: str) -> str:
+    """Sanitize a string for safe filenames."""
+    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value.strip())
+    return cleaned or "channel"
 
 
 def _write_csv_file(output_path: str, channel_data_dict: Dict, channel_names: List[str]) -> None:
@@ -422,6 +461,40 @@ def _write_csv_file(output_path: str, channel_data_dict: Dict, channel_names: Li
         for i in range(len(time_data)):
             row = [time_data[i]] + [channel_data_dict[name]['data'][i] for name in channel_names]
             writer.writerow(row)
+
+
+def _write_csv_files(output_path: str, channel_data_dict: Dict, channel_names: List[str]) -> List[str]:
+    """
+    Write channel data to one or multiple CSV files.
+
+    If channels have different time vectors, write one CSV per channel.
+    """
+    if not channel_names:
+        raise ValueError("No channels provided for CSV export")
+
+    def time_signature(name: str) -> Tuple[int, float, float]:
+        time_data = channel_data_dict[name]['time']
+        return (len(time_data), float(channel_data_dict[name]['sample_rate']), float(time_data[0]))
+
+    signatures = {name: time_signature(name) for name in channel_names}
+    unique_signatures = set(signatures.values())
+
+    output_paths: List[str] = []
+    output_path_obj = Path(output_path)
+    base_path = output_path_obj.with_suffix("")
+
+    if len(unique_signatures) == 1:
+        csv_path = str(output_path_obj.with_suffix(".csv"))
+        _write_csv_file(csv_path, channel_data_dict, channel_names)
+        output_paths.append(csv_path)
+    else:
+        for name in channel_names:
+            safe_name = _sanitize_filename(name)
+            csv_path = f"{base_path}_{safe_name}.csv"
+            _write_csv_file(csv_path, channel_data_dict, [name])
+            output_paths.append(csv_path)
+
+    return output_paths
 
 
 def convert_dxd_with_splitting(

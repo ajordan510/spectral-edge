@@ -2,7 +2,7 @@
 
 ## Overview
 
-SpectralEdge now includes support for importing data from **DEWESoft** data acquisition files (`.dxd` and `.dxz` formats) using the official **DEWESoft Data Reader Library**. This guide explains how to use the provided conversion scripts to convert DEWESoft files to CSV or MATLAB `.mat` format for analysis in SpectralEdge.
+SpectralEdge now includes support for importing data from **DEWESoft** data acquisition files (`.dxd` and `.dxz` formats) using the official **DEWESoft Data Reader Library**. This guide explains how to use the provided conversion scripts to convert DEWESoft files to CSV, HDF5, or MATLAB `.mat` format for analysis in SpectralEdge.
 
 ## What is DEWESoft?
 
@@ -56,23 +56,26 @@ spectral-edge/
 
 **No additional installation is required** - the scripts automatically load the appropriate library based on your platform and architecture.
 
-## Python Script: dxd_to_csv.py
+## Python Script: dxd_converter.py
 
 ### Description
 
-Converts DEWESoft `.dxd` files to CSV format for use in SpectralEdge or other analysis tools.
+Converts DEWESoft `.dxd` files to CSV or HDF5 format for use in SpectralEdge or other analysis tools.
 
 ### Basic Usage
 
 ```bash
 # Convert entire file to CSV
-python scripts/dxd_to_csv.py input.dxd output.csv
+python scripts/dxd_converter.py input.dxd output.csv
+
+# Convert to HDF5 (SpectralEdge-compatible format, recommended)
+python scripts/dxd_converter.py input.dxd output.h5 --format hdf5
 
 # Convert specific channels only
-python scripts/dxd_to_csv.py input.dxd output.csv --channels "Accel_X,Accel_Y,Accel_Z"
+python scripts/dxd_converter.py input.dxd output.csv --channels "Accel_X,Accel_Y,Accel_Z"
 
 # Limit to first 10000 samples per channel
-python scripts/dxd_to_csv.py input.dxd output.csv --max-samples 10000
+python scripts/dxd_converter.py input.dxd output.csv --max-samples 10000
 ```
 
 ### Command-Line Options

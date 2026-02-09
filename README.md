@@ -930,15 +930,124 @@ RMS = sqrt(∫ PSD(f) df)
 
 ---
 
+## Scripts and Utilities
+
+The `scripts/` directory contains standalone utilities for data conversion, testing, and development.
+
+### Data Conversion
+
+#### dxd_converter.py
+
+Convert DEWESoft `.dxd`/`.dxz` files to CSV or HDF5 format.
+
+**Usage:**
+```bash
+# Convert to CSV
+python scripts/dxd_converter.py input.dxd output.csv
+
+# Convert to HDF5 (SpectralEdge-compatible)
+python scripts/dxd_converter.py input.dxd output.h5 --format hdf5
+
+# Convert specific channels only
+python scripts/dxd_converter.py input.dxd output.csv --channels "Accel_X,Accel_Y,Accel_Z"
+
+# Limit samples for preview
+python scripts/dxd_converter.py input.dxd preview.csv --max-samples 10000
+```
+
+**Features:**
+- Supports CSV and HDF5 output formats
+- Memory-efficient chunked reading for large files
+- Selective channel export
+- Real-time progress tracking
+- Cross-platform (Windows, Linux, macOS)
+
+**Requirements:** DEWESoft Data Reader Library (included in `scripts/dewesoft/`)
+
+### Test Data Generation
+
+#### generate_sample_hdf5.py
+
+Generate synthetic HDF5 test data with realistic vibration signals.
+
+**Usage:**
+```bash
+python scripts/generate_sample_hdf5.py
+```
+
+**Output:** `data/sample_flight_data.h5` with 3 channels (Accel_X, Accel_Y, Accel_Z)
+
+#### generate_large_test_hdf5.py
+
+Generate large HDF5 files for performance testing.
+
+**Usage:**
+```bash
+python scripts/generate_large_test_hdf5.py
+```
+
+**Output:** Multi-GB HDF5 file with configurable duration and sample rate
+
+#### generate_sample_data.py
+
+Generate simple CSV test data.
+
+**Usage:**
+```bash
+python scripts/generate_sample_data.py
+```
+
+### Development Tools
+
+#### plot_layout_tuner.py
+
+Interactive tool for tuning plot layouts and styling.
+
+**Usage:**
+```bash
+python scripts/plot_layout_tuner.py
+```
+
+#### test_batch_processor.py
+
+Standalone test for batch processing functionality.
+
+**Usage:**
+```bash
+python scripts/test_batch_processor.py
+```
+
+### Testing
+
+#### run_headless_tests.sh
+
+Run all tests in headless mode (Linux).
+
+**Usage:**
+```bash
+./scripts/run_headless_tests.sh
+```
+
+**What it does:**
+- Sets up virtual framebuffer (Xvfb)
+- Runs pytest with coverage
+- Generates test reports
+
+---
+
 ## DEWESoft Data Import
 
 SpectralEdge supports importing data from **DEWESoft** data acquisition files (`.dxd` and `.dxz` formats) using the official DEWESoft Data Reader Library.
 
 ### Quick Start
 
-**Python Script (DXD to CSV):**
+**Python Script (DXD Converter):**
 ```bash
-python scripts/dxd_to_csv.py input.dxd output.csv
+# Convert to CSV
+python scripts/dxd_converter.py input.dxd output.csv
+
+# Convert to HDF5 (SpectralEdge-compatible)
+python scripts/dxd_converter.py input.dxd output.h5 --format hdf5
 ```
 
 **MATLAB Script (DXD to MAT):**
@@ -948,7 +1057,7 @@ dxd_to_mat('input.dxd', 'output.mat');
 
 ### Features
 
-- ✓ Convert DEWESoft `.dxd` and `.dxz` files to CSV or MATLAB `.mat` format
+- ✓ Convert DEWESoft `.dxd` and `.dxz` files to CSV, HDF5, or MATLAB `.mat` format
 - ✓ Cross-platform support (Windows and Linux)
 - ✓ Selective channel export or full file export
 - ✓ Support for synchronous, asynchronous, and array channels
@@ -963,7 +1072,7 @@ For detailed usage instructions, examples, and troubleshooting, see:
 
 The guide includes:
 - Installation and setup
-- Python script usage (`dxd_to_csv.py`)
+- Python script usage (`dxd_converter.py`)
 - MATLAB script usage (`dxd_to_mat.m`)
 - Output format specifications
 - Integration with SpectralEdge workflow
@@ -973,14 +1082,20 @@ The guide includes:
 
 ### Example Workflow
 
-1. **Convert DEWESoft file to CSV:**
+1. **Convert DEWESoft file to HDF5 (recommended):**
    ```bash
-   python scripts/dxd_to_csv.py data/flight_test.dxd data/flight_test.csv
+   python scripts/dxd_converter.py data/flight_test.dxd data/flight_test.h5 --format hdf5
    ```
 
-2. **Load CSV in SpectralEdge:**
-   - Open SpectralEdge Batch Processor
-   - Click "Add Files" and select the converted CSV file
+   Or convert to CSV:
+   ```bash
+   python scripts/dxd_converter.py data/flight_test.dxd data/flight_test.csv
+   ```
+
+2. **Load data in SpectralEdge:**
+   - Open SpectralEdge
+   - Click "Load HDF5 Data" (for .h5 files) or "Load CSV Data" (for .csv files)
+   - Select the converted file
    - Select channels and perform PSD analysis
 
 ### Library Files

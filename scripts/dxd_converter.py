@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-DEWESoft DXD to CSV Converter
-==============================
+DEWESoft DXD File Converter
+===========================
 
-This script converts DEWESoft data files (.dxd or .dxz format) to CSV format using
-the official DEWESoft Data Reader Library.
+This script converts DEWESoft data files (.dxd or .dxz format) to CSV or HDF5 format
+using the official DEWESoft Data Reader Library.
 
 Author: SpectralEdge Development Team
 License: MIT
@@ -17,20 +17,23 @@ Dependencies:
     - DEWESoft Data Reader Library (included in dewesoft/ directory)
 
 Usage:
-    python dxd_to_csv.py input.dxd output.csv
-    python dxd_to_csv.py input.dxd output.csv --channels "Channel1,Channel2"
-    python dxd_to_csv.py input.dxd output.csv --all-channels
-    python dxd_to_csv.py input.dxd output.csv --max-samples 10000
+    python dxd_converter.py input.dxd output.csv
+    python dxd_converter.py input.dxd output.h5 --format hdf5
+    python dxd_converter.py input.dxd output.csv --channels "Channel1,Channel2"
+    python dxd_converter.py input.dxd output.h5 --format hdf5 --max-samples 10000
 
 Examples:
     # Convert all channels to CSV
-    python dxd_to_csv.py data/flight_test.dxd output/flight_test.csv
+    python dxd_converter.py data/flight_test.dxd output/flight_test.csv
+
+    # Convert to HDF5 (SpectralEdge-compatible format)
+    python dxd_converter.py data/flight_test.dxd output/flight_test.h5 --format hdf5
 
     # Convert specific channels only
-    python dxd_to_csv.py data/vibration.dxd output/vibration.csv --channels "Accel_X,Accel_Y,Accel_Z"
+    python dxd_converter.py data/vibration.dxd output/vibration.csv --channels "Accel_X,Accel_Y,Accel_Z"
 
     # Limit output to first 10000 samples per channel
-    python dxd_to_csv.py data/large_file.dxd output/preview.csv --max-samples 10000
+    python dxd_converter.py data/large_file.dxd output/preview.csv --max-samples 10000
 """
 
 import sys

@@ -283,9 +283,7 @@ class HDF5FlightDataLoader:
     def load_channel_data(self, flight_key: str, channel_key: str,
                          start_time: Optional[float] = None,
                          end_time: Optional[float] = None,
-                         decimate_for_display: bool = True,
-                         decimate: Optional[bool] = None,
-                         max_points: Optional[int] = None) -> dict:
+                         decimate_for_display: bool = True) -> dict:
         """
         Load channel data with optional time range.
         
@@ -306,12 +304,6 @@ class HDF5FlightDataLoader:
         decimate_for_display : bool, optional
             If True, also returns decimated data for plotting (default: True)
             Decimation targets ~10,000 points for responsive plotting
-        decimate : bool, optional
-            Legacy alias for decimate_for_display. If provided, overrides
-            decimate_for_display to preserve compatibility with older callers.
-        max_points : int, optional
-            Legacy/compatibility option to target a maximum number of points
-            for display decimation. If not provided, defaults to ~10,000.
         
         Returns:
         --------
@@ -366,6 +358,17 @@ class HDF5FlightDataLoader:
 
         # Get sample rate from channel info (already loaded in metadata)
         sample_rate = channel_info.sample_rate
+        if not sample_rate or sample_rate <= 0:
+            if len(time_dataset) > 1:
+                t0 = float(time_dataset[0])
+                t1 = float(time_dataset[1])
+                if t1 > t0:
+                    sample_rate = 1.0 / (t1 - t0)
+            if not sample_rate or sample_rate <= 0:
+                raise ValueError(
+                    f"Invalid sample rate for {channel_info.full_path}. "
+                    "Ensure channel metadata includes sample_rate or time data is valid."
+                )
         total_samples = len(data_dataset)
 
         # Determine indices for time range using efficient calculation
@@ -401,26 +404,18 @@ class HDF5FlightDataLoader:
             time_full = time_dataset[:]
             data_full = data_dataset[:]
 
-        if decimate is not None:
-            decimate_for_display = decimate
-
-        target_points = max_points if max_points is not None else 10000
-        target_points = max(1, int(target_points))
-
         # Prepare result dictionary with full resolution data
         result = {
             'time_full': time_full,
             'data_full': data_full,
-            'time': time_full,
-            'data': data_full,
             'sample_rate': sample_rate,
             'decimation_factor': 1
         }
         
         # Calculate decimated data for display if requested
-        if decimate_for_display and len(data_full) > target_points:
-            # Auto-decimate to target points for responsive plotting
-            decimate_factor = max(1, len(data_full) // target_points)
+        if decimate_for_display and len(data_full) > 10000:
+            # Auto-decimate to ~10k points for responsive plotting
+            decimate_factor = max(1, len(data_full) // 10000)
             time_display = time_full[::decimate_factor]
             data_display = data_full[::decimate_factor]
             

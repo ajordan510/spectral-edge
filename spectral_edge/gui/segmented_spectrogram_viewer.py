@@ -579,11 +579,10 @@ class SegmentedSpectrogramViewer(QMainWindow):
             # Load channel data
             data_dict = self.hdf5_loader.load_channel_data(
                 flight_key, channel_name,
-                decimate=False,  # Always use full resolution
-                max_points=None
+                decimate_for_display=False  # Always use full resolution
             )
             
-            self.signal_data = data_dict['data']
+            self.signal_data = data_dict['data_full']
             self.sample_rate = data_dict['sample_rate']
             self.channel_name = channel_name
             self.flight_key = flight_key

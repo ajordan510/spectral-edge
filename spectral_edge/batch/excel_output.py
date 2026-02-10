@@ -82,7 +82,7 @@ def export_to_excel(
                 }
         
         # Create summary sheet
-        _create_summary_sheet(wb, events_data, result)
+        _create_summary_sheet(wb, events_data, result, config)
         
         # Create a sheet for each event
         for event_name, event_results in events_data.items():
@@ -98,7 +98,7 @@ def export_to_excel(
         raise
 
 
-def _create_summary_sheet(wb: Workbook, events_data: Dict, result: 'BatchProcessingResult') -> None:
+def _create_summary_sheet(wb: Workbook, events_data: Dict, result: 'BatchProcessingResult', config: 'BatchConfig') -> None:
     """
     Create summary sheet with overview of all events and channels.
     
@@ -122,7 +122,17 @@ def _create_summary_sheet(wb: Workbook, events_data: Dict, result: 'BatchProcess
     ws[f'A{row}'] = "Processing Summary:"
     ws[f'A{row}'].font = Font(bold=True)
     row += 1
-    
+
+    run_time = result.start_time.strftime("%Y-%m-%d %H:%M:%S") if result.start_time else ""
+    ws[f'A{row}'] = "Run Timestamp:"
+    ws[f'B{row}'] = run_time
+    row += 1
+
+    source_files = ", ".join([Path(p).name for p in config.source_files]) if config.source_files else ""
+    ws[f'A{row}'] = "Source Files:"
+    ws[f'B{row}'] = source_files
+    row += 1
+
     ws[f'A{row}'] = "Total Channels:"
     ws[f'B{row}'] = len(result.channel_results)
     row += 1
@@ -137,6 +147,40 @@ def _create_summary_sheet(wb: Workbook, events_data: Dict, result: 'BatchProcess
     
     ws[f'A{row}'] = "Warnings:"
     ws[f'B{row}'] = len(result.warnings)
+    row += 2
+
+    ws[f'A{row}'] = "Processing Parameters:"
+    ws[f'A{row}'].font = Font(bold=True)
+    row += 1
+    ws[f'A{row}'] = "PSD Method:"
+    ws[f'B{row}'] = config.psd_config.method
+    row += 1
+    ws[f'A{row}'] = "Window:"
+    ws[f'B{row}'] = config.psd_config.window
+    row += 1
+    ws[f'A{row}'] = "df (Hz):"
+    ws[f'B{row}'] = config.psd_config.desired_df
+    row += 1
+    ws[f'A{row}'] = "Overlap (%):"
+    ws[f'B{row}'] = config.psd_config.overlap_percent
+    row += 1
+    ws[f'A{row}'] = "Efficient FFT:"
+    ws[f'B{row}'] = "On" if config.psd_config.use_efficient_fft else "Off"
+    row += 1
+    ws[f'A{row}'] = "Frequency Spacing:"
+    ws[f'B{row}'] = config.psd_config.frequency_spacing
+    row += 1
+    if config.filter_config.enabled:
+        if config.filter_config.filter_type == "lowpass":
+            filt_desc = f"Lowpass @ {config.filter_config.cutoff_high} Hz"
+        elif config.filter_config.filter_type == "highpass":
+            filt_desc = f"Highpass @ {config.filter_config.cutoff_low} Hz"
+        else:
+            filt_desc = f"Bandpass {config.filter_config.cutoff_low}-{config.filter_config.cutoff_high} Hz"
+    else:
+        filt_desc = "None"
+    ws[f'A{row}'] = "Filter:"
+    ws[f'B{row}'] = filt_desc
     row += 2
     
     # Events summary
@@ -175,6 +219,29 @@ def _create_summary_sheet(wb: Workbook, events_data: Dict, result: 'BatchProcess
     ws.column_dimensions['A'].width = 20
     ws.column_dimensions['B'].width = 20
     ws.column_dimensions['C'].width = 40
+
+    # RMS summary table
+    row += 1
+    ws[f'A{row}'] = "RMS Summary:"
+    ws[f'A{row}'].font = Font(bold=True)
+    row += 1
+    headers = ["Flight", "Channel", "Event", "RMS", "3-Sigma RMS"]
+    for col, header in enumerate(headers, start=1):
+        cell = ws.cell(row=row, column=col, value=header)
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
+        cell.alignment = Alignment(horizontal='center')
+    row += 1
+
+    for (flight_key, channel_key), event_dict in result.channel_results.items():
+        for event_name, event_result in event_dict.items():
+            rms_value = event_result.get('metadata', {}).get('rms')
+            ws.cell(row=row, column=1, value=flight_key)
+            ws.cell(row=row, column=2, value=channel_key)
+            ws.cell(row=row, column=3, value=event_name)
+            ws.cell(row=row, column=4, value=None if rms_value is None else float(rms_value))
+            ws.cell(row=row, column=5, value=None if rms_value is None else float(3.0 * rms_value))
+            row += 1
 
 
 def _create_event_sheet(wb: Workbook, event_name: str, event_results: Dict) -> None:

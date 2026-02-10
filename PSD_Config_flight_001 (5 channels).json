@@ -1,0 +1,35 @@
+{
+  "config_version": 1,
+  "parameters": {
+    "preset_key": "custom",
+    "window": "hann",
+    "df": 5.0,
+    "overlap": 50,
+    "efficient_fft": false,
+    "maximax_enabled": true,
+    "maximax_window": 1.0,
+    "maximax_overlap": 50,
+    "freq_min": 10.0,
+    "freq_max": 3000.0
+  },
+  "display": {
+    "show_crosshair": false,
+    "remove_mean": false,
+    "octave_enabled": false,
+    "octave_fraction": 36.0,
+    "x_min": 10.0,
+    "x_max": 3000.0,
+    "y_min": 1e-07,
+    "y_max": 10.0
+  },
+  "filters": {
+    "enabled": false,
+    "filter_type": "lowpass",
+    "filter_design": "butterworth",
+    "filter_order": 4,
+    "cutoff_freq": 1000.0,
+    "low_cutoff": 100.0,
+    "high_cutoff": 2000.0
+  },
+  "events": []
+}

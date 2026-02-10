@@ -25,6 +25,8 @@ from spectral_edge.utils.plot_theme import (
     apply_axis_styling,
     BASE_FONT_SIZE,
     LINE_COLOR,
+    add_watermark,
+    get_watermark_text,
 )
 from spectral_edge.batch.output_psd import apply_frequency_spacing
 from spectral_edge.batch.spectrogram_generator import generate_spectrogram
@@ -96,7 +98,8 @@ def generate_powerpoint_report(
                 if sample_rate is None and time_full_slice is not None and len(time_full_slice) > 1:
                     sample_rate = float(1.0 / np.median(np.diff(time_full_slice)))
 
-                plot_channel_title = f"{flight_key}/{channel_key}"
+                plot_channel_title = f"{flight_key}, {event_name} - {channel_key}"
+                watermark_text = get_watermark_text()
 
                 # PSD plot
                 psd_image = None
@@ -106,9 +109,10 @@ def generate_powerpoint_report(
                         event_result,
                         config,
                         units,
-                        plot_title=f"PSD | {plot_channel_title}",
+                        plot_title=f"PSD: {plot_channel_title}",
                         layout=layout,
                         slot_role=psd_role,
+                        watermark_text=watermark_text,
                     )
 
                 # Time history plot
@@ -119,9 +123,10 @@ def generate_powerpoint_report(
                         time_data,
                         signal_data,
                         units,
-                        plot_title=f"Time History | {plot_channel_title}",
+                        plot_title=f"Time History: {plot_channel_title}",
                         layout=layout,
                         slot_role=time_role,
+                        watermark_text=watermark_text,
                     )
 
                 # Spectrogram plot
@@ -151,15 +156,31 @@ def generate_powerpoint_report(
                         spec_image = _create_spectrogram_plot(
                             spectrogram_data,
                             config,
-                            plot_title=f"Spectrogram | {plot_channel_title}",
+                            plot_title=f"Spectrogram: {plot_channel_title}",
                             layout=layout,
                             slot_role=spec_role,
+                            watermark_text=watermark_text,
                         )
 
                 # Slide generation
                 if layout == "time_psd_spec_one_slide":
                     if time_image and psd_image and spec_image:
-                        report_gen.add_three_plot_slide(slide_title, time_image, psd_image, spec_image)
+                        left_params, right_params = _build_plot_parameter_boxes(
+                            config,
+                            event_name,
+                            start_time,
+                            end_time,
+                            sample_rate,
+                            units
+                        )
+                        report_gen.add_three_plot_slide(
+                            slide_title,
+                            time_image,
+                            psd_image,
+                            spec_image,
+                            left_params_text=left_params,
+                            right_params_text=right_params
+                        )
                 elif layout == "all_plots_individual":
                     if time_image:
                         report_gen.add_single_plot_slide(time_image, f"Time History | {slide_title}")
@@ -226,7 +247,16 @@ def _add_config_slide(report_gen: ReportGenerator, config: 'BatchConfig', result
     source_files = [Path(p).name for p in config.source_files]
     num_channels = len(results.channel_results) if results else len(config.selected_channels)
     event_defs = _get_event_definitions(config)
-    events_desc = "Full duration" if not event_defs else f"{len(event_defs)} event(s)"
+    if event_defs:
+        event_names = [e[0] for e in event_defs]
+        if "full_duration" in event_names and len(event_names) > 1:
+            events_desc = f"Full duration + {len(event_names) - 1} event(s)"
+        elif "full_duration" in event_names:
+            events_desc = "Full duration"
+        else:
+            events_desc = f"{len(event_names)} event(s)"
+    else:
+        events_desc = "None"
 
     filter_desc = "None"
     if config.filter_config.enabled:
@@ -328,10 +358,60 @@ def _get_plot_figsize(layout: str, plot_kind: str, slot_role: str = "single") ->
     return slot_sizes.get(slot_role, slot_sizes["single"])
 
 
+def _build_plot_parameter_boxes(
+    config: 'BatchConfig',
+    event_name: str,
+    start_time: Optional[float],
+    end_time: Optional[float],
+    sample_rate: Optional[float],
+    units: str
+) -> Tuple[str, str]:
+    """Build PSD and spectrogram parameter strings (max 3 lines each)."""
+    spacing = config.psd_config.frequency_spacing
+    df = config.psd_config.desired_df
+    fs_text = f"Fs={sample_rate:.1f} Hz" if sample_rate else "Fs=NA"
+
+    if start_time is None or end_time is None:
+        event_text = event_name
+        time_range = "full duration"
+    else:
+        event_text = event_name
+        time_range = f"{start_time:.2f}-{end_time:.2f}s"
+
+    if config.filter_config.enabled:
+        filt = config.filter_config
+        if filt.filter_type == "lowpass":
+            filt_desc = f"LP {filt.cutoff_high} Hz"
+        elif filt.filter_type == "highpass":
+            filt_desc = f"HP {filt.cutoff_low} Hz"
+        else:
+            filt_desc = f"BP {filt.cutoff_low}-{filt.cutoff_high} Hz"
+    else:
+        filt_desc = "None"
+
+    method = config.psd_config.method
+    method_desc = f"{method.capitalize()} | window={config.psd_config.window} | overlap={config.psd_config.overlap_percent}%"
+
+    psd_lines = [
+        f"df={df} Hz | spacing={spacing} | {fs_text}",
+        f"Event={event_text} ({time_range}) | Filter={filt_desc}",
+        f"Method={method_desc}",
+    ]
+
+    spec_lines = [
+        f"df={config.spectrogram_config.desired_df} Hz | overlap={config.spectrogram_config.overlap_percent}% | SNR={config.spectrogram_config.snr_threshold} dB",
+        f"Event={event_text} ({time_range}) | {fs_text}",
+        f"Colormap={config.spectrogram_config.colormap}",
+    ]
+
+    return "\n".join(psd_lines[:3]), "\n".join(spec_lines[:3])
+
+
 def _get_event_definitions(config: 'BatchConfig') -> List[Tuple[str, Optional[float], Optional[float]]]:
-    if config.process_full_duration:
-        return [("full_duration", None, None)]
-    return [(evt.name, evt.start_time, evt.end_time) for evt in config.events]
+    events = [(evt.name, evt.start_time, evt.end_time) for evt in config.events]
+    if config.process_full_duration or events:
+        return [("full_duration", None, None)] + events
+    return events
 
 
 def _event_bounds(events: List[Tuple[str, Optional[float], Optional[float]]]) -> Tuple[Optional[float], Optional[float]]:
@@ -448,13 +528,15 @@ def _create_time_history_plot(
     plot_title: str,
     layout: str,
     slot_role: str = "single",
+    watermark_text: Optional[str] = None,
 ) -> bytes:
     apply_light_matplotlib_theme()
     fig, ax = plt.subplots(figsize=_get_plot_figsize(layout, "time", slot_role))
-    ax.plot(time_array, signal_array, linewidth=1.3, color=LINE_COLOR)
+    ax.plot(time_array, signal_array, linewidth=0.9, color=LINE_COLOR)
     ylabel = f"Amplitude ({units})" if units else "Amplitude"
     style_axes(ax, plot_title, "Time (s)", ylabel)
     apply_axis_styling(ax, font_size=BASE_FONT_SIZE, include_grid=True)
+    add_watermark(ax, watermark_text)
     fig.tight_layout()
     return _fig_to_bytes(fig)
 
@@ -466,6 +548,7 @@ def _create_psd_plot(
     plot_title: str,
     layout: str,
     slot_role: str = "single",
+    watermark_text: Optional[str] = None,
 ) -> bytes:
     frequencies = event_result['frequencies']
     psd_values = event_result['psd']
@@ -481,13 +564,14 @@ def _create_psd_plot(
 
     apply_light_matplotlib_theme()
     fig, ax = plt.subplots(figsize=_get_plot_figsize(layout, "psd", slot_role))
-    ax.loglog(frequencies, psd_values, linewidth=1.6, color=LINE_COLOR)
+    ax.loglog(frequencies, psd_values, linewidth=1.0, color=LINE_COLOR)
 
     ylabel = f"PSD ({units}^2/Hz)" if units else "PSD"
     style_axes(ax, plot_title, "Frequency (Hz)", ylabel)
     apply_axis_styling(ax, font_size=BASE_FONT_SIZE, include_grid=config.display_config.psd_show_grid)
     if not config.display_config.psd_show_grid:
         ax.grid(False)
+    add_watermark(ax, watermark_text)
 
     if not config.display_config.psd_auto_scale:
         if config.display_config.psd_x_axis_min and config.display_config.psd_x_axis_max:
@@ -505,6 +589,7 @@ def _create_spectrogram_plot(
     plot_title: str,
     layout: str,
     slot_role: str = "single",
+    watermark_text: Optional[str] = None,
 ) -> Optional[bytes]:
     apply_light_matplotlib_theme()
     fig, ax = plt.subplots(figsize=_get_plot_figsize(layout, "spectrogram", slot_role))
@@ -537,6 +622,7 @@ def _create_spectrogram_plot(
 
     style_axes(ax, plot_title, "Time (s)", "Frequency (Hz)")
     apply_axis_styling(ax, font_size=BASE_FONT_SIZE, include_grid=False)
+    add_watermark(ax, watermark_text)
     cbar = plt.colorbar(im, ax=ax)
     cbar.set_label("PSD (dB)")
     style_colorbar(cbar, font_size=BASE_FONT_SIZE)
@@ -581,43 +667,27 @@ def _format_stats_summary_dict(overall_stats: Dict, units: str) -> List[Tuple[st
 
 
 def _add_rms_summary_slides(report_gen: ReportGenerator, results, config: 'BatchConfig') -> None:
-    events = [e[0] for e in _get_event_definitions(config)]
-    if not events:
-        return
-
-    include_3sigma = config.powerpoint_config.include_3sigma_columns
-    headers_base = ["Flight", "Channel"]
-
-    def build_headers(event_names: List[str]) -> List[str]:
-        headers = headers_base[:]
-        for event_name in event_names:
-            headers.append(f"{event_name} RMS")
-            if include_3sigma:
-                headers.append(f"{event_name} 3-sigma")
-        return headers
-
-    def build_rows(event_names: List[str]) -> List[List[str]]:
-        rows = []
-        for (flight_key, channel_key), event_dict in results.channel_results.items():
-            row = [flight_key, channel_key]
-            for event_name in event_names:
-                rms_value = None
-                if event_name in event_dict:
-                    rms_value = event_dict[event_name].get('metadata', {}).get('rms')
-                row.append("" if rms_value is None else f"{rms_value:.4f}")
-                if include_3sigma:
-                    row.append("" if rms_value is None else f"{3.0 * rms_value:.4f}")
-            rows.append(row)
-        rows.sort(key=lambda r: (r[0], r[1]))
-        return rows
-
     if not results.channel_results:
         return
 
-    max_events_per_slide = 4 if include_3sigma else 6
-    for idx in range(0, len(events), max_events_per_slide):
-        events_chunk = events[idx:idx + max_events_per_slide]
-        headers = build_headers(events_chunk)
-        rows = build_rows(events_chunk)
-        title = "RMS Summary" if idx == 0 else "RMS Summary (continued)"
-        report_gen.add_rms_table_slide(title, headers, rows)
+    include_3sigma = config.powerpoint_config.include_3sigma_columns
+    headers = ["Flight", "Channel", "Event", "RMS"]
+    if include_3sigma:
+        headers.append("3-Sigma RMS")
+
+    rows = []
+    for (flight_key, channel_key), event_dict in results.channel_results.items():
+        for event_name, event_result in event_dict.items():
+            rms_value = event_result.get('metadata', {}).get('rms')
+            row = [
+                flight_key,
+                channel_key,
+                event_name,
+                "" if rms_value is None else f"{rms_value:.4f}",
+            ]
+            if include_3sigma:
+                row.append("" if rms_value is None else f"{3.0 * rms_value:.4f}")
+            rows.append(row)
+
+    rows.sort(key=lambda r: (r[0], r[1], r[2]))
+    report_gen.add_rms_table_slide("RMS Summary", headers, rows)

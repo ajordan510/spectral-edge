@@ -31,7 +31,7 @@ TOOLTIPS = {
         "• 0.5-2.0 Hz for general vibration<br>"
         "• 0.1-0.5 Hz for low-frequency analysis<br>"
         "• 2.0-10 Hz for high-frequency or quick analysis<br><br>"
-        "<b>Aerospace Standard:</b> 1.0 Hz (per SMC-S-016)<br><br>"
+        "<b>Aerospace Standard:</b> 5.0 Hz (per SMC-S-016)<br><br>"
         "<b>Trade-offs:</b><br>"
         "• Smaller Δf → Better frequency detail, longer data segments required<br>"
         "• Larger Δf → Faster calculation, less frequency detail<br><br>"

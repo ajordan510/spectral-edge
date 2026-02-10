@@ -19,10 +19,12 @@ import os
 import sys
 import ctypes
 import warnings
+import re
 import numpy as np
 import h5py
 from typing import Optional, List, Tuple, Callable, Dict, Any
 from pathlib import Path
+from scipy.io import savemat
 
 # Import DEWESoft library wrapper
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'dewesoft'))
@@ -431,6 +433,270 @@ def _sanitize_filename(value: str) -> str:
     return cleaned or "channel"
 
 
+def _to_text(value: Any) -> str:
+    """Convert metadata value to text for robust MAT-file field assignment."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return ""
+        if value.ndim == 0:
+            return _to_text(value.item())
+        return str(value.tolist())
+    if isinstance(value, np.generic):
+        return str(value.item())
+    return str(value)
+
+
+def _to_scalar(value: Any) -> Any:
+    """Convert numpy/h5py scalar-like values to plain Python scalars."""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return _to_scalar(value.item())
+        return value.tolist()
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _sanitize_matlab_identifier(name: str, prefix: str = "ch", max_len: int = 63) -> str:
+    """
+    Create a MATLAB-safe identifier.
+
+    Rules:
+    - Replace spaces and hyphens with underscores
+    - Remove invalid characters
+    - Ensure first character is a letter (prefix with `ch_` if needed)
+    - Guarantee fallback validity
+    """
+    text = _to_text(name).strip()
+    text = text.replace("-", "_").replace(" ", "_")
+    text = re.sub(r"[^A-Za-z0-9_]", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+
+    if not text:
+        text = "channel"
+
+    if not re.match(r"^[A-Za-z]", text):
+        text = f"{prefix}_{text}"
+
+    text = re.sub(r"[^A-Za-z0-9_]", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    if not re.match(r"^[A-Za-z]", text):
+        text = f"{prefix}_{text}"
+
+    if len(text) > max_len:
+        text = text[:max_len].rstrip("_")
+
+    if not re.match(r"^[A-Za-z][A-Za-z0-9_]*$", text):
+        return "ch_channel"
+
+    return text
+
+
+def _sanitize_matlab_field_name(name: str, prefix: str = "meta", max_len: int = 63) -> str:
+    """Create a safe MATLAB struct field name."""
+    return _sanitize_matlab_identifier(name, prefix=prefix, max_len=max_len)
+
+
+def _make_unique_output_path(
+    output_dir: str,
+    base_name: str,
+    extension: str,
+    reserved_paths: set
+) -> str:
+    """Return a collision-safe output path."""
+    safe_base = _sanitize_filename(base_name) or "output"
+    candidate = os.path.join(output_dir, f"{safe_base}{extension}")
+    counter = 2
+    while candidate in reserved_paths or os.path.exists(candidate):
+        candidate = os.path.join(output_dir, f"{safe_base}_{counter:03d}{extension}")
+        counter += 1
+    reserved_paths.add(candidate)
+    return candidate
+
+
+def _resolve_channel_time_and_sample_rate(
+    channel_group: h5py.Group,
+    channel_name: str,
+    flight_key: str
+) -> Tuple[np.ndarray, float]:
+    """Resolve channel time vector and sample rate for MARVIN export."""
+    if 'data' not in channel_group:
+        raise ValueError(
+            f"Channel '{channel_name}' in flight '{flight_key}' is missing 'data' dataset"
+        )
+
+    data_len = len(channel_group['data'])
+    if data_len <= 0:
+        raise ValueError(
+            f"Channel '{channel_name}' in flight '{flight_key}' has no samples"
+        )
+
+    sample_rate_attr = channel_group.attrs.get('sample_rate')
+    sample_rate = None
+    if sample_rate_attr is not None:
+        try:
+            sample_rate_candidate = float(_to_scalar(sample_rate_attr))
+            if sample_rate_candidate > 0:
+                sample_rate = sample_rate_candidate
+        except (TypeError, ValueError):
+            sample_rate = None
+
+    if 'time' in channel_group:
+        time_vec = np.asarray(channel_group['time'][:], dtype=np.float64)
+        if len(time_vec) != data_len:
+            raise ValueError(
+                f"Length mismatch for channel '{channel_name}' in flight '{flight_key}': "
+                f"data length {data_len} vs time length {len(time_vec)}"
+            )
+
+        if sample_rate is None and len(time_vec) > 1:
+            dt = np.diff(time_vec)
+            dt = dt[np.isfinite(dt) & (dt > 0)]
+            if len(dt) > 0:
+                sample_rate = float(1.0 / np.median(dt))
+
+        if sample_rate is None or sample_rate <= 0:
+            raise ValueError(
+                f"Could not determine sample rate for channel '{channel_name}' in flight '{flight_key}'"
+            )
+
+        return time_vec, float(sample_rate)
+
+    if sample_rate is None or sample_rate <= 0:
+        raise ValueError(
+            f"Missing both time dataset and valid sample_rate for "
+            f"channel '{channel_name}' in flight '{flight_key}'"
+        )
+
+    start_time_attr = channel_group.attrs.get('start_time', 0.0)
+    start_time = float(_to_scalar(start_time_attr)) if start_time_attr is not None else 0.0
+    time_vec = start_time + (np.arange(data_len, dtype=np.float64) / sample_rate)
+    return time_vec, float(sample_rate)
+
+
+def _build_marvin_struct(
+    input_file_name: str,
+    flight_key: str,
+    channel_name: str,
+    channel_group: h5py.Group
+) -> Dict[str, Any]:
+    """Build MARVIN output structure with required and optional fields."""
+    data = np.asarray(channel_group['data'][:], dtype=np.float64).reshape(-1, 1)
+    time_vec, sample_rate = _resolve_channel_time_and_sample_rate(channel_group, channel_name, flight_key)
+    time_vec = np.asarray(time_vec, dtype=np.float64).reshape(-1, 1)
+
+    units_value = channel_group.attrs.get('units', channel_group.attrs.get('unit', ""))
+    units_text = _to_text(units_value)
+
+    marvin_struct: Dict[str, Any] = {
+        'amp': data,
+        't': time_vec,
+        'sr': float(sample_rate),
+        'source': 'MARVIN',
+        'units': units_text,
+        'name': _to_text(channel_name),
+        'desc': input_file_name,
+        'flight': _to_text(flight_key),
+        'channel_path': f"{flight_key}/channels/{channel_name}",
+        'sample_count': int(len(data)),
+    }
+
+    # Include additional metadata fields when available, with safe names.
+    required_keys = {'amp', 't', 'sr', 'source', 'units', 'name', 'desc'}
+    for attr_key, attr_value in channel_group.attrs.items():
+        if attr_key in {'units', 'unit', 'sample_rate'}:
+            continue
+        field_name = _sanitize_matlab_field_name(attr_key, prefix="meta")
+        if field_name in required_keys or field_name in marvin_struct:
+            field_name = _sanitize_matlab_field_name(f"meta_{attr_key}", prefix="meta")
+        if field_name in required_keys or field_name in marvin_struct:
+            continue
+        marvin_struct[field_name] = _to_scalar(attr_value)
+
+    return marvin_struct
+
+
+def convert_hdf5_to_marvin_mat(
+    input_path: str,
+    output_dir: str,
+    progress_callback: Optional[Callable[[int, str], None]] = None
+) -> List[str]:
+    """
+    Convert SpectralEdge HDF5 data to MARVIN MATLAB files.
+
+    One output .mat file is created for each (flight, channel) pair.
+    Each .mat contains one top-level variable named using a MATLAB-safe
+    version of the channel name, holding the MARVIN struct fields.
+    """
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+
+    os.makedirs(output_dir, exist_ok=True)
+    input_file_name = Path(input_path).name
+
+    if progress_callback:
+        progress_callback(0, "Analyzing HDF5 structure...")
+
+    output_files: List[str] = []
+    reserved_paths: set = set()
+
+    with h5py.File(input_path, 'r') as f_in:
+        flights = _get_flight_groups(f_in)
+        if not flights:
+            raise ValueError("No flight groups found in HDF5 file")
+
+        channel_refs: List[Tuple[str, str, h5py.Group]] = []
+        for flight_key, flight_group in flights:
+            for channel_name in flight_group['channels'].keys():
+                channel_refs.append((flight_key, channel_name, flight_group['channels'][channel_name]))
+
+        if not channel_refs:
+            raise ValueError("No channels found in HDF5 file")
+
+        total_channels = len(channel_refs)
+        for idx, (flight_key, channel_name, channel_group) in enumerate(channel_refs, start=1):
+            if progress_callback:
+                progress_callback(
+                    int((idx - 1) / total_channels * 100),
+                    f"Converting {flight_key}/{channel_name} ({idx}/{total_channels})..."
+                )
+
+            mat_var_name = _sanitize_matlab_identifier(channel_name, prefix="ch")
+            marvin_struct = _build_marvin_struct(
+                input_file_name=input_file_name,
+                flight_key=flight_key,
+                channel_name=channel_name,
+                channel_group=channel_group
+            )
+
+            base_file_name = f"{flight_key}_{channel_name}"
+            output_path = _make_unique_output_path(
+                output_dir=output_dir,
+                base_name=base_file_name,
+                extension=".mat",
+                reserved_paths=reserved_paths
+            )
+
+            savemat(
+                output_path,
+                {mat_var_name: marvin_struct},
+                long_field_names=True,
+                do_compression=True
+            )
+            output_files.append(output_path)
+
+    if progress_callback:
+        progress_callback(100, f"Created {len(output_files)} MATLAB file(s)")
+
+    return output_files
+
+
 def _write_csv_file(output_path: str, channel_data_dict: Dict, channel_names: List[str]) -> None:
     """
     Write channel data to CSV file.
@@ -655,6 +921,125 @@ def convert_dxd_with_splitting(
     return output_files
 
 
+def _get_flight_groups(h5_file: h5py.File) -> List[Tuple[str, h5py.Group]]:
+    """Return top-level groups that match the SpectralEdge flight structure."""
+    flights: List[Tuple[str, h5py.Group]] = []
+    for key in h5_file.keys():
+        obj = h5_file[key]
+        if not isinstance(obj, h5py.Group):
+            continue
+        if 'channels' not in obj:
+            continue
+        if not isinstance(obj['channels'], h5py.Group):
+            continue
+        flights.append((key, obj))
+    return flights
+
+
+def _get_channel_sample_rate(channel_group: h5py.Group, channel_name: str, flight_key: str) -> float:
+    """Get validated channel sample rate from attributes."""
+    sample_rate = channel_group.attrs.get('sample_rate')
+    if sample_rate is None:
+        raise ValueError(f"Missing sample_rate for channel '{channel_name}' in flight '{flight_key}'")
+    sample_rate = float(sample_rate)
+    if sample_rate <= 0:
+        raise ValueError(
+            f"Invalid sample_rate ({sample_rate}) for channel '{channel_name}' in flight '{flight_key}'"
+        )
+    return sample_rate
+
+
+def _get_flight_min_duration(flight_group: h5py.Group, flight_key: str) -> float:
+    """Get maximum safe duration common to all channels in a flight."""
+    channel_keys = list(flight_group['channels'].keys())
+    if not channel_keys:
+        raise ValueError(f"No channels found in flight '{flight_key}'")
+
+    durations = []
+    for channel_key in channel_keys:
+        channel_group = flight_group['channels'][channel_key]
+        if 'data' not in channel_group:
+            raise ValueError(f"Channel '{channel_key}' in flight '{flight_key}' is missing 'data' dataset")
+        data_len = len(channel_group['data'])
+        if data_len == 0:
+            raise ValueError(f"No samples found in channel '{channel_key}' in flight '{flight_key}'")
+        sample_rate = _get_channel_sample_rate(channel_group, channel_key, flight_key)
+        durations.append(data_len / sample_rate)
+
+    return min(durations)
+
+
+def _copy_non_flight_top_level_items(
+    f_in: h5py.File,
+    f_out: h5py.File,
+    flight_keys: List[str]
+) -> None:
+    """Copy top-level datasets/groups that are not flight groups."""
+    flight_key_set = set(flight_keys)
+    for key in f_in.keys():
+        if key in flight_key_set:
+            continue
+        f_in.copy(key, f_out, name=key)
+
+
+def _write_hdf5_segment_file(
+    f_in: h5py.File,
+    output_path: str,
+    flights: List[Tuple[str, h5py.Group]],
+    start_time: float,
+    end_time: float
+) -> None:
+    """Write one split HDF5 file for the requested time window."""
+    flight_keys = [flight_key for flight_key, _ in flights]
+    with h5py.File(output_path, 'w') as f_out:
+        _copy_non_flight_top_level_items(f_in, f_out, flight_keys)
+
+        for flight_key, flight_group in flights:
+            flight_out = f_out.create_group(flight_key)
+
+            if 'metadata' in flight_group and isinstance(flight_group['metadata'], h5py.Group):
+                metadata_out = flight_out.create_group('metadata')
+                for key, value in flight_group['metadata'].attrs.items():
+                    metadata_out.attrs[key] = value
+                metadata_out.attrs['duration'] = end_time - start_time
+                metadata_out.attrs['split_start_time'] = start_time
+                metadata_out.attrs['split_end_time'] = end_time
+                metadata_out.attrs['time_reference'] = 'absolute'
+
+            channels_out = flight_out.create_group('channels')
+            for channel_name in flight_group['channels'].keys():
+                ch_in = flight_group['channels'][channel_name]
+                if 'data' not in ch_in:
+                    raise ValueError(
+                        f"Channel '{channel_name}' in flight '{flight_key}' is missing 'data' dataset"
+                    )
+
+                sample_rate = _get_channel_sample_rate(ch_in, channel_name, flight_key)
+                total_samples = len(ch_in['data'])
+
+                start_idx = max(0, min(int(start_time * sample_rate), total_samples))
+                end_idx = max(start_idx, min(int(end_time * sample_rate), total_samples))
+
+                ch_out = channels_out.create_group(channel_name)
+                ch_out.create_dataset('data', data=ch_in['data'][start_idx:end_idx])
+
+                if 'time' in ch_in:
+                    time_slice = ch_in['time'][start_idx:end_idx]
+                else:
+                    channel_start_time = float(ch_in.attrs.get('start_time', 0.0))
+                    time_slice = channel_start_time + (
+                        np.arange(start_idx, end_idx, dtype=np.float64) / sample_rate
+                    )
+
+                ch_out.create_dataset('time', data=time_slice)
+
+                for key, value in ch_in.attrs.items():
+                    ch_out.attrs[key] = value
+
+                if len(time_slice) > 0:
+                    ch_out.attrs['start_time'] = float(time_slice[0])
+
+
 def split_hdf5_by_count(
     input_path: str,
     output_dir: str,
@@ -708,84 +1093,24 @@ def split_hdf5_by_count(
     
     # Open input file
     with h5py.File(input_path, 'r') as f_in:
-        # Get first flight key
-        flight_keys = list(f_in.keys())
-        if not flight_keys:
-            raise ValueError("No flights found in HDF5 file")
-        
-        flight_key = flight_keys[0]
-        flight_group = f_in[flight_key]
-        
-        # Get channel metadata to determine total samples
-        channel_keys = list(flight_group['channels'].keys())
-        if not channel_keys:
-            raise ValueError("No channels found in flight")
+        flights = _get_flight_groups(f_in)
+        if not flights:
+            raise ValueError("No flight groups found in HDF5 file")
 
-        channel_lengths = []
-        for channel_key in channel_keys:
-            channel_lengths.append(len(flight_group['channels'][channel_key]['data']))
+        # Use the minimum common duration so every output contains every flight/channel.
+        min_duration = min(_get_flight_min_duration(flight_group, flight_key) for flight_key, flight_group in flights)
+        if min_duration <= 0:
+            raise ValueError("No valid duration found in flight channels")
 
-        total_samples = min(channel_lengths)
-        if total_samples == 0:
-            raise ValueError("No samples found in flight channels")
-
-        if num_segments > total_samples:
-            raise ValueError(
-                f"num_segments ({num_segments}) exceeds available samples ({total_samples})"
-            )
-
-        first_channel = flight_group['channels'][channel_keys[0]]
-        sample_rate = float(first_channel.attrs['sample_rate'])
-        
-        # Calculate segment boundaries
-        samples_per_segment = total_samples // num_segments
-        
-        # Create output files
         base_name = Path(input_path).stem
         output_files = []
         
         for seg_idx in range(num_segments):
-            start_idx = seg_idx * samples_per_segment
-            if seg_idx == num_segments - 1:
-                end_idx = total_samples  # Last segment gets remainder
-            else:
-                end_idx = (seg_idx + 1) * samples_per_segment
-            
-            output_name = f"{base_name}_segment_{seg_idx+1:03d}.h5"
+            start_time = (seg_idx * min_duration) / num_segments
+            end_time = ((seg_idx + 1) * min_duration) / num_segments
+            output_name = f"{base_name}_segment_{seg_idx+1:03d}.hdf5"
             output_path = os.path.join(output_dir, output_name)
-            
-            # Create output file
-            with h5py.File(output_path, 'w') as f_out:
-                # Create flight group
-                flight_out = f_out.create_group(flight_key)
-                
-                # Copy metadata
-                metadata_group = flight_out.create_group('metadata')
-                for key, value in flight_group['metadata'].attrs.items():
-                    metadata_group.attrs[key] = value
-                
-                # Update duration for this segment
-                segment_duration = (end_idx - start_idx) / sample_rate
-                metadata_group.attrs['duration'] = segment_duration
-                
-                # Create channels group
-                channels_out = flight_out.create_group('channels')
-                
-                # Copy each channel (sliced)
-                for ch_name in channel_keys:
-                    ch_in = flight_group['channels'][ch_name]
-                    ch_out = channels_out.create_group(ch_name)
-                    
-                    # Copy sliced data
-                    ch_out.create_dataset('data', data=ch_in['data'][start_idx:end_idx])
-                    time_slice = ch_in['time'][start_idx:end_idx]
-                    if len(time_slice) > 0:
-                        time_slice = time_slice - ch_in['time'][start_idx]
-                    ch_out.create_dataset('time', data=time_slice)
-                    
-                    # Copy attributes
-                    for key, value in ch_in.attrs.items():
-                        ch_out.attrs[key] = value
+            _write_hdf5_segment_file(f_in, output_path, flights, start_time, end_time)
             
             output_files.append(output_path)
             
@@ -841,30 +1166,13 @@ def split_hdf5_by_time_slices(
     
     # Open input file
     with h5py.File(input_path, 'r') as f_in:
-        # Get first flight
-        flight_keys = list(f_in.keys())
-        if not flight_keys:
-            raise ValueError("No flights found in HDF5 file")
-        
-        flight_key = flight_keys[0]
-        flight_group = f_in[flight_key]
-        
-        # Get channel info
-        channel_keys = list(flight_group['channels'].keys())
-        if not channel_keys:
-            raise ValueError("No channels found in flight")
+        flights = _get_flight_groups(f_in)
+        if not flights:
+            raise ValueError("No flight groups found in HDF5 file")
 
-        channel_lengths = []
-        for channel_key in channel_keys:
-            channel_lengths.append(len(flight_group['channels'][channel_key]['data']))
-
-        total_samples = min(channel_lengths)
-        if total_samples == 0:
-            raise ValueError("No samples found in flight channels")
-
-        first_channel = flight_group['channels'][channel_keys[0]]
-        sample_rate = float(first_channel.attrs['sample_rate'])
-        max_duration = total_samples / sample_rate
+        max_duration = min(_get_flight_min_duration(flight_group, flight_key) for flight_key, flight_group in flights)
+        if max_duration <= 0:
+            raise ValueError("No valid duration found in flight channels")
         
         # Create output files
         base_name = Path(input_path).stem
@@ -878,40 +1186,10 @@ def split_hdf5_by_time_slices(
                 raise ValueError(
                     f"Time slice ({start_time}, {end_time}) exceeds available duration ({max_duration:.2f}s)"
                 )
-
-            # Convert time to sample indices
-            start_idx = int(start_time * sample_rate)
-            end_idx = int(end_time * sample_rate)
             
-            output_name = f"{base_name}_slice_{slice_idx+1:03d}.h5"
+            output_name = f"{base_name}_slice_{slice_idx+1:03d}.hdf5"
             output_path = os.path.join(output_dir, output_name)
-            
-            # Create output file (same logic as split_by_count)
-            with h5py.File(output_path, 'w') as f_out:
-                flight_out = f_out.create_group(flight_key)
-                
-                # Copy metadata
-                metadata_group = flight_out.create_group('metadata')
-                for key, value in flight_group['metadata'].attrs.items():
-                    metadata_group.attrs[key] = value
-                
-                metadata_group.attrs['duration'] = end_time - start_time
-                
-                # Create channels
-                channels_out = flight_out.create_group('channels')
-                
-                for ch_name in channel_keys:
-                    ch_in = flight_group['channels'][ch_name]
-                    ch_out = channels_out.create_group(ch_name)
-                    
-                    ch_out.create_dataset('data', data=ch_in['data'][start_idx:end_idx])
-                    time_slice = ch_in['time'][start_idx:end_idx]
-                    if len(time_slice) > 0:
-                        time_slice = time_slice - ch_in['time'][start_idx]
-                    ch_out.create_dataset('time', data=time_slice)
-                    
-                    for key, value in ch_in.attrs.items():
-                        ch_out.attrs[key] = value
+            _write_hdf5_segment_file(f_in, output_path, flights, start_time, end_time)
             
             output_files.append(output_path)
             

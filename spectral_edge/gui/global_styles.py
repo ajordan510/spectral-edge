@@ -68,6 +68,12 @@ DARK_THEME = """
         background-color: #60a5fa;
         border-color: #60a5fa;
     }
+    QToolTip {
+        color: #ffffff;
+        background-color: #111827;
+        border: 1px solid #4a5568;
+        padding: 4px;
+    }
 """
 
 # Light, readable styling for dialog boxes

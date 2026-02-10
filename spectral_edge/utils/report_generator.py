@@ -359,7 +359,9 @@ class ReportGenerator:
         title: str,
         top_image: bytes,
         bottom_left_image: bytes,
-        bottom_right_image: bytes
+        bottom_right_image: bytes,
+        left_params_text: Optional[str] = None,
+        right_params_text: Optional[str] = None
     ) -> None:
         """Add a slide with a top plot and two bottom plots."""
         slide_layout = self.presentation.slide_layouts[6]
@@ -379,7 +381,41 @@ class ReportGenerator:
         self._add_picture_fit(slide, bottom_left_image, Inches(0.5), Inches(3.05), Inches(6.1), Inches(4.03))
         self._add_picture_fit(slide, bottom_right_image, Inches(6.9), Inches(3.05), Inches(6.1), Inches(4.03))
 
+        # Optional parameter boxes below PSD and Spectrogram plots.
+        if left_params_text:
+            self._add_param_box(
+                slide,
+                left_params_text,
+                Inches(1.0),
+                Inches(7.10),
+                Inches(5.5),
+                Inches(0.35),
+            )
+        if right_params_text:
+            self._add_param_box(
+                slide,
+                right_params_text,
+                Inches(7.5),
+                Inches(7.10),
+                Inches(4.5),
+                Inches(0.35),
+            )
+
         self._slide_count += 1
+
+    def _add_param_box(self, slide, text: str, left, top, width, height) -> None:
+        """Add a small parameter text box."""
+        box = slide.shapes.add_textbox(left, top, width, height)
+        box.fill.solid()
+        box.fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        box.line.color.rgb = RGBColor(0x00, 0x00, 0x00)
+        frame = box.text_frame
+        frame.word_wrap = True
+        para = frame.paragraphs[0]
+        para.text = text
+        para.font.size = Pt(6)
+        para.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+        para.alignment = PP_ALIGN.CENTER
 
     def add_statistics_slide(
         self,

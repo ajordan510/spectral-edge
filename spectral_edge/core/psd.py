@@ -887,22 +887,28 @@ def convert_psd_to_octave_bands(
     if octave_fraction <= 0:
         raise ValueError(f"octave_fraction must be positive, got {octave_fraction}")
     
-    # Set frequency range
+    # Restrict calculations to positive frequencies only (required for log-frequency math)
+    positive_mask = frequencies > 0
+    if not np.any(positive_mask):
+        raise ValueError("No positive frequencies found in input data")
+
+    positive_frequencies = frequencies[positive_mask]
+    positive_psd = psd[positive_mask, :] if psd.ndim > 1 else psd[positive_mask]
+
+    # Set frequency range and clamp to available positive frequency support
     if freq_min is None:
-        freq_min = frequencies[0]
+        freq_min = float(positive_frequencies[0])
     if freq_max is None:
-        freq_max = frequencies[-1]
-    
-    # Ensure freq_min is positive (required for log calculation)
-    if freq_min <= 0:
-        # Find first positive frequency
-        positive_freqs = frequencies[frequencies > 0]
-        if len(positive_freqs) == 0:
-            raise ValueError("No positive frequencies found in input data")
-        freq_min = positive_freqs[0]
-    
+        freq_max = float(positive_frequencies[-1])
+
+    freq_min = max(float(freq_min), float(positive_frequencies[0]))
+    freq_max = min(float(freq_max), float(positive_frequencies[-1]))
+
     if freq_min >= freq_max:
-        raise ValueError(f"freq_min ({freq_min}) must be less than freq_max ({freq_max})")
+        raise ValueError(
+            f"Invalid frequency range after clamping to data support: "
+            f"freq_min={freq_min}, freq_max={freq_max}"
+        )
 
     # Build an adaptive dense log-spaced frequency grid for robust band integration
     log_min = np.log10(freq_min)
@@ -917,7 +923,7 @@ def convert_psd_to_octave_bands(
 
     # Interpolate PSD onto the dense grid (linear PSD values over log-frequency)
     # Use base-10 log frequency for interpolation stability
-    log_freqs = np.log10(frequencies)
+    log_freqs = np.log10(positive_frequencies)
     dense_log_freqs = np.log10(dense_freqs)
 
     def _interp_psd(values: np.ndarray) -> np.ndarray:
@@ -960,13 +966,13 @@ def convert_psd_to_octave_bands(
     if is_multichannel:
         interpolated_psd = np.zeros((len(dense_freqs), n_channels))
         for ch in range(n_channels):
-            interp_values = _interp_psd(psd[:, ch])
+            interp_values = _interp_psd(positive_psd[:, ch])
             if interp_values is None:
                 interpolated_psd = None
                 break
             interpolated_psd[:, ch] = interp_values
     else:
-        interp_values = _interp_psd(psd)
+        interp_values = _interp_psd(positive_psd)
         interpolated_psd = interp_values
 
     # Precompute cumulative integral for stability
@@ -1036,15 +1042,15 @@ def convert_psd_to_octave_bands(
             continue
 
         # Fallback to original data if interpolation failed
-        band_mask = (frequencies >= f_lower) & (frequencies <= f_upper)
+        band_mask = (positive_frequencies >= f_lower) & (positive_frequencies <= f_upper)
         if not np.any(band_mask):
             if is_multichannel:
                 octave_psd[i, :] = np.nan
             else:
                 octave_psd[i] = np.nan
             continue
-        band_frequencies = frequencies[band_mask]
-        band_psd = psd[band_mask, :] if is_multichannel else psd[band_mask]
+        band_frequencies = positive_frequencies[band_mask]
+        band_psd = positive_psd[band_mask, :] if is_multichannel else positive_psd[band_mask]
         
         # Check for NaN or invalid values in band
         if is_multichannel:

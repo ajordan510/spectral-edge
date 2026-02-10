@@ -1,0 +1,38 @@
+{
+  "time_window_seconds": 20.0,
+  "max_time_points": 10000,
+  "psd_method": "welch",
+  "psd_df": 5.0,
+  "psd_window": "hann",
+  "psd_overlap_percent": 50.0,
+  "psd_use_efficient_fft": true,
+  "maximax_window": 1.0,
+  "spectrogram_df": 5.0,
+  "spectrogram_overlap_percent": 50.0,
+  "spectrogram_snr_threshold": 20.0,
+  "spectrogram_colormap": "viridis",
+  "figure_sizes": {
+    "time_history": [
+      10,
+      3
+    ],
+    "psd": [
+      5.5,
+      5.5
+    ],
+    "spectrogram": [
+      6,
+      4
+    ],
+    "pdf": [
+      4,
+      4
+    ],
+    "running_stat": [
+      6,
+      1.3
+    ]
+  },
+  "font_size": 11,
+  "dpi": 300
+}

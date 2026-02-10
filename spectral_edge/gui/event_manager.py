@@ -77,16 +77,20 @@ class EventManagerWindow(QMainWindow):
     # Signal emitted when interactive mode is toggled
     interactive_mode_changed = pyqtSignal(bool)
     
-    def __init__(self, max_time=None):
+    def __init__(self, max_time=None, min_time=0.0):
         """
         Initialize the Event Manager window.
         
         Args:
             max_time: Maximum time value from the loaded data (for validation)
+            min_time: Minimum time value from the loaded data (for validation)
         """
         super().__init__()
         
+        self.min_time = float(min_time)
         self.max_time = max_time if max_time else 100.0
+        if self.max_time <= self.min_time:
+            self.max_time = self.min_time + 1.0
         self.events = []  # List of Event objects
         self.interactive_mode = False
         
@@ -324,7 +328,7 @@ class EventManagerWindow(QMainWindow):
     
     def _add_default_full_event(self):
         """Add default 'Full' event covering entire time range."""
-        full_event = Event("Full", 0.0, self.max_time)
+        full_event = Event("Full", self.min_time, self.max_time)
         self.events.append(full_event)
         self._update_table()
     
@@ -334,10 +338,10 @@ class EventManagerWindow(QMainWindow):
         event_num = len([e for e in self.events if e.name.startswith("Event")]) + 1
         name = f"Event {event_num}"
         
-        # Default to first 10 seconds or 10% of total time, whichever is smaller
-        default_duration = min(10.0, self.max_time * 0.1)
+        total_duration = self.max_time - self.min_time
+        default_duration = min(10.0, total_duration * 0.1)
         
-        event = Event(name, 0.0, default_duration)
+        event = Event(name, self.min_time, self.min_time + default_duration)
         self.events.append(event)
         self._update_table()
     
@@ -377,38 +381,41 @@ class EventManagerWindow(QMainWindow):
         
         # Apply template
         if template == "First 10 seconds":
-            duration = min(10.0, self.max_time)
-            self.events.append(Event("First 10s", 0.0, duration))
+            total_duration = self.max_time - self.min_time
+            duration = min(10.0, total_duration)
+            self.events.append(Event("First 10s", self.min_time, self.min_time + duration))
         
         elif template == "Last 10 seconds":
-            duration = min(10.0, self.max_time)
+            total_duration = self.max_time - self.min_time
+            duration = min(10.0, total_duration)
             self.events.append(Event("Last 10s", self.max_time - duration, self.max_time))
         
         elif template == "First 25%":
-            end_time = self.max_time * 0.25
-            self.events.append(Event("First 25%", 0.0, end_time))
+            end_time = self.min_time + (self.max_time - self.min_time) * 0.25
+            self.events.append(Event("First 25%", self.min_time, end_time))
         
         elif template == "Middle 50%":
-            start_time = self.max_time * 0.25
-            end_time = self.max_time * 0.75
+            span = self.max_time - self.min_time
+            start_time = self.min_time + span * 0.25
+            end_time = self.min_time + span * 0.75
             self.events.append(Event("Middle 50%", start_time, end_time))
         
         elif template == "Last 25%":
-            start_time = self.max_time * 0.75
+            start_time = self.min_time + (self.max_time - self.min_time) * 0.75
             self.events.append(Event("Last 25%", start_time, self.max_time))
         
         elif template == "Quarters (4 events)":
-            quarter = self.max_time / 4
-            self.events.append(Event("Q1", 0.0, quarter))
-            self.events.append(Event("Q2", quarter, 2 * quarter))
-            self.events.append(Event("Q3", 2 * quarter, 3 * quarter))
-            self.events.append(Event("Q4", 3 * quarter, self.max_time))
+            quarter = (self.max_time - self.min_time) / 4
+            self.events.append(Event("Q1", self.min_time, self.min_time + quarter))
+            self.events.append(Event("Q2", self.min_time + quarter, self.min_time + 2 * quarter))
+            self.events.append(Event("Q3", self.min_time + 2 * quarter, self.min_time + 3 * quarter))
+            self.events.append(Event("Q4", self.min_time + 3 * quarter, self.max_time))
         
         elif template == "Thirds (3 events)":
-            third = self.max_time / 3
-            self.events.append(Event("T1", 0.0, third))
-            self.events.append(Event("T2", third, 2 * third))
-            self.events.append(Event("T3", 2 * third, self.max_time))
+            third = (self.max_time - self.min_time) / 3
+            self.events.append(Event("T1", self.min_time, self.min_time + third))
+            self.events.append(Event("T2", self.min_time + third, self.min_time + 2 * third))
+            self.events.append(Event("T3", self.min_time + 2 * third, self.max_time))
         
         self._update_table()
         
@@ -463,10 +470,10 @@ class EventManagerWindow(QMainWindow):
             
             elif column == 2:  # Start time
                 start_time = float(self.table.item(row, column).text())
-                if start_time >= 0:
+                if start_time >= self.min_time:
                     event.start_time = start_time
                 else:
-                    raise ValueError("Start time must be >= 0")
+                    raise ValueError(f"Start time must be >= {self.min_time:.3f}")
             
             elif column == 3:  # End time
                 end_time = float(self.table.item(row, column).text())
@@ -485,7 +492,7 @@ class EventManagerWindow(QMainWindow):
     def _validate_events_for_apply(self):
         """Validate events before applying or saving."""
         errors = []
-        min_time = 0.0
+        min_time = self.min_time
         max_time = self.max_time
 
         for idx, event in enumerate(self.events, start=1):
@@ -588,8 +595,8 @@ class EventManagerWindow(QMainWindow):
         name = f"Event {event_num}"
         
         # Validate times
-        if start_time < 0:
-            start_time = 0
+        if start_time < self.min_time:
+            start_time = self.min_time
         if end_time > self.max_time:
             end_time = self.max_time
         if start_time >= end_time:
@@ -601,11 +608,27 @@ class EventManagerWindow(QMainWindow):
     
     def set_max_time(self, max_time):
         """Update maximum time value."""
-        self.max_time = max_time
+        self.max_time = float(max_time)
+        if self.max_time <= self.min_time:
+            self.max_time = self.min_time + 1.0
         
         # Update "Full" event if it exists
         if self.events and self.events[0].name == "Full":
-            self.events[0].end_time = max_time
+            self.events[0].start_time = self.min_time
+            self.events[0].end_time = self.max_time
+            self._update_table()
+
+    def set_time_bounds(self, min_time, max_time):
+        """Update minimum and maximum time bounds."""
+        self.min_time = float(min_time)
+        self.max_time = float(max_time)
+        if self.max_time <= self.min_time:
+            self.max_time = self.min_time + 1.0
+        
+        # Update "Full" event if it exists
+        if self.events and self.events[0].name == "Full":
+            self.events[0].start_time = self.min_time
+            self.events[0].end_time = self.max_time
             self._update_table()
 
     def clear_all_events(self):

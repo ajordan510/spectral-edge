@@ -18,9 +18,10 @@ Author: SpectralEdge Development Team
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit,
-    QGroupBox, QGridLayout, QRadioButton, QButtonGroup, QCheckBox, QScrollArea
+    QGroupBox, QGridLayout, QRadioButton, QButtonGroup, QCheckBox, QScrollArea,
+    QAbstractSpinBox
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QChildEvent
 from PyQt6.QtGui import QFont
 import pyqtgraph as pg
 import numpy as np
@@ -147,6 +148,7 @@ class SpectrogramWindow(QMainWindow):
         
         # Create UI
         self._create_ui(window_type, df, overlap_percent, efficient_fft, freq_min, freq_max)
+        self._enforce_spinbox_button_style()
         
         # Calculate initial spectrograms
         self._calculate_spectrograms()
@@ -189,9 +191,47 @@ class SpectrogramWindow(QMainWindow):
                 color: #e0e0e0;
                 border: 1px solid #4a5568;
                 border-radius: 3px;
-                padding: 8px;
+                padding: 6px;
                 font-size: 13px;
-                min-height: 25px;
+                min-height: 22px;
+            }
+            QSpinBox, QDoubleSpinBox {
+                padding-right: 24px;
+            }
+            QSpinBox::up-button, QDoubleSpinBox::up-button {
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 18px;
+                border-left: 1px solid #4a5568;
+                border-bottom: 1px solid #4a5568;
+                background-color: #3d4758;
+            }
+            QSpinBox::down-button, QDoubleSpinBox::down-button {
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 18px;
+                border-left: 1px solid #4a5568;
+                background-color: #3d4758;
+            }
+            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+            QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+                background-color: #4d5768;
+            }
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-bottom: 7px solid #e0e0e0;
+            }
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 7px solid #e0e0e0;
             }
             QRadioButton {
                 color: #e0e0e0;
@@ -206,6 +246,30 @@ class SpectrogramWindow(QMainWindow):
                 background-color: #1a1f2e;
             }
         """)
+
+    def _enforce_spinbox_button_style(self):
+        """Force robust up/down arrow behavior for all spinboxes."""
+        for spin in self.findChildren(QAbstractSpinBox):
+            self._configure_spinbox(spin)
+
+    def _configure_spinbox(self, spin: QAbstractSpinBox):
+        """Apply explicit up/down controls to a spinbox."""
+        if spin is None:
+            return
+        spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+        spin.setAccelerated(True)
+
+    def childEvent(self, event: QChildEvent):
+        """Ensure dynamically created spinboxes also use up/down arrows."""
+        super().childEvent(event)
+        child = event.child()
+        if isinstance(child, QAbstractSpinBox):
+            self._configure_spinbox(child)
+
+    def showEvent(self, event):
+        """Re-apply spinbox style after Qt style/polish passes."""
+        self._enforce_spinbox_button_style()
+        super().showEvent(event)
     
     def _create_ui(self, window_type, df, overlap_percent, efficient_fft, freq_min, freq_max):
         """Create the user interface."""

@@ -419,6 +419,55 @@ class TestOctaveBandAccuracy(unittest.TestCase):
                     )
                     self.assertGreater(len(oct_freq), len(oct_freq_1))
 
+    def test_octave_band_clamps_to_available_frequency_range(self):
+        """Requested max frequency above Nyquist should be clipped to available data."""
+        sample_rate = 100.0
+        duration = 20.0
+        time = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+        signal = np.sin(2 * np.pi * 10.0 * time) + 0.5 * np.sin(2 * np.pi * 20.0 * time)
+
+        frequencies, psd = calculate_psd_welch(signal, sample_rate, df=1.0)
+        oct_freq, oct_psd = convert_psd_to_octave_bands(
+            frequencies,
+            psd,
+            octave_fraction=3,
+            freq_min=1.0,
+            freq_max=2500.0,
+        )
+
+        self.assertGreater(len(oct_freq), 0)
+        self.assertLessEqual(np.max(oct_freq), frequencies[-1] + 1e-9)
+
+        finite_oct_psd = oct_psd[np.isfinite(oct_psd)]
+        self.assertTrue(np.all(finite_oct_psd >= 0))
+
+    def test_octave_band_with_zero_hz_input_avoids_log10_runtime_warning(self):
+        """Conversion should handle 0 Hz bins without divide-by-zero warnings."""
+        frequencies = np.array([0.0, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0, 50.0], dtype=np.float64)
+        psd = np.ones_like(frequencies, dtype=np.float64)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RuntimeWarning)
+            oct_freq, _ = convert_psd_to_octave_bands(
+                frequencies,
+                psd,
+                octave_fraction=3,
+                freq_min=0.0,
+                freq_max=2500.0,
+            )
+
+        divide_by_zero_log_warnings = [
+            warning
+            for warning in caught
+            if issubclass(warning.category, RuntimeWarning)
+            and "divide by zero" in str(warning.message).lower()
+            and "log10" in str(warning.message).lower()
+        ]
+
+        self.assertEqual(len(divide_by_zero_log_warnings), 0)
+        self.assertGreater(len(oct_freq), 0)
+        self.assertLessEqual(np.max(oct_freq), 50.0 + 1e-9)
+
 
 class TestPSDRobustness(unittest.TestCase):
     """Robustness tests - edge cases and error handling."""

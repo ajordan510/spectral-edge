@@ -20,23 +20,24 @@ Date: 2026-02-08
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QFileDialog,
-    QGroupBox, QGridLayout, QMessageBox, QSlider, QProgressDialog,
-    QLineEdit
+    QGroupBox, QGridLayout, QSlider, QProgressDialog,
+    QLineEdit, QCheckBox, QAbstractSpinBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QChildEvent
 from PyQt6.QtGui import QFont, QKeyEvent
 import os
-import sys
 import numpy as np
-import h5py
 from scipy import signal
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional
 from collections import OrderedDict
 import pyqtgraph as pg
+import pyqtgraph.exporters
+from matplotlib import colormaps
 
 # Import utilities
 from spectral_edge.utils.message_box import show_information, show_warning, show_critical
 from spectral_edge.utils.hdf5_loader import HDF5FlightDataLoader
+from spectral_edge.utils.theme import apply_context_menu_style
 
 
 class SpectrogramCache:
@@ -112,8 +113,8 @@ class SpectrogramGenerator(QThread):
     generation_complete = pyqtSignal(int, object)  # (segment_idx, (f, t, Sxx))
     generation_error = pyqtSignal(str)
     
-    def __init__(self, signal_data: np.ndarray, sample_rate: float, 
-                 nfft: int, overlap_pct: int, window: str):
+    def __init__(self, signal_data: np.ndarray, sample_rate: float,
+                 nperseg: int, noverlap: int, window: str):
         """
         Initialize spectrogram generator.
         
@@ -123,31 +124,35 @@ class SpectrogramGenerator(QThread):
             Signal data for this segment
         sample_rate : float
             Sample rate in Hz
-        nfft : int
-            FFT size
-        overlap_pct : int
-            Overlap percentage (0-99)
+        nperseg : int
+            Segment length for each FFT
+        noverlap : int
+            Overlapping samples between segments
         window : str
             Window function name
         """
         super().__init__()
         self.signal_data = signal_data
         self.sample_rate = sample_rate
-        self.nfft = nfft
-        self.overlap_pct = overlap_pct
+        self.nperseg = nperseg
+        self.noverlap = noverlap
         self.window = window
         self.segment_idx = 0
     
     def run(self):
         """Generate spectrogram in background thread."""
         try:
-            noverlap = int(self.nfft * self.overlap_pct / 100)
+            if len(self.signal_data) < 2:
+                raise ValueError("Segment is too short to compute a spectrogram")
+
+            nperseg = min(max(2, self.nperseg), len(self.signal_data))
+            noverlap = min(max(0, self.noverlap), nperseg - 1)
             
             f, t, Sxx = signal.spectrogram(
                 self.signal_data,
                 fs=self.sample_rate,
                 window=self.window,
-                nperseg=self.nfft,
+                nperseg=nperseg,
                 noverlap=noverlap,
                 scaling='density'
             )
@@ -158,299 +163,73 @@ class SpectrogramGenerator(QThread):
             self.generation_error.emit(str(e))
 
 
-class SegmentedSpectrogramViewer(QMainWindow):
+class SegmentedSpectrogramDisplayWindow(QMainWindow):
     """
-    Main window for Segmented Spectrogram Viewer.
-    
-    Allows users to view spectrograms of very long recordings by splitting
-    them into navigable segments.
+    Dedicated popup display window for segmented spectrogram plots.
     """
-    
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Segmented Spectrogram Viewer")
-        self.setMinimumSize(1000, 800)
-        
-        # State variables
-        self.hdf5_loader = None
-        self.signal_data = None
-        self.sample_rate = None
-        self.channel_name = None
-        self.flight_key = None
-        
-        self.segments = []  # List of (start_idx, end_idx) tuples
-        self.current_segment_idx = 0
-        self.spectrogram_cache = SpectrogramCache(max_size=10)
-        self.generator_thread = None
-        
-        # Create UI
+        self.setWindowTitle("Segmented Spectrogram Display")
+        self.setMinimumSize(1400, 900)
+        self.colorbar_item = None
         self._create_ui()
-        
-        # Apply styling
         self._apply_styling()
-    
+
     def _create_ui(self):
-        """Create the user interface."""
-        # Create central widget and main layout
+        """Create display UI with plot and navigation controls below it."""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(15)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        
-        # Title
-        title_label = QLabel("Segmented Spectrogram Viewer")
-        title_font = QFont("Arial", 16, QFont.Weight.Bold)
-        title_label.setFont(title_font)
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        main_layout.addWidget(title_label)
-        
-        # File selection
-        file_group = self._create_file_selection()
-        main_layout.addWidget(file_group)
-        
-        # Segmentation settings
-        seg_group = self._create_segmentation_settings()
-        main_layout.addWidget(seg_group)
-        
-        # Spectrogram display
-        display_group = self._create_spectrogram_display()
-        main_layout.addWidget(display_group)
-        
-        # Spectrogram parameters
-        params_group = self._create_spectrogram_parameters()
-        main_layout.addWidget(params_group)
-        
-        # Action buttons
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-        
-        self.export_current_button = QPushButton("Export Current")
-        self.export_current_button.setMinimumWidth(120)
-        self.export_current_button.setMinimumHeight(35)
-        self.export_current_button.clicked.connect(self._on_export_current_clicked)
-        self.export_current_button.setEnabled(False)
-        button_layout.addWidget(self.export_current_button)
-        
-        self.export_all_button = QPushButton("Export All")
-        self.export_all_button.setMinimumWidth(120)
-        self.export_all_button.setMinimumHeight(35)
-        self.export_all_button.clicked.connect(self._on_export_all_clicked)
-        self.export_all_button.setEnabled(False)
-        button_layout.addWidget(self.export_all_button)
-        
-        close_button = QPushButton("Close")
-        close_button.setMinimumWidth(120)
-        close_button.setMinimumHeight(35)
-        close_button.clicked.connect(self.close)
-        button_layout.addWidget(close_button)
-        
-        main_layout.addLayout(button_layout)
-    
-    def _create_file_selection(self) -> QGroupBox:
-        """Create file selection group."""
-        group = QGroupBox("Input File")
-        layout = QGridLayout()
-        
-        # File path selection
-        layout.addWidget(QLabel("File:"), 0, 0)
-        self.file_path_edit = QLineEdit()
-        self.file_path_edit.setPlaceholderText("Select HDF5 file...")
-        self.file_path_edit.setReadOnly(True)
-        layout.addWidget(self.file_path_edit, 0, 1)
-        
-        browse_button = QPushButton("Browse")
-        browse_button.setMinimumWidth(100)
-        browse_button.clicked.connect(self._on_browse_file_clicked)
-        layout.addWidget(browse_button, 0, 2)
-        
-        # File info
-        self.file_info_label = QLabel("No file selected")
-        self.file_info_label.setStyleSheet("color: #9ca3af; font-style: italic;")
-        layout.addWidget(self.file_info_label, 1, 0, 1, 3)
-        
-        # Flight selection
-        layout.addWidget(QLabel("Flight:"), 2, 0)
-        self.flight_combo = QComboBox()
-        self.flight_combo.setEnabled(False)
-        self.flight_combo.currentTextChanged.connect(self._on_flight_changed)
-        layout.addWidget(self.flight_combo, 2, 1, 1, 2)
-        
-        # Channel selection
-        layout.addWidget(QLabel("Channel:"), 3, 0)
-        self.channel_combo = QComboBox()
-        self.channel_combo.setEnabled(False)
-        self.channel_combo.currentTextChanged.connect(self._on_channel_changed)
-        layout.addWidget(self.channel_combo, 3, 1, 1, 2)
-        
-        group.setLayout(layout)
-        return group
-    
-    def _create_segmentation_settings(self) -> QGroupBox:
-        """Create segmentation settings group."""
-        group = QGroupBox("Segmentation Settings")
-        layout = QGridLayout()
-        
-        # Segment duration
-        layout.addWidget(QLabel("Segment Duration:"), 0, 0)
-        self.segment_duration_spin = QDoubleSpinBox()
-        self.segment_duration_spin.setMinimum(1.0)
-        self.segment_duration_spin.setMaximum(3600.0)
-        self.segment_duration_spin.setValue(60.0)
-        self.segment_duration_spin.setSuffix(" seconds")
-        self.segment_duration_spin.setEnabled(False)
-        layout.addWidget(self.segment_duration_spin, 0, 1)
-        
-        # Overlap
-        layout.addWidget(QLabel("Overlap:"), 1, 0)
-        self.segment_overlap_spin = QSpinBox()
-        self.segment_overlap_spin.setMinimum(0)
-        self.segment_overlap_spin.setMaximum(90)
-        self.segment_overlap_spin.setValue(50)
-        self.segment_overlap_spin.setSuffix(" %")
-        self.segment_overlap_spin.setEnabled(False)
-        layout.addWidget(self.segment_overlap_spin, 1, 1)
-        
-        # Total segments display
-        self.total_segments_label = QLabel("Total Segments: 0")
-        self.total_segments_label.setStyleSheet("color: #60a5fa; font-weight: bold;")
-        layout.addWidget(self.total_segments_label, 2, 0, 1, 2)
-        
-        # Generate button
-        self.generate_button = QPushButton("Generate Spectrograms")
-        self.generate_button.setMinimumHeight(35)
-        self.generate_button.setEnabled(False)
-        self.generate_button.clicked.connect(self._on_generate_clicked)
-        layout.addWidget(self.generate_button, 3, 0, 1, 2)
-        
-        group.setLayout(layout)
-        return group
-    
-    def _create_spectrogram_display(self) -> QGroupBox:
-        """Create spectrogram display group."""
-        group = QGroupBox("Spectrogram Display")
-        layout = QVBoxLayout()
-        
-        # Segment info
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+
         self.segment_info_label = QLabel("No segments generated")
         self.segment_info_label.setStyleSheet("color: #9ca3af; font-style: italic;")
         self.segment_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.segment_info_label)
-        
-        # Spectrogram plot
+        main_layout.addWidget(self.segment_info_label)
+
         self.spectrogram_plot = pg.PlotWidget()
-        self.spectrogram_plot.setMinimumHeight(400)
+        self.spectrogram_plot.setMinimumHeight(700)
         self.spectrogram_plot.setLabel('left', 'Frequency', units='Hz', color='#e0e0e0', size='11pt')
         self.spectrogram_plot.setLabel('bottom', 'Time', units='s', color='#e0e0e0', size='11pt')
         self.spectrogram_plot.setBackground('#1a1f2e')
-        layout.addWidget(self.spectrogram_plot)
-        
-        # Navigation controls
-        nav_layout = QHBoxLayout()
-        
-        self.first_button = QPushButton("◄◄ First")
+        self.spectrogram_plot.showGrid(x=True, y=True, alpha=0.25)
+        apply_context_menu_style(self.spectrogram_plot)
+        main_layout.addWidget(self.spectrogram_plot, stretch=1)
+
+        self.nav_container = QWidget()
+        nav_layout = QHBoxLayout(self.nav_container)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(8)
+
+        self.first_button = QPushButton("<< First")
         self.first_button.setEnabled(False)
-        self.first_button.clicked.connect(self._on_first_clicked)
         nav_layout.addWidget(self.first_button)
-        
-        self.prev_button = QPushButton("◄ Prev")
+
+        self.prev_button = QPushButton("< Prev")
         self.prev_button.setEnabled(False)
-        self.prev_button.clicked.connect(self._on_prev_clicked)
         nav_layout.addWidget(self.prev_button)
-        
+
         self.segment_slider = QSlider(Qt.Orientation.Horizontal)
         self.segment_slider.setMinimum(0)
         self.segment_slider.setMaximum(0)
         self.segment_slider.setValue(0)
         self.segment_slider.setEnabled(False)
-        self.segment_slider.valueChanged.connect(self._on_slider_changed)
         nav_layout.addWidget(self.segment_slider, stretch=1)
-        
-        self.next_button = QPushButton("Next ►")
+
+        self.next_button = QPushButton("Next >")
         self.next_button.setEnabled(False)
-        self.next_button.clicked.connect(self._on_next_clicked)
         nav_layout.addWidget(self.next_button)
-        
-        self.last_button = QPushButton("Last ►►")
+
+        self.last_button = QPushButton("Last >>")
         self.last_button.setEnabled(False)
-        self.last_button.clicked.connect(self._on_last_clicked)
         nav_layout.addWidget(self.last_button)
-        
-        layout.addLayout(nav_layout)
-        
-        group.setLayout(layout)
-        return group
-    
-    def _create_spectrogram_parameters(self) -> QGroupBox:
-        """Create spectrogram parameters group."""
-        group = QGroupBox("Spectrogram Parameters")
-        layout = QGridLayout()
-        
-        # NFFT
-        layout.addWidget(QLabel("NFFT:"), 0, 0)
-        self.nfft_spin = QSpinBox()
-        self.nfft_spin.setMinimum(128)
-        self.nfft_spin.setMaximum(65536)
-        self.nfft_spin.setValue(2048)
-        self.nfft_spin.setSingleStep(128)
-        layout.addWidget(self.nfft_spin, 0, 1)
-        
-        # Overlap
-        layout.addWidget(QLabel("Overlap:"), 0, 2)
-        self.spec_overlap_spin = QSpinBox()
-        self.spec_overlap_spin.setMinimum(0)
-        self.spec_overlap_spin.setMaximum(99)
-        self.spec_overlap_spin.setValue(75)
-        self.spec_overlap_spin.setSuffix(" %")
-        layout.addWidget(self.spec_overlap_spin, 0, 3)
-        
-        # Window function
-        layout.addWidget(QLabel("Window:"), 1, 0)
-        self.window_combo = QComboBox()
-        self.window_combo.addItems(['hann', 'hamming', 'blackman', 'bartlett'])
-        layout.addWidget(self.window_combo, 1, 1)
-        
-        # Frequency range
-        layout.addWidget(QLabel("Freq Range:"), 1, 2)
-        freq_range_layout = QHBoxLayout()
-        self.freq_min_spin = QDoubleSpinBox()
-        self.freq_min_spin.setMinimum(0)
-        self.freq_min_spin.setMaximum(1000000)
-        self.freq_min_spin.setValue(0)
-        self.freq_min_spin.setSuffix(" Hz")
-        freq_range_layout.addWidget(self.freq_min_spin)
-        
-        freq_range_layout.addWidget(QLabel("-"))
-        
-        self.freq_max_spin = QDoubleSpinBox()
-        self.freq_max_spin.setMinimum(0)
-        self.freq_max_spin.setMaximum(1000000)
-        self.freq_max_spin.setValue(25000)
-        self.freq_max_spin.setSuffix(" Hz")
-        freq_range_layout.addWidget(self.freq_max_spin)
-        
-        layout.addLayout(freq_range_layout, 1, 3)
-        
-        # Update buttons
-        button_layout = QHBoxLayout()
-        
-        self.update_current_button = QPushButton("Update Current Segment")
-        self.update_current_button.setEnabled(False)
-        self.update_current_button.clicked.connect(self._on_update_current_clicked)
-        button_layout.addWidget(self.update_current_button)
-        
-        self.update_all_button = QPushButton("Update All Segments")
-        self.update_all_button.setEnabled(False)
-        self.update_all_button.clicked.connect(self._on_update_all_clicked)
-        button_layout.addWidget(self.update_all_button)
-        
-        layout.addLayout(button_layout, 2, 0, 1, 4)
-        
-        group.setLayout(layout)
-        return group
-    
+
+        main_layout.addWidget(self.nav_container)
+
     def _apply_styling(self):
-        """Apply dark theme styling."""
+        """Apply dark theme styling for popup."""
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #1a1f2e;
@@ -459,23 +238,11 @@ class SegmentedSpectrogramViewer(QMainWindow):
                 background-color: #1a1f2e;
                 color: #e0e0e0;
             }
-            QGroupBox {
-                border: 1px solid #4a5568;
-                border-radius: 5px;
-                margin-top: 10px;
-                padding-top: 10px;
-                font-weight: bold;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
             QPushButton {
                 background-color: #3b82f6;
                 color: white;
                 border: none;
-                padding: 8px 16px;
+                padding: 6px 14px;
                 border-radius: 4px;
                 font-weight: bold;
             }
@@ -488,13 +255,6 @@ class SegmentedSpectrogramViewer(QMainWindow):
             QPushButton:disabled {
                 background-color: #4a5568;
                 color: #9ca3af;
-            }
-            QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
-                background-color: #2d3748;
-                border: 1px solid #4a5568;
-                border-radius: 4px;
-                padding: 6px;
-                color: #e0e0e0;
             }
             QSlider::groove:horizontal {
                 border: 1px solid #4a5568;
@@ -513,6 +273,621 @@ class SegmentedSpectrogramViewer(QMainWindow):
                 background: #60a5fa;
             }
         """)
+
+    def set_navigation_enabled(self, enabled: bool):
+        """Enable/disable all navigation controls."""
+        self.segment_slider.setEnabled(enabled)
+        self.first_button.setEnabled(enabled)
+        self.prev_button.setEnabled(enabled)
+        self.next_button.setEnabled(enabled)
+        self.last_button.setEnabled(enabled)
+
+
+class SegmentedSpectrogramViewer(QMainWindow):
+    """
+    Main window for Segmented Spectrogram Viewer.
+    
+    Allows users to view spectrograms of very long recordings by splitting
+    them into navigable segments.
+    """
+    
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Segmented Spectrogram Viewer")
+        self.setMinimumSize(1050, 820)
+        
+        # State variables
+        self.hdf5_loader = None
+        self.signal_data = None
+        self.sample_rate = None
+        self.channel_name = None
+        self.flight_key = None
+        
+        self.segments = []  # List of (start_idx, end_idx) tuples
+        self.current_segment_idx = 0
+        self.spectrogram_cache = SpectrogramCache(max_size=10)
+        self.generator_thread = None
+        self.display_window = None
+        
+        # Create UI
+        self._create_ui()
+        
+        # Apply styling
+        self._apply_styling()
+        self._enforce_spinbox_button_style()
+    
+    def _create_ui(self):
+        """Create the user interface."""
+        # Create central widget and main layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(14, 14, 14, 14)
+        
+        # Title
+        title_label = QLabel("Segmented Spectrogram Viewer")
+        title_font = QFont("Arial", 16, QFont.Weight.Bold)
+        title_label.setFont(title_font)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(title_label)
+        
+        # File selection
+        file_group = self._create_file_selection()
+        main_layout.addWidget(file_group)
+        
+        # Segmentation settings
+        seg_group = self._create_segmentation_settings()
+        main_layout.addWidget(seg_group)
+        
+        # Spectrogram parameters
+        params_group = self._create_spectrogram_parameters()
+        main_layout.addWidget(params_group)
+
+        self.display_hint_label = QLabel(
+            "Spectrogram display opens in a dedicated popup window after generation."
+        )
+        self.display_hint_label.setStyleSheet("color: #9ca3af; font-style: italic;")
+        main_layout.addWidget(self.display_hint_label)
+        
+        # Action buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        self.export_current_button = QPushButton("Export Current")
+        self.export_current_button.setMinimumWidth(130)
+        self.export_current_button.setMinimumHeight(35)
+        self.export_current_button.clicked.connect(self._on_export_current_clicked)
+        self.export_current_button.setEnabled(False)
+        button_layout.addWidget(self.export_current_button)
+        
+        self.export_all_button = QPushButton("Export All")
+        self.export_all_button.setMinimumWidth(130)
+        self.export_all_button.setMinimumHeight(35)
+        self.export_all_button.clicked.connect(self._on_export_all_clicked)
+        self.export_all_button.setEnabled(False)
+        button_layout.addWidget(self.export_all_button)
+        
+        close_button = QPushButton("Close")
+        close_button.setMinimumWidth(130)
+        close_button.setMinimumHeight(35)
+        close_button.clicked.connect(self.close)
+        button_layout.addWidget(close_button)
+        
+        main_layout.addLayout(button_layout)
+    
+    def _create_file_selection(self) -> QGroupBox:
+        """Create file selection group."""
+        group = QGroupBox("Input File")
+        layout = QGridLayout()
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(6)
+        
+        # File path selection
+        layout.addWidget(
+            QLabel("File:"),
+            0,
+            0,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.file_path_edit = QLineEdit()
+        self.file_path_edit.setPlaceholderText("Select HDF5 file...")
+        self.file_path_edit.setReadOnly(True)
+        layout.addWidget(self.file_path_edit, 0, 1)
+        
+        browse_button = QPushButton("Browse")
+        browse_button.setMinimumWidth(100)
+        browse_button.clicked.connect(self._on_browse_file_clicked)
+        layout.addWidget(browse_button, 0, 2)
+        
+        # File info
+        self.file_info_label = QLabel("No file selected")
+        self.file_info_label.setStyleSheet("color: #9ca3af; font-style: italic;")
+        layout.addWidget(self.file_info_label, 1, 0, 1, 3)
+        
+        # Flight selection
+        layout.addWidget(
+            QLabel("Flight:"),
+            2,
+            0,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.flight_combo = QComboBox()
+        self.flight_combo.setEnabled(False)
+        self.flight_combo.currentTextChanged.connect(self._on_flight_changed)
+        layout.addWidget(self.flight_combo, 2, 1, 1, 2)
+        
+        # Channel selection
+        layout.addWidget(
+            QLabel("Channel:"),
+            3,
+            0,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.channel_combo = QComboBox()
+        self.channel_combo.setEnabled(False)
+        self.channel_combo.currentTextChanged.connect(self._on_channel_changed)
+        layout.addWidget(self.channel_combo, 3, 1, 1, 2)
+        
+        layout.setColumnStretch(1, 1)
+        group.setLayout(layout)
+        return group
+    
+    def _create_segmentation_settings(self) -> QGroupBox:
+        """Create segmentation settings group."""
+        group = QGroupBox("Segmentation Settings")
+        layout = QGridLayout()
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(6)
+        
+        # Segment duration
+        layout.addWidget(
+            QLabel("Segment Duration:"),
+            0,
+            0,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.segment_duration_spin = QDoubleSpinBox()
+        self.segment_duration_spin.setMinimum(1.0)
+        self.segment_duration_spin.setMaximum(3600.0)
+        self.segment_duration_spin.setValue(60.0)
+        self.segment_duration_spin.setSuffix(" s")
+        self.segment_duration_spin.setMaximumWidth(180)
+        self.segment_duration_spin.setEnabled(False)
+        layout.addWidget(self.segment_duration_spin, 0, 1)
+        
+        # Overlap
+        layout.addWidget(
+            QLabel("Overlap:"),
+            1,
+            0,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.segment_overlap_spin = QSpinBox()
+        self.segment_overlap_spin.setMinimum(0)
+        self.segment_overlap_spin.setMaximum(90)
+        self.segment_overlap_spin.setValue(50)
+        self.segment_overlap_spin.setSuffix(" %")
+        self.segment_overlap_spin.setEnabled(False)
+        self.segment_overlap_spin.setMaximumWidth(180)
+        layout.addWidget(self.segment_overlap_spin, 1, 1)
+        
+        # Total segments display
+        self.total_segments_label = QLabel("Total Segments: 0")
+        self.total_segments_label.setStyleSheet("color: #60a5fa; font-weight: bold;")
+        layout.addWidget(self.total_segments_label, 2, 0, 1, 2)
+        
+        # Generate button
+        self.generate_button = QPushButton("Generate Spectrograms")
+        self.generate_button.setMinimumHeight(35)
+        self.generate_button.setEnabled(False)
+        self.generate_button.clicked.connect(self._on_generate_clicked)
+        layout.addWidget(self.generate_button, 3, 0, 1, 2)
+        
+        layout.setColumnStretch(1, 1)
+        group.setLayout(layout)
+        return group
+    
+    def _create_spectrogram_parameters(self) -> QGroupBox:
+        """Create spectrogram parameters group."""
+        group = QGroupBox("Spectrogram Parameters")
+        layout = QGridLayout()
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(6)
+
+        row = 0
+
+        layout.addWidget(QLabel("Window:"), row, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.window_combo = QComboBox()
+        self.window_combo.addItems(['hann', 'hamming', 'blackman', 'bartlett'])
+        self.window_combo.setMaximumWidth(180)
+        layout.addWidget(self.window_combo, row, 1)
+
+        layout.addWidget(QLabel("Overlap (%):"), row, 2, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.spec_overlap_spin = QSpinBox()
+        self.spec_overlap_spin.setRange(0, 95)
+        self.spec_overlap_spin.setValue(75)
+        self.spec_overlap_spin.setSuffix(" %")
+        self.spec_overlap_spin.setMaximumWidth(180)
+        layout.addWidget(self.spec_overlap_spin, row, 3)
+        row += 1
+
+        layout.addWidget(QLabel("df (Hz):"), row, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.df_spin = QDoubleSpinBox()
+        self.df_spin.setRange(0.01, 1000.0)
+        self.df_spin.setDecimals(2)
+        self.df_spin.setSingleStep(0.1)
+        self.df_spin.setValue(1.0)
+        self.df_spin.setMaximumWidth(180)
+        layout.addWidget(self.df_spin, row, 1)
+
+        layout.addWidget(QLabel("Freq Min (Hz):"), row, 2, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.freq_min_spin = QDoubleSpinBox()
+        self.freq_min_spin.setRange(0, 1000000)
+        self.freq_min_spin.setValue(0.0)
+        self.freq_min_spin.setMaximumWidth(180)
+        layout.addWidget(self.freq_min_spin, row, 3)
+        row += 1
+
+        self.efficient_fft_checkbox = QCheckBox("Use efficient FFT size")
+        self.efficient_fft_checkbox.setChecked(True)
+        self.efficient_fft_checkbox.setToolTip("Round segment length to nearest power of two for faster FFT computation")
+        layout.addWidget(self.efficient_fft_checkbox, row, 0, 1, 2)
+
+        self.actual_df_label = QLabel("(actual df = --)")
+        self.actual_df_label.setStyleSheet("color: #9ca3af; font-size: 10pt;")
+        layout.addWidget(self.actual_df_label, row, 2, 1, 2)
+        row += 1
+
+        layout.addWidget(QLabel("Freq Max (Hz):"), row, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.freq_max_spin = QDoubleSpinBox()
+        self.freq_max_spin.setRange(0, 1000000)
+        self.freq_max_spin.setValue(25000.0)
+        self.freq_max_spin.setMaximumWidth(180)
+        layout.addWidget(self.freq_max_spin, row, 1)
+
+        layout.addWidget(QLabel("Colormap:"), row, 2, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.colormap_combo = QComboBox()
+        self.colormap_combo.addItems(['viridis', 'plasma', 'inferno', 'magma', 'jet', 'hot', 'cool'])
+        self.colormap_combo.setCurrentText('viridis')
+        self.colormap_combo.setMaximumWidth(180)
+        layout.addWidget(self.colormap_combo, row, 3)
+        row += 1
+
+        layout.addWidget(QLabel("SNR (dB):"), row, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.snr_spin = QSpinBox()
+        self.snr_spin.setRange(10, 100)
+        self.snr_spin.setSingleStep(5)
+        self.snr_spin.setValue(60)
+        self.snr_spin.setMaximumWidth(180)
+        layout.addWidget(self.snr_spin, row, 1)
+
+        self.show_colorbar_checkbox = QCheckBox("Show colorbar")
+        self.show_colorbar_checkbox.setChecked(True)
+        layout.addWidget(self.show_colorbar_checkbox, row, 2, 1, 2)
+        row += 1
+
+        self.auto_limits_checkbox = QCheckBox("Auto axis limits")
+        self.auto_limits_checkbox.setChecked(True)
+        layout.addWidget(self.auto_limits_checkbox, row, 0, 1, 2)
+
+        self.apply_limits_button = QPushButton("Apply Axis Limits")
+        self.apply_limits_button.setEnabled(False)
+        self.apply_limits_button.clicked.connect(self._apply_manual_axis_limits)
+        layout.addWidget(self.apply_limits_button, row, 2, 1, 2)
+        row += 1
+
+        layout.addWidget(QLabel("X Min (s):"), row, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.time_min_edit = QLineEdit("0.0")
+        self.time_min_edit.setEnabled(False)
+        self.time_min_edit.setMaximumWidth(180)
+        layout.addWidget(self.time_min_edit, row, 1)
+
+        layout.addWidget(QLabel("X Max (s):"), row, 2, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.time_max_edit = QLineEdit("100.0")
+        self.time_max_edit.setEnabled(False)
+        self.time_max_edit.setMaximumWidth(180)
+        layout.addWidget(self.time_max_edit, row, 3)
+        row += 1
+
+        layout.addWidget(QLabel("Y Min (Hz):"), row, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.freq_axis_min_edit = QLineEdit("0.0")
+        self.freq_axis_min_edit.setEnabled(False)
+        self.freq_axis_min_edit.setMaximumWidth(180)
+        layout.addWidget(self.freq_axis_min_edit, row, 1)
+
+        layout.addWidget(QLabel("Y Max (Hz):"), row, 2, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.freq_axis_max_edit = QLineEdit("1000.0")
+        self.freq_axis_max_edit.setEnabled(False)
+        self.freq_axis_max_edit.setMaximumWidth(180)
+        layout.addWidget(self.freq_axis_max_edit, row, 3)
+        row += 1
+
+        self.update_current_button = QPushButton("Update Current Segment")
+        self.update_current_button.setEnabled(False)
+        self.update_current_button.clicked.connect(self._on_update_current_clicked)
+        layout.addWidget(self.update_current_button, row, 0, 1, 2)
+
+        self.update_all_button = QPushButton("Update All Segments")
+        self.update_all_button.setEnabled(False)
+        self.update_all_button.clicked.connect(self._on_update_all_clicked)
+        layout.addWidget(self.update_all_button, row, 2, 1, 2)
+
+        layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(3, 1)
+
+        self.df_spin.valueChanged.connect(self._refresh_actual_df_preview)
+        self.efficient_fft_checkbox.toggled.connect(self._refresh_actual_df_preview)
+        self.spec_overlap_spin.valueChanged.connect(self._refresh_actual_df_preview)
+
+        self.colormap_combo.currentTextChanged.connect(self._replot_current_from_cache)
+        self.snr_spin.valueChanged.connect(self._replot_current_from_cache)
+        self.show_colorbar_checkbox.toggled.connect(self._replot_current_from_cache)
+        self.freq_min_spin.valueChanged.connect(self._replot_current_from_cache)
+        self.freq_max_spin.valueChanged.connect(self._replot_current_from_cache)
+        self.auto_limits_checkbox.toggled.connect(self._on_auto_limits_toggled)
+
+        group.setLayout(layout)
+        return group
+
+    def _apply_styling(self):
+        """Apply dark theme styling."""
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #1a1f2e;
+            }
+            QWidget {
+                background-color: #1a1f2e;
+                color: #e0e0e0;
+            }
+            QGroupBox {
+                border: 1px solid #4a5568;
+                border-radius: 5px;
+                margin-top: 8px;
+                padding-top: 8px;
+                font-weight: bold;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+            QPushButton {
+                background-color: #3b82f6;
+                color: white;
+                border: none;
+                padding: 6px 14px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2563eb;
+            }
+            QPushButton:pressed {
+                background-color: #1d4ed8;
+            }
+            QPushButton:disabled {
+                background-color: #4a5568;
+                color: #9ca3af;
+            }
+            QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+                background-color: #2d3748;
+                border: 1px solid #4a5568;
+                border-radius: 4px;
+                padding: 4px;
+                color: #e0e0e0;
+            }
+            QSpinBox, QDoubleSpinBox {
+                padding-right: 24px;
+            }
+            QSpinBox::up-button, QDoubleSpinBox::up-button {
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 18px;
+                border-left: 1px solid #4a5568;
+                border-bottom: 1px solid #4a5568;
+                background-color: #3d4758;
+            }
+            QSpinBox::down-button, QDoubleSpinBox::down-button {
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 18px;
+                border-left: 1px solid #4a5568;
+                background-color: #3d4758;
+            }
+            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+            QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+                background-color: #4d5768;
+            }
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-bottom: 7px solid #e0e0e0;
+            }
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 7px solid #e0e0e0;
+            }
+            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
+                border: 1px solid #60a5fa;
+            }
+            QSlider::groove:horizontal {
+                border: 1px solid #4a5568;
+                height: 8px;
+                background: #2d3748;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #3b82f6;
+                border: 1px solid #2563eb;
+                width: 18px;
+                margin: -5px 0;
+                border-radius: 9px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #60a5fa;
+            }
+        """)
+
+    def _enforce_spinbox_button_style(self):
+        """Force robust up/down arrow behavior for all spinboxes."""
+        for spin in self.findChildren(QAbstractSpinBox):
+            self._configure_spinbox(spin)
+
+    def _configure_spinbox(self, spin: QAbstractSpinBox):
+        """Apply explicit up/down controls to a spinbox."""
+        if spin is None:
+            return
+        spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+        spin.setAccelerated(True)
+
+    def childEvent(self, event: QChildEvent):
+        """Ensure dynamically created spinboxes use up/down arrows."""
+        super().childEvent(event)
+        child = event.child()
+        if isinstance(child, QAbstractSpinBox):
+            self._configure_spinbox(child)
+
+    def showEvent(self, event):
+        """Re-apply spinbox style after Qt style/polish passes."""
+        self._enforce_spinbox_button_style()
+        super().showEvent(event)
+
+    def _ensure_display_window(self):
+        """Create popup display window and connect navigation if needed."""
+        if self.display_window is None:
+            self.display_window = SegmentedSpectrogramDisplayWindow()
+            self.display_window.first_button.clicked.connect(self._on_first_clicked)
+            self.display_window.prev_button.clicked.connect(self._on_prev_clicked)
+            self.display_window.next_button.clicked.connect(self._on_next_clicked)
+            self.display_window.last_button.clicked.connect(self._on_last_clicked)
+            self.display_window.segment_slider.valueChanged.connect(self._on_slider_changed)
+
+        self.display_window.show()
+        self.display_window.raise_()
+
+    def _set_navigation_enabled(self, enabled: bool):
+        """Enable or disable navigation controls on popup window."""
+        if self.display_window is not None:
+            self.display_window.set_navigation_enabled(enabled)
+
+    def _refresh_actual_df_preview(self):
+        """Update the actual df preview based on sample rate and FFT settings."""
+        if self.sample_rate and self.sample_rate > 0:
+            nperseg, _, actual_df = self._calculate_fft_parameters()
+            self.actual_df_label.setText(f"(actual df = {actual_df:.3f} Hz, nperseg={nperseg})")
+        else:
+            self.actual_df_label.setText("(actual df = --)")
+
+    def _calculate_fft_parameters(self, sample_count: Optional[int] = None) -> Tuple[int, int, float]:
+        """Compute nperseg/noverlap from df and overlap controls."""
+        if not self.sample_rate or self.sample_rate <= 0:
+            return 256, 128, 0.0
+
+        requested_df = max(self.df_spin.value(), 1e-6)
+        nperseg = max(2, int(round(self.sample_rate / requested_df)))
+
+        if self.efficient_fft_checkbox.isChecked() and nperseg > 1:
+            nperseg = 2 ** int(np.ceil(np.log2(nperseg)))
+
+        if sample_count is not None:
+            nperseg = min(nperseg, max(2, sample_count))
+
+        noverlap = int(round(nperseg * self.spec_overlap_spin.value() / 100.0))
+        noverlap = min(max(0, noverlap), nperseg - 1)
+        actual_df = self.sample_rate / float(nperseg)
+        return nperseg, noverlap, actual_df
+
+    def _set_axis_input_enabled(self, enabled: bool):
+        """Enable or disable manual axis controls."""
+        self.time_min_edit.setEnabled(enabled)
+        self.time_max_edit.setEnabled(enabled)
+        self.freq_axis_min_edit.setEnabled(enabled)
+        self.freq_axis_max_edit.setEnabled(enabled)
+        self.apply_limits_button.setEnabled(enabled)
+
+    def _on_auto_limits_toggled(self, checked: bool):
+        """Handle auto/manual axis limit mode changes."""
+        self._set_axis_input_enabled(not checked)
+        if checked:
+            self._replot_current_from_cache()
+
+    def _parse_manual_axis_limits(self, show_error: bool) -> Optional[Tuple[float, float, float, float]]:
+        """Parse and validate manual axis limit inputs."""
+        try:
+            x_min = float(self.time_min_edit.text())
+            x_max = float(self.time_max_edit.text())
+            y_min = float(self.freq_axis_min_edit.text())
+            y_max = float(self.freq_axis_max_edit.text())
+        except ValueError:
+            if show_error:
+                show_warning(
+                    self,
+                    "Invalid Limits",
+                    "Axis limits must be numeric values (standard or scientific notation).",
+                )
+            return None
+
+        if x_min >= x_max:
+            if show_error:
+                show_warning(self, "Invalid Limits", "X-axis minimum must be less than maximum.")
+            return None
+        if y_min >= y_max:
+            if show_error:
+                show_warning(self, "Invalid Limits", "Y-axis minimum must be less than maximum.")
+            return None
+        if y_min < 0:
+            if show_error:
+                show_warning(self, "Invalid Limits", "Y-axis limits must be non-negative.")
+            return None
+        return x_min, x_max, y_min, y_max
+
+    def _apply_manual_axis_limits(self):
+        """Apply manual axis limits when auto mode is disabled."""
+        if self.auto_limits_checkbox.isChecked() or self.display_window is None:
+            return
+
+        limits = self._parse_manual_axis_limits(show_error=True)
+        if limits is None:
+            return
+
+        x_min, x_max, y_min, y_max = limits
+        self.display_window.spectrogram_plot.setXRange(x_min, x_max, padding=0)
+        self.display_window.spectrogram_plot.setYRange(y_min, y_max, padding=0)
+
+    def _remove_colorbar(self):
+        """Remove existing colorbar from popup display."""
+        if self.display_window is None or self.display_window.colorbar_item is None:
+            return
+        try:
+            self.display_window.spectrogram_plot.plotItem.layout.removeItem(self.display_window.colorbar_item)
+        except Exception:
+            pass
+        self.display_window.colorbar_item = None
+
+    def _replot_current_from_cache(self):
+        """Re-render current segment using cached data and display settings."""
+        if not self.segments or self.sample_rate is None:
+            return
+
+        cached_spec = self.spectrogram_cache.get(self.current_segment_idx)
+        if cached_spec is None:
+            return
+
+        start_idx, _ = self.segments[self.current_segment_idx]
+        start_time = start_idx / self.sample_rate
+        f, t, Sxx = cached_spec
+        self._plot_spectrogram(f, t, Sxx, start_time)
     
     # Event handlers
     
@@ -571,342 +946,385 @@ class SegmentedSpectrogramViewer(QMainWindow):
         """Handle channel selection change."""
         channel_name = self.channel_combo.currentText()
         flight_key = self.flight_combo.currentText()
-        
+
         if not channel_name or not flight_key or not self.hdf5_loader:
             return
-        
+
         try:
-            # Load channel data
             data_dict = self.hdf5_loader.load_channel_data(
-                flight_key, channel_name,
-                decimate_for_display=False  # Always use full resolution
+                flight_key,
+                channel_name,
+                decimate_for_display=False,
             )
-            
+
             self.signal_data = data_dict['data_full']
-            self.sample_rate = data_dict['sample_rate']
+            self.sample_rate = float(data_dict['sample_rate'])
             self.channel_name = channel_name
             self.flight_key = flight_key
-            
-            # Update UI
+
             duration = len(self.signal_data) / self.sample_rate
             self.file_info_label.setText(
                 f"Size: {os.path.getsize(self.file_path_edit.text()) / (1024 * 1024):.1f} MB | "
                 f"Duration: {duration:.1f}s | "
                 f"Sample Rate: {self.sample_rate:.0f} Hz"
             )
-            
-            # Enable segmentation controls
+
             self.segment_duration_spin.setEnabled(True)
             self.segment_overlap_spin.setEnabled(True)
             self.generate_button.setEnabled(True)
-            
-            # Update frequency range max
-            nyquist = self.sample_rate / 2
+
+            nyquist = self.sample_rate / 2.0
             self.freq_max_spin.setMaximum(nyquist)
-            self.freq_max_spin.setValue(min(nyquist, 25000))
-            
+            self.freq_max_spin.setValue(min(nyquist, 25000.0))
+            self.freq_axis_max_edit.setText(f"{nyquist:.3f}")
+            self._refresh_actual_df_preview()
+
         except Exception as e:
             show_critical(self, "Error", f"Failed to load channel data:\n\n{str(e)}")
-    
+
     def _on_generate_clicked(self):
         """Handle generate spectrograms button click."""
-        if self.signal_data is None:
+        if self.signal_data is None or self.sample_rate is None:
             return
-        
-        # Calculate segments
+
         segment_duration = self.segment_duration_spin.value()
         overlap_pct = self.segment_overlap_spin.value()
-        
+
         segment_samples = int(segment_duration * self.sample_rate)
-        overlap_samples = int(segment_samples * overlap_pct / 100)
-        step_samples = segment_samples - overlap_samples
-        
+        overlap_samples = int(segment_samples * overlap_pct / 100.0)
+        step_samples = max(1, segment_samples - overlap_samples)
+
         total_samples = len(self.signal_data)
-        
-        # Generate segment boundaries
+
         self.segments = []
         start_idx = 0
-        
         while start_idx < total_samples:
             end_idx = min(start_idx + segment_samples, total_samples)
             self.segments.append((start_idx, end_idx))
-            
             if end_idx >= total_samples:
                 break
-            
             start_idx += step_samples
-        
-        # Update UI
+
         self.total_segments_label.setText(f"Total Segments: {len(self.segments)}")
         self.current_segment_idx = 0
-        
-        # Enable navigation
-        self.segment_slider.setMaximum(len(self.segments) - 1)
-        self.segment_slider.setValue(0)
-        self.segment_slider.setEnabled(True)
-        self.first_button.setEnabled(True)
-        self.prev_button.setEnabled(True)
-        self.next_button.setEnabled(True)
-        self.last_button.setEnabled(True)
+
+        self._ensure_display_window()
+        self.display_window.segment_slider.setMaximum(max(0, len(self.segments) - 1))
+        self.display_window.segment_slider.setValue(0)
+        self._set_navigation_enabled(True)
+
         self.update_current_button.setEnabled(True)
         self.update_all_button.setEnabled(True)
         self.export_current_button.setEnabled(True)
         self.export_all_button.setEnabled(True)
-        
-        # Clear cache
+
         self.spectrogram_cache.clear()
-        
-        # Display first segment
         self._display_segment(0)
-    
+
     def _display_segment(self, segment_idx: int):
         """Display spectrogram for the given segment."""
-        if segment_idx < 0 or segment_idx >= len(self.segments):
+        if segment_idx < 0 or segment_idx >= len(self.segments) or self.sample_rate is None:
             return
-        
+
+        self._ensure_display_window()
         self.current_segment_idx = segment_idx
-        
-        # Update segment info
+
         start_idx, end_idx = self.segments[segment_idx]
         start_time = start_idx / self.sample_rate
         end_time = end_idx / self.sample_rate
         duration = (end_idx - start_idx) / self.sample_rate
-        
-        self.segment_info_label.setText(
+
+        self.display_window.segment_info_label.setText(
             f"Segment {segment_idx + 1} of {len(self.segments)} | "
-            f"Time: {start_time:.1f}s - {end_time:.1f}s ({duration:.1f}s)"
+            f"Time: {start_time:.2f}s - {end_time:.2f}s ({duration:.2f}s)"
         )
-        self.segment_info_label.setStyleSheet("color: #60a5fa; font-weight: bold;")
-        
-        # Check cache
+        self.display_window.segment_info_label.setStyleSheet("color: #60a5fa; font-weight: bold;")
+
+        self.display_window.segment_slider.blockSignals(True)
+        self.display_window.segment_slider.setValue(segment_idx)
+        self.display_window.segment_slider.blockSignals(False)
+
         cached_spec = self.spectrogram_cache.get(segment_idx)
-        
         if cached_spec is not None:
-            # Use cached spectrogram
             f, t, Sxx = cached_spec
             self._plot_spectrogram(f, t, Sxx, start_time)
-        else:
-            # Generate new spectrogram
-            segment_data = self.signal_data[start_idx:end_idx]
-            
-            nfft = self.nfft_spin.value()
-            overlap_pct = self.spec_overlap_spin.value()
-            window = self.window_combo.currentText()
-            
-            # Generate in background thread
-            self.generator_thread = SpectrogramGenerator(
-                segment_data, self.sample_rate, nfft, overlap_pct, window
-            )
-            self.generator_thread.segment_idx = segment_idx
-            self.generator_thread.generation_complete.connect(self._on_spectrogram_generated)
-            self.generator_thread.generation_error.connect(self._on_generation_error)
-            self.generator_thread.start()
-            
-            # Show loading message
-            self.segment_info_label.setText(
-                f"Generating spectrogram for segment {segment_idx + 1}..."
-            )
-    
+            return
+
+        segment_data = self.signal_data[start_idx:end_idx]
+        nperseg, noverlap, _ = self._calculate_fft_parameters(sample_count=len(segment_data))
+        window = self.window_combo.currentText().lower()
+
+        self.generator_thread = SpectrogramGenerator(
+            segment_data,
+            self.sample_rate,
+            nperseg,
+            noverlap,
+            window,
+        )
+        self.generator_thread.segment_idx = segment_idx
+        self.generator_thread.generation_complete.connect(self._on_spectrogram_generated)
+        self.generator_thread.generation_error.connect(self._on_generation_error)
+        self.generator_thread.start()
+
+        self.display_window.segment_info_label.setText(
+            f"Generating spectrogram for segment {segment_idx + 1}..."
+        )
+
     def _on_spectrogram_generated(self, segment_idx: int, spectrogram_data):
         """Handle spectrogram generation completion."""
         f, t, Sxx = spectrogram_data
-        
-        # Cache the spectrogram
         self.spectrogram_cache.put(segment_idx, (f, t, Sxx))
-        
-        # Plot if this is still the current segment
-        if segment_idx == self.current_segment_idx:
+
+        if segment_idx == self.current_segment_idx and self.sample_rate is not None:
             start_idx, _ = self.segments[segment_idx]
             start_time = start_idx / self.sample_rate
             self._plot_spectrogram(f, t, Sxx, start_time)
-    
+
     def _on_generation_error(self, error_msg: str):
         """Handle spectrogram generation error."""
         show_critical(self, "Generation Error", f"Failed to generate spectrogram:\n\n{error_msg}")
-    
+
     def _plot_spectrogram(self, f: np.ndarray, t: np.ndarray, Sxx: np.ndarray, start_time: float):
-        """Plot spectrogram on the display."""
-        # Apply frequency range filter
+        """Plot spectrogram on the popup display."""
+        if self.display_window is None:
+            return
+
+        if len(f) == 0 or len(t) == 0:
+            self.display_window.spectrogram_plot.clear()
+            return
+
         freq_min = self.freq_min_spin.value()
         freq_max = self.freq_max_spin.value()
-        
-        freq_mask = (f >= freq_min) & (f <= freq_max)
+
+        actual_min = max(freq_min, float(f[0]))
+        actual_max = min(freq_max, float(f[-1]))
+        freq_mask = (f >= actual_min) & (f <= actual_max)
+
         f_filtered = f[freq_mask]
         Sxx_filtered = Sxx[freq_mask, :]
-        
-        # Convert to dB
-        Sxx_db = 10 * np.log10(Sxx_filtered + 1e-10)
-        
-        # Clear previous plot
-        self.spectrogram_plot.clear()
-        
-        # Create image item
+
+        if len(f_filtered) == 0:
+            self.display_window.spectrogram_plot.clear()
+            return
+
+        Sxx_db = 10.0 * np.log10(np.maximum(Sxx_filtered, 1e-20))
+        self._render_spectrogram(f_filtered, t, Sxx_db, start_time)
+
+    def _render_spectrogram(self, f_filtered: np.ndarray, t: np.ndarray, Sxx_db: np.ndarray, start_time: float):
+        """Render spectrogram with display settings (colormap/SNR/colorbar/limits)."""
+        plot = self.display_window.spectrogram_plot
+        plot.clear()
+
+        max_power = float(np.nanmax(Sxx_db))
+        min_power = max_power - float(self.snr_spin.value())
+
         img = pg.ImageItem()
-        img.setImage(Sxx_db.T)  # Transpose for correct orientation
-        
-        # Set position and scale
+        img.setImage(Sxx_db.T, autoLevels=False, levels=(min_power, max_power))
+
+        t_start = start_time + float(t[0])
+        t_end = start_time + float(t[-1])
+        f_start = float(f_filtered[0])
+        f_end = float(f_filtered[-1])
+
         img.setRect(pg.QtCore.QRectF(
-            start_time + t[0],  # x position
-            f_filtered[0],  # y position
-            t[-1] - t[0],  # width (time range)
-            f_filtered[-1] - f_filtered[0]  # height (frequency range)
+            t_start,
+            f_start,
+            max(t_end - t_start, 1e-9),
+            max(f_end - f_start, 1e-9)
         ))
-        
-        # Set colormap
-        img.setLookupTable(pg.colormap.get('viridis').getLookupTable())
-        
-        # Add to plot
-        self.spectrogram_plot.addItem(img)
-        
-        # Update axes
-        self.spectrogram_plot.setXRange(start_time + t[0], start_time + t[-1])
-        self.spectrogram_plot.setYRange(f_filtered[0], f_filtered[-1])
-        
-        # Add colorbar (if not already present)
-        # Note: pyqtgraph doesn't have built-in colorbar, would need custom implementation
-    
+
+        cmap_name = self.colormap_combo.currentText()
+        mpl_cmap = colormaps.get_cmap(cmap_name)
+        lut = (mpl_cmap(np.linspace(0, 1, 256)) * 255).astype(np.ubyte)
+        img.setLookupTable(np.ascontiguousarray(lut))
+        plot.addItem(img)
+
+        plot.setLabel('left', 'Frequency', units='Hz', color='#e0e0e0', size='11pt')
+        plot.setLabel('bottom', 'Time', units='s', color='#e0e0e0', size='11pt')
+        plot.setTitle(
+            f"{self.channel_name or 'Channel'} | Segment {self.current_segment_idx + 1}/{len(self.segments)} | "
+            f"SNR: {self.snr_spin.value()} dB",
+            color='#e0e0e0',
+            size='12pt'
+        )
+
+        self._remove_colorbar()
+        if self.show_colorbar_checkbox.isChecked():
+            pg_colormap = pg.ColorMap(np.linspace(0, 1, 256), np.ascontiguousarray(lut))
+            colorbar = pg.ColorBarItem(
+                values=(min_power, max_power),
+                colorMap=pg_colormap,
+                label='Power (dB)',
+                limits=(min_power, max_power),
+                interactive=False,
+                width=20,
+                pen='#e0e0e0',
+                hoverPen='#ffffff',
+                hoverBrush='#2d3748',
+            )
+            colorbar.setImageItem(img, insert_in=plot.plotItem)
+            colorbar.axis.setPen('#e0e0e0')
+            colorbar.axis.setTextPen('#e0e0e0')
+            self.display_window.colorbar_item = colorbar
+
+        if self.auto_limits_checkbox.isChecked():
+            plot.setXRange(t_start, t_end, padding=0.02)
+            plot.setYRange(f_start, f_end, padding=0.02)
+            self.time_min_edit.setText(f"{t_start:.3f}")
+            self.time_max_edit.setText(f"{t_end:.3f}")
+            self.freq_axis_min_edit.setText(f"{f_start:.3f}")
+            self.freq_axis_max_edit.setText(f"{f_end:.3f}")
+        else:
+            limits = self._parse_manual_axis_limits(show_error=False)
+            if limits is not None:
+                x_min, x_max, y_min, y_max = limits
+                plot.setXRange(x_min, x_max, padding=0)
+                plot.setYRange(y_min, y_max, padding=0)
+
     def _on_first_clicked(self):
         """Navigate to first segment."""
-        self.segment_slider.setValue(0)
-    
+        if self.display_window is not None:
+            self.display_window.segment_slider.setValue(0)
+
     def _on_prev_clicked(self):
         """Navigate to previous segment."""
-        if self.current_segment_idx > 0:
-            self.segment_slider.setValue(self.current_segment_idx - 1)
-    
+        if self.display_window is not None and self.current_segment_idx > 0:
+            self.display_window.segment_slider.setValue(self.current_segment_idx - 1)
+
     def _on_next_clicked(self):
         """Navigate to next segment."""
-        if self.current_segment_idx < len(self.segments) - 1:
-            self.segment_slider.setValue(self.current_segment_idx + 1)
-    
+        if self.display_window is not None and self.current_segment_idx < len(self.segments) - 1:
+            self.display_window.segment_slider.setValue(self.current_segment_idx + 1)
+
     def _on_last_clicked(self):
         """Navigate to last segment."""
-        self.segment_slider.setValue(len(self.segments) - 1)
-    
+        if self.display_window is not None and len(self.segments) > 0:
+            self.display_window.segment_slider.setValue(len(self.segments) - 1)
+
     def _on_slider_changed(self, value: int):
         """Handle slider value change."""
         self._display_segment(value)
-    
+
     def _on_update_current_clicked(self):
         """Regenerate current segment with new parameters."""
-        # Remove from cache
         if self.current_segment_idx in self.spectrogram_cache.cache:
             del self.spectrogram_cache.cache[self.current_segment_idx]
-        
-        # Regenerate
         self._display_segment(self.current_segment_idx)
-    
+
     def _on_update_all_clicked(self):
         """Regenerate all segments with new parameters."""
-        # Clear cache
         self.spectrogram_cache.clear()
-        
-        # Regenerate current segment
         self._display_segment(self.current_segment_idx)
-        
+
         show_information(
             self,
             "Cache Cleared",
-            "Spectrogram cache has been cleared. Segments will be regenerated "
-            "with new parameters as you navigate through them."
+            "Spectrogram cache has been cleared. Segments will be regenerated with new parameters as you navigate through them."
         )
-    
+
     def _on_export_current_clicked(self):
         """Export current segment spectrogram."""
         if self.current_segment_idx >= len(self.segments):
             return
-        
-        # Get save path
+
+        self._ensure_display_window()
+
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Export Spectrogram", "", "PNG Image (*.png);;All Files (*)"
+            self,
+            "Export Spectrogram",
+            "",
+            "PNG Image (*.png);;All Files (*)"
         )
-        
+
         if not file_path:
             return
-        
-        # Ensure .png extension
+
         if not file_path.endswith('.png'):
             file_path += '.png'
-        
+
         try:
-            # Export using pyqtgraph's export functionality
-            exporter = pg.exporters.ImageExporter(self.spectrogram_plot.plotItem)
+            exporter = pg.exporters.ImageExporter(self.display_window.spectrogram_plot.plotItem)
             exporter.export(file_path)
-            
             show_information(self, "Export Complete", f"Spectrogram saved to:\n{file_path}")
-        
+
         except Exception as e:
             show_critical(self, "Export Error", f"Failed to export spectrogram:\n\n{str(e)}")
-    
+
     def _on_export_all_clicked(self):
         """Export all segment spectrograms."""
-        # Get output directory
+        if not self.segments:
+            return
+
         output_dir = QFileDialog.getExistingDirectory(
             self, "Select Output Directory for All Spectrograms"
         )
-        
+
         if not output_dir:
             return
-        
-        # Create progress dialog
+
+        self._ensure_display_window()
+
         progress = QProgressDialog(
             "Exporting spectrograms...", "Cancel", 0, len(self.segments), self
         )
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
-        
+
         try:
+            from PyQt6.QtWidgets import QApplication
+
             for i in range(len(self.segments)):
                 if progress.wasCanceled():
                     break
-                
+
                 progress.setValue(i)
                 progress.setLabelText(f"Exporting segment {i + 1} of {len(self.segments)}...")
-                
-                # Generate spectrogram if not cached
+
                 if self.spectrogram_cache.get(i) is None:
                     start_idx, end_idx = self.segments[i]
                     segment_data = self.signal_data[start_idx:end_idx]
-                    
-                    nfft = self.nfft_spin.value()
-                    overlap_pct = self.spec_overlap_spin.value()
-                    window = self.window_combo.currentText()
-                    noverlap = int(nfft * overlap_pct / 100)
-                    
+
+                    nperseg, noverlap, _ = self._calculate_fft_parameters(sample_count=len(segment_data))
+                    window = self.window_combo.currentText().lower()
+
                     f, t, Sxx = signal.spectrogram(
                         segment_data,
                         fs=self.sample_rate,
                         window=window,
-                        nperseg=nfft,
+                        nperseg=nperseg,
                         noverlap=noverlap,
                         scaling='density'
                     )
-                    
+
                     self.spectrogram_cache.put(i, (f, t, Sxx))
-                
-                # Display and export
-                self._display_segment(i)
-                
-                # Give UI time to update
-                from PyQt6.QtWidgets import QApplication
+
+                self.current_segment_idx = i
+                self.display_window.segment_slider.blockSignals(True)
+                self.display_window.segment_slider.setValue(i)
+                self.display_window.segment_slider.blockSignals(False)
+
+                start_idx, _ = self.segments[i]
+                start_time = start_idx / self.sample_rate
+                f, t, sxx = self.spectrogram_cache.get(i)
+                self._plot_spectrogram(f, t, sxx, start_time)
+
                 QApplication.processEvents()
-                
-                # Export
+
                 file_path = os.path.join(output_dir, f"spectrogram_segment_{i+1:03d}.png")
-                exporter = pg.exporters.ImageExporter(self.spectrogram_plot.plotItem)
+                exporter = pg.exporters.ImageExporter(self.display_window.spectrogram_plot.plotItem)
                 exporter.export(file_path)
-            
+
             progress.setValue(len(self.segments))
-            
+
             show_information(
                 self,
                 "Export Complete",
                 f"Exported {len(self.segments)} spectrograms to:\n{output_dir}"
             )
-        
+
         except Exception as e:
             show_critical(self, "Export Error", f"Failed to export spectrograms:\n\n{str(e)}")
-    
+
     def keyPressEvent(self, event: QKeyEvent):
         """Handle keyboard shortcuts."""
         if event.key() == Qt.Key.Key_Left:
@@ -919,3 +1337,9 @@ class SegmentedSpectrogramViewer(QMainWindow):
             self._on_last_clicked()
         else:
             super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        """Close popup display window when controller closes."""
+        if self.display_window is not None:
+            self.display_window.close()
+        super().closeEvent(event)

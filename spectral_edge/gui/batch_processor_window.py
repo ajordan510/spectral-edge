@@ -455,25 +455,30 @@ class BatchProcessorWindow(QMainWindow):
         
         # Cutoff frequencies
         cutoff_row = QHBoxLayout()
+        self.cutoff_low_label = QLabel("Cutoff Low:")
         self.cutoff_low_spin = QDoubleSpinBox()
         self.cutoff_low_spin.setRange(0.1, 100000.0)
         self.cutoff_low_spin.setValue(100.0)
         self.cutoff_low_spin.setSuffix(" Hz")
         self.cutoff_low_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
+        self.cutoff_high_label = QLabel("Cutoff High:")
         self.cutoff_high_spin = QDoubleSpinBox()
         self.cutoff_high_spin.setRange(0.1, 100000.0)
         self.cutoff_high_spin.setValue(2000.0)
         self.cutoff_high_spin.setSuffix(" Hz")
         self.cutoff_high_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
-        cutoff_row.addWidget(QLabel("Cutoff Low:"))
+        cutoff_row.addWidget(self.cutoff_low_label)
         cutoff_row.addWidget(self.cutoff_low_spin)
-        cutoff_row.addWidget(QLabel("Cutoff High:"))
+        cutoff_row.addWidget(self.cutoff_high_label)
         cutoff_row.addWidget(self.cutoff_high_spin)
         cutoff_row.addStretch()
         filter_layout.addLayout(cutoff_row)
         
         filter_group.setLayout(filter_layout)
         layout.addWidget(filter_group)
+
+        # Initial cutoff visibility based on filter type
+        self._update_filter_cutoff_visibility()
         
         layout.addStretch()
         self.tab_widget.addTab(tab, "Filter")
@@ -858,20 +863,20 @@ class BatchProcessorWindow(QMainWindow):
         self._set_selected_ppt_layout(self.config.powerpoint_config.layout)
 
         self.ppt_include_parameters_checkbox = QCheckBox("Include calculation parameters")
-        self.ppt_include_parameters_checkbox.setChecked(True)
+        self.ppt_include_parameters_checkbox.setChecked(self.config.powerpoint_config.include_parameters)
         ppt_layout.addWidget(self.ppt_include_parameters_checkbox)
 
         self.ppt_include_statistics_checkbox = QCheckBox("Include statistics slides")
-        self.ppt_include_statistics_checkbox.setChecked(False)
+        self.ppt_include_statistics_checkbox.setChecked(self.config.powerpoint_config.include_statistics)
         ppt_layout.addWidget(self.ppt_include_statistics_checkbox)
 
         self.ppt_include_rms_table_checkbox = QCheckBox("Include RMS summary table")
-        self.ppt_include_rms_table_checkbox.setChecked(False)
+        self.ppt_include_rms_table_checkbox.setChecked(self.config.powerpoint_config.include_rms_table)
         ppt_layout.addWidget(self.ppt_include_rms_table_checkbox)
 
         self.ppt_include_3sigma_columns_checkbox = QCheckBox("Include 3-sigma columns in RMS table")
-        self.ppt_include_3sigma_columns_checkbox.setChecked(False)
-        self.ppt_include_3sigma_columns_checkbox.setEnabled(False)
+        self.ppt_include_3sigma_columns_checkbox.setChecked(self.config.powerpoint_config.include_3sigma_columns)
+        self.ppt_include_3sigma_columns_checkbox.setEnabled(self.config.powerpoint_config.include_rms_table)
         ppt_layout.addWidget(self.ppt_include_3sigma_columns_checkbox)
 
         self.ppt_group.setLayout(ppt_layout)
@@ -904,6 +909,7 @@ class BatchProcessorWindow(QMainWindow):
             self.ppt_layout_buttons.buttonClicked.connect(self._on_ppt_layout_changed)
         self.powerpoint_checkbox.stateChanged.connect(self._on_powerpoint_enabled_changed)
         self.ppt_include_rms_table_checkbox.toggled.connect(self._on_rms_table_toggled)
+        self.filter_type_combo.currentTextChanged.connect(self._update_filter_cutoff_visibility)
 
         # Run batch and cancel
         self.run_batch_btn.clicked.connect(self._on_run_batch)
@@ -1419,7 +1425,8 @@ class BatchProcessorWindow(QMainWindow):
     def _update_spectrogram_controls(self):
         """Enable/disable spectrogram controls based on layout selection."""
         layout_value = self._get_selected_ppt_layout()
-        include_spec = self.powerpoint_checkbox.isChecked() and self._layout_includes_spectrogram(layout_value)
+        include_spec_layout = self._layout_includes_spectrogram(layout_value)
+        include_spec = self.powerpoint_checkbox.isChecked() and include_spec_layout
 
         # Update config and UI controls
         self.config.spectrogram_config.enabled = include_spec
@@ -1435,7 +1442,7 @@ class BatchProcessorWindow(QMainWindow):
             self.spec_time_min_spin,
             self.spec_time_max_spin
         ]:
-            widget.setEnabled(include_spec)
+            widget.setEnabled(include_spec_layout)
 
         # Re-apply auto-scale logic for manual limits
         self._on_spec_auto_scale_changed(
@@ -1458,6 +1465,17 @@ class BatchProcessorWindow(QMainWindow):
         is_enabled = self.powerpoint_checkbox.isChecked()
         self.ppt_group.setEnabled(is_enabled)
         self._update_spectrogram_controls()
+
+    def _update_filter_cutoff_visibility(self):
+        """Show only relevant cutoff inputs for the selected filter type."""
+        filter_type = self.filter_type_combo.currentText().strip().lower()
+        show_low = filter_type in {"highpass", "bandpass"}
+        show_high = filter_type in {"lowpass", "bandpass"}
+
+        self.cutoff_low_label.setVisible(show_low)
+        self.cutoff_low_spin.setVisible(show_low)
+        self.cutoff_high_label.setVisible(show_high)
+        self.cutoff_high_spin.setVisible(show_high)
     
     def _on_load_config(self):
         """Load configuration from JSON file."""
@@ -1680,6 +1698,7 @@ class BatchProcessorWindow(QMainWindow):
         filter_type_index = self.filter_type_combo.findText(self.config.filter_config.filter_type)
         if filter_type_index >= 0:
             self.filter_type_combo.setCurrentIndex(filter_type_index)
+        self._update_filter_cutoff_visibility()
 
         filter_design_index = self.filter_design_combo.findText(self.config.filter_config.filter_design)
         if filter_design_index >= 0:
@@ -1887,9 +1906,7 @@ class BatchProcessorWindow(QMainWindow):
     def _on_spec_auto_scale_changed(self, state: int):
         """Handle spectrogram auto-scale checkbox state change."""
         is_auto = state == Qt.CheckState.Checked.value
-        spec_enabled = self.powerpoint_checkbox.isChecked() and self._layout_includes_spectrogram(
-            self._get_selected_ppt_layout()
-        )
+        spec_enabled = self._layout_includes_spectrogram(self._get_selected_ppt_layout())
         # Disable manual limit controls when auto-scale is enabled
         manual_enabled = (not is_auto) and spec_enabled
         self.spec_freq_min_spin.setEnabled(manual_enabled)

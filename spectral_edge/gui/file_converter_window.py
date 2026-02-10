@@ -7,6 +7,7 @@ file formats used in signal processing and vibration analysis.
 Supported conversions:
 - DXD to CSV/HDF5 (with time slicing and splitting)
 - HDF5 splitting by count or time slices
+- HDF5 (SpectralEdge) to MATLAB (MARVIN)
 - Future: MATLAB to HDF5
 
 Key Features:
@@ -25,12 +26,14 @@ from PyQt6.QtWidgets import (
     QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QFileDialog,
     QGroupBox, QGridLayout, QMessageBox, QCheckBox, QRadioButton,
     QProgressBar, QTextEdit, QScrollArea, QButtonGroup, QLineEdit,
+    QAbstractSpinBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QChildEvent
 from PyQt6.QtGui import QFont
 import os
 import sys
+import h5py
 from pathlib import Path
 from typing import List, Tuple, Optional
 
@@ -40,7 +43,8 @@ from spectral_edge.utils.file_converter import (
     convert_dxd_to_format,
     convert_dxd_with_splitting,
     split_hdf5_by_count,
-    split_hdf5_by_time_slices
+    split_hdf5_by_time_slices,
+    convert_hdf5_to_marvin_mat,
 )
 from spectral_edge.utils.message_box import show_information, show_warning, show_critical
 
@@ -100,7 +104,7 @@ class FileConverterWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("File Format Conversion Tool")
-        self.setMinimumSize(900, 800)
+        self.setMinimumSize(900, 900)
         
         # State variables
         self.input_file_path = None
@@ -113,6 +117,7 @@ class FileConverterWindow(QMainWindow):
         
         # Apply dark theme styling
         self._apply_styling()
+        self._enforce_spinbox_button_style()
     
     def _create_ui(self):
         """Create the user interface."""
@@ -132,8 +137,8 @@ class FileConverterWindow(QMainWindow):
         self.setCentralWidget(central_widget)
 
         main_layout = QVBoxLayout(scroll_contents)
-        main_layout.setSpacing(12)
-        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(8, 8, 8, 8)
         
         # Title
         title_label = QLabel("File Format Conversion Tool")
@@ -200,7 +205,9 @@ class FileConverterWindow(QMainWindow):
     def _create_mode_selection(self) -> QGroupBox:
         """Create conversion mode selection group."""
         group = QGroupBox("Conversion Mode")
-        layout = QVBoxLayout()
+        layout = QGridLayout()
+        layout.setHorizontalSpacing(12)
+        layout.setVerticalSpacing(4)
         
         self.mode_button_group = QButtonGroup()
         
@@ -208,17 +215,22 @@ class FileConverterWindow(QMainWindow):
         self.dxd_mode_radio.setChecked(True)
         self.dxd_mode_radio.toggled.connect(self._on_mode_changed)
         self.mode_button_group.addButton(self.dxd_mode_radio)
-        layout.addWidget(self.dxd_mode_radio)
+        layout.addWidget(self.dxd_mode_radio, 0, 0)
         
         self.hdf5_split_mode_radio = QRadioButton("HDF5 Splitting")
         self.hdf5_split_mode_radio.toggled.connect(self._on_mode_changed)
         self.mode_button_group.addButton(self.hdf5_split_mode_radio)
-        layout.addWidget(self.hdf5_split_mode_radio)
+        layout.addWidget(self.hdf5_split_mode_radio, 0, 1)
+
+        self.hdf5_to_marvin_mode_radio = QRadioButton("HDF5 (SpectralEdge) to MATLAB (MARVIN)")
+        self.hdf5_to_marvin_mode_radio.toggled.connect(self._on_mode_changed)
+        self.mode_button_group.addButton(self.hdf5_to_marvin_mode_radio)
+        layout.addWidget(self.hdf5_to_marvin_mode_radio, 1, 0, 1, 2)
         
         self.matlab_mode_radio = QRadioButton("MATLAB to HDF5 (Coming Soon)")
         self.matlab_mode_radio.setEnabled(False)
         self.mode_button_group.addButton(self.matlab_mode_radio)
-        layout.addWidget(self.matlab_mode_radio)
+        layout.addWidget(self.matlab_mode_radio, 2, 0, 1, 2)
         
         group.setLayout(layout)
         return group
@@ -362,7 +374,7 @@ class FileConverterWindow(QMainWindow):
         self.slices_table.setColumnCount(3)
         self.slices_table.setHorizontalHeaderLabels(["Start (s)", "End (s)", "Duration (s)"])
         self.slices_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.slices_table.setMaximumHeight(150)
+        self._set_table_height_for_visible_rows(self.slices_table, visible_rows=5)
         self.slices_table.setEnabled(False)
         slices_vlayout.addWidget(self.slices_table)
         
@@ -393,7 +405,6 @@ class FileConverterWindow(QMainWindow):
         self.hdf5_segment_count_spin.setMaximum(1000)
         self.hdf5_segment_count_spin.setValue(10)
         self.hdf5_segment_count_spin.setSuffix(" equal segments")
-        self.hdf5_segment_count_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
         count_layout.addWidget(self.hdf5_segment_count_spin)
         count_layout.addStretch()
         
@@ -429,7 +440,7 @@ class FileConverterWindow(QMainWindow):
         self.hdf5_slices_table.setColumnCount(3)
         self.hdf5_slices_table.setHorizontalHeaderLabels(["Start (s)", "End (s)", "Duration (s)"])
         self.hdf5_slices_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.hdf5_slices_table.setMaximumHeight(150)
+        self._set_table_height_for_visible_rows(self.hdf5_slices_table, visible_rows=5)
         slices_vlayout.addWidget(self.hdf5_slices_table)
         
         slices_layout.addWidget(slices_container)
@@ -437,6 +448,45 @@ class FileConverterWindow(QMainWindow):
         
         group.setLayout(layout)
         return group
+
+    def _enforce_spinbox_button_style(self):
+        """
+        Force PSD-style spinbox controls with vertical up/down arrows.
+
+        This is applied centrally so newly added spinboxes in this window
+        automatically follow the same behavior.
+        """
+        for spin in self.findChildren(QAbstractSpinBox):
+            self._configure_spinbox(spin)
+
+    def _set_table_height_for_visible_rows(self, table: QTableWidget, visible_rows: int = 5):
+        """Size table so at least N rows are visible without internal scrolling."""
+        table.verticalHeader().setDefaultSectionSize(28)
+        header_height = max(table.horizontalHeader().height(), 28)
+        row_height = max(table.verticalHeader().defaultSectionSize(), 24)
+        frame_height = table.frameWidth() * 2
+        target_height = header_height + (visible_rows * row_height) + frame_height + 2
+        table.setMinimumHeight(target_height)
+        table.setMaximumHeight(target_height)
+
+    def _configure_spinbox(self, spin: QAbstractSpinBox):
+        """Apply robust, explicit up/down arrow behavior to one spinbox."""
+        if spin is None:
+            return
+        spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+        spin.setAccelerated(True)
+
+    def childEvent(self, event: QChildEvent):
+        """Ensure dynamically created spinboxes also use up/down arrows."""
+        super().childEvent(event)
+        child = event.child()
+        if isinstance(child, QAbstractSpinBox):
+            self._configure_spinbox(child)
+
+    def showEvent(self, event):
+        """Re-apply spinbox style after Qt polish/style passes."""
+        self._enforce_spinbox_button_style()
+        super().showEvent(event)
     
     def _create_channel_selection(self) -> QGroupBox:
         """Create channel selection group."""
@@ -481,7 +531,7 @@ class FileConverterWindow(QMainWindow):
         # Output files list
         self.output_files_text = QTextEdit()
         self.output_files_text.setReadOnly(True)
-        self.output_files_text.setMaximumHeight(100)
+        self.output_files_text.setMaximumHeight(80)
         self.output_files_text.setPlaceholderText("Output files will be listed here...")
         layout.addWidget(self.output_files_text)
         
@@ -501,8 +551,8 @@ class FileConverterWindow(QMainWindow):
             QGroupBox {
                 border: 1px solid #4a5568;
                 border-radius: 5px;
-                margin-top: 10px;
-                padding-top: 10px;
+                margin-top: 8px;
+                padding-top: 8px;
                 font-weight: bold;
             }
             QGroupBox::title {
@@ -514,7 +564,7 @@ class FileConverterWindow(QMainWindow):
                 background-color: #3b82f6;
                 color: white;
                 border: none;
-                padding: 8px 16px;
+                padding: 6px 14px;
                 border-radius: 4px;
                 font-weight: bold;
             }
@@ -532,8 +582,46 @@ class FileConverterWindow(QMainWindow):
                 background-color: #2d3748;
                 border: 1px solid #4a5568;
                 border-radius: 4px;
-                padding: 6px;
+                padding: 4px;
                 color: #e0e0e0;
+            }
+            QSpinBox, QDoubleSpinBox {
+                padding-right: 24px;
+            }
+            QSpinBox::up-button, QDoubleSpinBox::up-button {
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 18px;
+                border-left: 1px solid #4a5568;
+                border-bottom: 1px solid #4a5568;
+                background-color: #3d4758;
+            }
+            QSpinBox::down-button, QDoubleSpinBox::down-button {
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 18px;
+                border-left: 1px solid #4a5568;
+                background-color: #3d4758;
+            }
+            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+            QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+                background-color: #4d5768;
+            }
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-bottom: 7px solid #e0e0e0;
+            }
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 7px solid #e0e0e0;
             }
             QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
                 border: 1px solid #60a5fa;
@@ -562,12 +650,12 @@ class FileConverterWindow(QMainWindow):
                 color: #e0e0e0;
             }
             QTableWidget::item {
-                padding: 5px;
+                padding: 3px;
             }
             QHeaderView::section {
                 background-color: #374151;
                 color: #e0e0e0;
-                padding: 5px;
+                padding: 4px;
                 border: 1px solid #4a5568;
                 font-weight: bold;
             }
@@ -597,18 +685,31 @@ class FileConverterWindow(QMainWindow):
         """Handle conversion mode change."""
         is_dxd_mode = self.dxd_mode_radio.isChecked()
         is_hdf5_mode = self.hdf5_split_mode_radio.isChecked()
+        is_hdf5_to_marvin_mode = self.hdf5_to_marvin_mode_radio.isChecked()
         
         # Show/hide relevant groups
         self.splitting_group.setVisible(is_dxd_mode)
         self.channel_group.setVisible(is_dxd_mode)
         self.hdf5_split_group.setVisible(is_hdf5_mode)
         
-        # Update format combo
-        if is_hdf5_mode:
+        # Update format combo and output behavior
+        if is_hdf5_mode or is_hdf5_to_marvin_mode:
             self.format_combo.setEnabled(False)
-            self.format_combo.setCurrentText("HDF5")
+            if is_hdf5_mode:
+                self.format_combo.setCurrentText("HDF5")
         else:
             self.format_combo.setEnabled(True)
+
+        is_dxd_split_mode = (
+            is_dxd_mode and hasattr(self, "no_split_radio") and not self.no_split_radio.isChecked()
+        )
+        if is_hdf5_to_marvin_mode:
+            self.output_path_edit.setPlaceholderText("Select output directory for MATLAB files...")
+            self.size_estimate_label.setText("")
+        elif is_hdf5_mode or is_dxd_split_mode:
+            self.output_path_edit.setPlaceholderText("Select output directory...")
+        else:
+            self.output_path_edit.setPlaceholderText("Select output location...")
         
         # Clear file info
         self.input_file_path = None
@@ -622,7 +723,7 @@ class FileConverterWindow(QMainWindow):
         if self.dxd_mode_radio.isChecked():
             file_filter = "DXD Files (*.dxd *.dxz);;All Files (*)"
             title = "Select DXD File"
-        else:  # HDF5 mode
+        else:  # HDF5-based modes
             file_filter = "HDF5 Files (*.h5 *.hdf5);;All Files (*)"
             title = "Select HDF5 File"
         
@@ -661,10 +762,24 @@ class FileConverterWindow(QMainWindow):
                 # Update segment preview if split by count is selected
                 self._update_segment_preview()
                 
-            else:  # HDF5 mode
-                # For HDF5, just show file size for now
+            else:  # HDF5-based modes
                 file_size_mb = os.path.getsize(self.input_file_path) / (1024 * 1024)
-                self.file_info_label.setText(f"Size: {file_size_mb:.1f} MB")
+                with h5py.File(self.input_file_path, 'r') as h5_file:
+                    flight_count = 0
+                    channel_count = 0
+                    for key in h5_file.keys():
+                        obj = h5_file[key]
+                        if not isinstance(obj, h5py.Group) or 'channels' not in obj:
+                            continue
+                        channels_group = obj['channels']
+                        if not isinstance(channels_group, h5py.Group):
+                            continue
+                        flight_count += 1
+                        channel_count += len(channels_group.keys())
+
+                self.file_info_label.setText(
+                    f"Size: {file_size_mb:.1f} MB | Flights: {flight_count} | Channels: {channel_count}"
+                )
                 self.file_info_label.setStyleSheet("color: #60a5fa;")
             
             self._update_convert_button_state()
@@ -681,7 +796,8 @@ class FileConverterWindow(QMainWindow):
         # Determine if we need directory or file
         is_splitting = (
             (self.dxd_mode_radio.isChecked() and not self.no_split_radio.isChecked()) or
-            self.hdf5_split_mode_radio.isChecked()
+            self.hdf5_split_mode_radio.isChecked() or
+            self.hdf5_to_marvin_mode_radio.isChecked()
         )
         
         if is_splitting:
@@ -984,6 +1100,8 @@ class FileConverterWindow(QMainWindow):
             self._start_dxd_conversion()
         elif self.hdf5_split_mode_radio.isChecked():
             self._start_hdf5_splitting()
+        elif self.hdf5_to_marvin_mode_radio.isChecked():
+            self._start_hdf5_to_marvin_conversion()
     
     def _start_dxd_conversion(self):
         """Start DXD conversion in background thread."""
@@ -1114,6 +1232,25 @@ class FileConverterWindow(QMainWindow):
         self.conversion_worker.conversion_complete.connect(self._on_conversion_complete)
         self.conversion_worker.conversion_error.connect(self._on_conversion_error)
         
+        # Start conversion
+        self.conversion_worker.start()
+
+    def _start_hdf5_to_marvin_conversion(self):
+        """Start HDF5 (SpectralEdge) to MATLAB (MARVIN) conversion."""
+        input_path = self.input_file_path
+        output_dir = self.output_path_edit.text()
+
+        self.conversion_worker = ConversionWorker(
+            convert_hdf5_to_marvin_mat,
+            input_path,
+            output_dir,
+        )
+
+        # Connect signals
+        self.conversion_worker.progress_updated.connect(self._on_progress_updated)
+        self.conversion_worker.conversion_complete.connect(self._on_conversion_complete)
+        self.conversion_worker.conversion_error.connect(self._on_conversion_error)
+
         # Start conversion
         self.conversion_worker.start()
     

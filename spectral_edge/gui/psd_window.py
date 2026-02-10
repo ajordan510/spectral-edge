@@ -276,6 +276,12 @@ class PSDAnalysisWindow(QMainWindow):
         # Full resolution data (for calculations - NEVER decimated)
         self.time_data_full = None
         self.signal_data_full = None
+
+        # Per-channel storage (supports mixed sample rates and lengths)
+        self.channel_time_full = []
+        self.channel_signal_full = []
+        self.channel_time_display = []
+        self.channel_signal_display = []
         
         # Sample rate (always represents full resolution rate)
         self.channel_names = None
@@ -335,6 +341,71 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Apply comprehensive tooltips
         apply_tooltips_to_window(self)
+
+    def _is_multi_rate_loaded(self) -> bool:
+        """Return True when loaded channels have different sample rates."""
+        return bool(self.channel_sample_rates) and len(set(self.channel_sample_rates)) > 1
+
+    def _get_time_bounds(self):
+        """Get global time bounds across loaded channels."""
+        starts = []
+        ends = []
+
+        for time_data in self.channel_time_full:
+            if time_data is not None and len(time_data) > 0:
+                starts.append(float(time_data[0]))
+                ends.append(float(time_data[-1]))
+
+        if starts and ends:
+            return min(starts), max(ends)
+
+        if self.time_data_full is not None and len(self.time_data_full) > 0:
+            return float(self.time_data_full[0]), float(self.time_data_full[-1])
+
+        return 0.0, 0.0
+
+    def _get_channel_full(self, channel_idx: int):
+        """Get full-resolution (time, signal, sample_rate) for one channel."""
+        if 0 <= channel_idx < len(self.channel_signal_full):
+            time_data = self.channel_time_full[channel_idx]
+            signal = self.channel_signal_full[channel_idx]
+        else:
+            # Fallback for legacy paths
+            if self.signal_data_full is None:
+                return None, None, None
+            if self.signal_data_full.ndim == 1:
+                signal = self.signal_data_full
+            else:
+                signal = self.signal_data_full[:, channel_idx]
+            time_data = self.time_data_full
+
+        if 0 <= channel_idx < len(self.channel_sample_rates):
+            sample_rate = self.channel_sample_rates[channel_idx]
+        else:
+            sample_rate = self.sample_rate
+
+        return time_data, signal, sample_rate
+
+    def _get_channel_display(self, channel_idx: int):
+        """Get display-resolution (time, signal, sample_rate) for one channel."""
+        if 0 <= channel_idx < len(self.channel_signal_display):
+            time_data = self.channel_time_display[channel_idx]
+            signal = self.channel_signal_display[channel_idx]
+        else:
+            if self.signal_data_display is None:
+                return None, None, None
+            if self.signal_data_display.ndim == 1:
+                signal = self.signal_data_display
+            else:
+                signal = self.signal_data_display[:, channel_idx]
+            time_data = self.time_data_display
+
+        if 0 <= channel_idx < len(self.channel_sample_rates):
+            sample_rate = self.channel_sample_rates[channel_idx]
+        else:
+            sample_rate = self.sample_rate
+
+        return time_data, signal, sample_rate
     
     def _apply_styling(self):
         """Apply aerospace-inspired styling to the window."""
@@ -377,13 +448,13 @@ class PSDAnalysisWindow(QMainWindow):
                 color: #e0e0e0;
                 border: 1px solid #4a5568;
                 border-radius: 3px;
-                padding: 8px;
+                padding: 5px;
                 font-size: 13px;
-                min-height: 25px;
+                min-height: 22px;
             }
             QComboBox::drop-down {
                 border: none;
-                width: 25px;
+                width: 22px;
             }
             QComboBox::down-arrow {
                 image: none;
@@ -847,8 +918,12 @@ class PSDAnalysisWindow(QMainWindow):
         if isinstance(events, list):
             parsed_events = []
             enabled_flags = []
+            min_time_limit = None
             max_time_limit = None
-            if self.time_data_full is not None and len(self.time_data_full) > 0:
+            if self.channel_time_full:
+                min_time_limit, max_time_limit = self._get_time_bounds()
+            elif self.time_data_full is not None and len(self.time_data_full) > 0:
+                min_time_limit = self.time_data_full[0]
                 max_time_limit = self.time_data_full[-1]
 
             for idx, event in enumerate(events, start=1):
@@ -868,7 +943,10 @@ class PSDAnalysisWindow(QMainWindow):
                 except (TypeError, ValueError):
                     errors.append(f"{name}: Invalid start/end values")
                     continue
-                if start < 0 or end <= start:
+                if min_time_limit is not None and start < min_time_limit:
+                    errors.append(f"{name}: Start time is before loaded data range")
+                    continue
+                if end <= start:
                     errors.append(f"{name}: Start/end values are invalid")
                     continue
                 if max_time_limit is not None and end > max_time_limit:
@@ -885,13 +963,14 @@ class PSDAnalysisWindow(QMainWindow):
                     max_time = max_time_limit
                 else:
                     max_time = max(e.end_time for e in parsed_events)
+                min_time = min_time_limit if min_time_limit is not None else min(e.start_time for e in parsed_events)
 
                 if self.event_manager is None:
-                    self.event_manager = EventManagerWindow(max_time=max_time)
+                    self.event_manager = EventManagerWindow(max_time=max_time, min_time=min_time)
                     self.event_manager.events_updated.connect(self._on_events_updated)
                     self.event_manager.interactive_mode_changed.connect(self._on_interactive_mode_changed)
                 else:
-                    self.event_manager.set_max_time(max_time)
+                    self.event_manager.set_time_bounds(min_time=min_time, max_time=max_time)
 
                 self.event_manager.events = parsed_events
                 self.event_manager._update_table()
@@ -991,8 +1070,11 @@ class PSDAnalysisWindow(QMainWindow):
         group = QGroupBox("Frequency Range")
         layout = QGridLayout()
         layout.setContentsMargins(6, 4, 6, 4)
-        layout.setHorizontalSpacing(8)
+        layout.setHorizontalSpacing(6)
         layout.setVerticalSpacing(3)
+        layout.setColumnStretch(0, 0)
+        layout.setColumnStretch(1, 0)
+        layout.setColumnStretch(2, 1)
         
         # Min frequency
         layout.addWidget(QLabel("Min Freq (Hz):"), 0, 0)
@@ -1011,7 +1093,11 @@ class PSDAnalysisWindow(QMainWindow):
         self.freq_max_spin.setDecimals(1)
         self.freq_max_spin.valueChanged.connect(self._on_parameter_changed)
         layout.addWidget(self.freq_max_spin, 1, 1)
-        
+        self._apply_compact_parameter_input_sizing([
+            self.freq_min_spin,
+            self.freq_max_spin,
+        ])
+
         group.setLayout(layout)
         return group
     
@@ -1020,8 +1106,11 @@ class PSDAnalysisWindow(QMainWindow):
         group = QGroupBox("PSD Parameters")
         layout = QGridLayout()
         layout.setContentsMargins(6, 4, 6, 4)
-        layout.setHorizontalSpacing(8)
+        layout.setHorizontalSpacing(6)
         layout.setVerticalSpacing(3)
+        layout.setColumnStretch(0, 0)
+        layout.setColumnStretch(1, 0)
+        layout.setColumnStretch(2, 1)
         
         row = 0
         
@@ -1044,6 +1133,8 @@ class PSDAnalysisWindow(QMainWindow):
             "<b>Custom:</b> Manual parameter selection"
         )
         self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+        self.preset_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.preset_combo.setMinimumContentsLength(18)
         layout.addWidget(self.preset_combo, row, 1)
         row += 1
         
@@ -1156,9 +1247,25 @@ class PSDAnalysisWindow(QMainWindow):
                 padding: 0 3px;
             }
         """)
-        
+        self._apply_compact_parameter_input_sizing([
+            self.preset_combo,
+            self.window_combo,
+            self.df_spin,
+            self.overlap_spin,
+            self.maximax_window_spin,
+            self.maximax_overlap_spin,
+        ])
+
         group.setLayout(layout)
         return group
+
+    def _apply_compact_parameter_input_sizing(self, controls):
+        """Constrain parameter controls to avoid horizontal overflow and excess whitespace."""
+        for control in controls:
+            if control is None:
+                continue
+            control.setMinimumWidth(170)
+            control.setMaximumWidth(220)
     
     def _create_display_options_group(self):
         """Create display options group."""
@@ -1809,18 +1916,25 @@ class PSDAnalysisWindow(QMainWindow):
 
     def _open_cross_spectrum(self):
         """Open the Cross-Spectrum Analysis window."""
-        if self.signal_data_full is None or len(self.channel_names) < 2:
+        if (not self.channel_signal_full and self.signal_data_full is None) or len(self.channel_names) < 2:
             show_warning(self, "Insufficient Data",
                         "At least two channels are required for cross-spectrum analysis.")
+            return
+
+        if self._is_multi_rate_loaded():
+            show_warning(
+                self,
+                "Mixed Sample Rates Not Supported",
+                "Cross-spectrum currently requires all selected channels to have the same sample rate."
+            )
             return
 
         # Prepare channel data
         channels_data = []
         for i, name in enumerate(self.channel_names):
-            if self.signal_data_full.ndim == 1:
-                signal = self.signal_data_full
-            else:
-                signal = self.signal_data_full[:, i]
+            _, signal, _ = self._get_channel_full(i)
+            if signal is None:
+                continue
             unit = self.channel_units[i] if i < len(self.channel_units) else ''
             flight = self.channel_flight_names[i] if i < len(self.channel_flight_names) else ''
             channels_data.append((name, signal, unit, flight))
@@ -1851,18 +1965,25 @@ class PSDAnalysisWindow(QMainWindow):
 
     def _open_statistics(self):
         """Open the Statistics Analysis window."""
-        if self.signal_data_full is None:
+        if (not self.channel_signal_full and self.signal_data_full is None):
             show_warning(self, "No Data",
                         "Please load data first before opening statistics analysis.")
+            return
+
+        if self._is_multi_rate_loaded() and len(self.channel_names) > 1:
+            show_warning(
+                self,
+                "Mixed Sample Rates Not Supported",
+                "Statistics window currently supports one shared sample rate across channels."
+            )
             return
 
         # Prepare channel data
         channels_data = []
         for i, name in enumerate(self.channel_names):
-            if self.signal_data_full.ndim == 1:
-                signal = self.signal_data_full
-            else:
-                signal = self.signal_data_full[:, i]
+            _, signal, _ = self._get_channel_full(i)
+            if signal is None:
+                continue
             unit = self.channel_units[i] if i < len(self.channel_units) else ''
             flight = self.channel_flight_names[i] if i < len(self.channel_flight_names) else ''
             channels_data.append((name, signal, unit, flight))
@@ -2015,20 +2136,20 @@ class PSDAnalysisWindow(QMainWindow):
 
     def _create_report_spectrogram_image(self, layout: str):
         """Create a spectrogram image for report output from the first selected channel."""
-        if self.signal_data_full is None or self.sample_rate is None:
+        if (not self.channel_signal_full and self.signal_data_full is None):
             return None
         selected_indices = self._get_selected_channel_indices()
         if not selected_indices:
             return None
 
         channel_idx = selected_indices[0]
-        signal = self.signal_data_full if self.signal_data_full.ndim == 1 else self.signal_data_full[:, channel_idx]
-        if signal is None or len(signal) == 0:
+        _, signal, channel_sample_rate = self._get_channel_full(channel_idx)
+        if signal is None or len(signal) == 0 or channel_sample_rate is None:
             return None
 
         freqs, times, sxx = generate_spectrogram(
             signal,
-            self.sample_rate,
+            channel_sample_rate,
             desired_df=float(self.df_spin.value()),
             overlap_percent=float(self.overlap_spin.value()),
             snr_threshold=50.0,
@@ -2056,14 +2177,14 @@ class PSDAnalysisWindow(QMainWindow):
 
     def _create_statistics_slide_payload(self):
         """Build statistics plot bytes and summary rows for report generation."""
-        if self.signal_data_full is None or self.sample_rate is None:
+        if (not self.channel_signal_full and self.signal_data_full is None):
             return None
         selected_indices = self._get_selected_channel_indices()
         if not selected_indices:
             return None
         channel_idx = selected_indices[0]
-        signal = self.signal_data_full if self.signal_data_full.ndim == 1 else self.signal_data_full[:, channel_idx]
-        if signal is None or len(signal) < 10:
+        _, signal, channel_sample_rate = self._get_channel_full(channel_idx)
+        if signal is None or len(signal) < 10 or channel_sample_rate is None:
             return None
 
         class _StatsConfig:
@@ -2078,7 +2199,7 @@ class PSDAnalysisWindow(QMainWindow):
             show_rayleigh = False
             show_uniform = False
 
-        stats = compute_statistics(signal, self.sample_rate, _StatsConfig())
+        stats = compute_statistics(signal, channel_sample_rate, _StatsConfig())
         pdf_fig, _ = plot_pdf(stats["pdf"], _StatsConfig())
         mean_fig, _ = plot_running_stat(stats["running"], "mean", "Running Mean", "Mean")
         std_fig, _ = plot_running_stat(stats["running"], "std", "Running Std", "Std")
@@ -2305,7 +2426,10 @@ class PSDAnalysisWindow(QMainWindow):
         """Validate maximax window duration in real-time."""
         window_duration = self.maximax_window_spin.value()
         data_duration = None
-        if self.time_data_full is not None and self.sample_rate is not None:
+        if self.channel_time_full:
+            time_min, time_max = self._get_time_bounds()
+            data_duration = max(0.0, time_max - time_min)
+        elif self.time_data_full is not None and self.sample_rate is not None:
             data_duration = len(self.time_data_full) / self.sample_rate
         result = self.validator.validate_maximax_window(window_duration, data_duration)
         self.validator.apply_validation_style(self.maximax_window_spin, result)
@@ -2421,10 +2545,22 @@ class PSDAnalysisWindow(QMainWindow):
             self.signal_data_full = signal_data
             self.time_data_display = time_data
             self.signal_data_display = signal_data
+
+            # Build per-channel storage for compatibility with mixed-rate paths
+            if signal_data.ndim == 1:
+                signal_columns = [signal_data]
+            else:
+                signal_columns = [signal_data[:, i] for i in range(signal_data.shape[1])]
+
+            self.channel_signal_full = [sig.copy() for sig in signal_columns]
+            self.channel_signal_display = [sig.copy() for sig in signal_columns]
+            self.channel_time_full = [time_data for _ in signal_columns]
+            self.channel_time_display = [time_data for _ in signal_columns]
+            self.channel_sample_rates = [self.sample_rate for _ in signal_columns]
             
             self.current_file = Path(file_path).name
             self.flight_name = ""  # CSV data has no flight name
-            self.channel_flight_names = []  # CSV data has no flight names
+            self.channel_flight_names = ["" for _ in signal_columns]  # CSV data has no flight names
             
             # Extract units from channel names (e.g., "Accelerometer_X (g)" -> "g")
             self.channel_units = []
@@ -2453,6 +2589,10 @@ class PSDAnalysisWindow(QMainWindow):
             
             # Create channel selection checkboxes
             self._create_channel_checkboxes()
+
+            # Keep event manager bounds synchronized with newly loaded data.
+            if self.event_manager is not None:
+                self.event_manager.set_time_bounds(min_time=time_min, max_time=time_max)
             
             # Enable calculate buttons
             self.calc_button.setEnabled(True)
@@ -2527,7 +2667,7 @@ class PSDAnalysisWindow(QMainWindow):
     
     def _plot_time_history(self):
         """Plot time history of selected channels using decimated display data."""
-        if self.signal_data_display is None:
+        if not self.channel_signal_display and self.signal_data_display is None:
             return
         
         # Clear previous plot
@@ -2553,25 +2693,25 @@ class PSDAnalysisWindow(QMainWindow):
                 channel_name = self.channel_names[i]
                 # Get individual flight name for this channel
                 flight_name = self.channel_flight_names[i] if i < len(self.channel_flight_names) else None
-                
-                # Use DISPLAY data (decimated) for plotting performance
-                if self.signal_data_display.ndim == 1:
-                    signal = self.signal_data_display.copy()
-                else:
-                    signal = self.signal_data_display[:, i].copy()
+
+                # Use per-channel DISPLAY data (decimated) for plotting performance
+                time_display, signal_display, channel_sample_rate = self._get_channel_display(i)
+                if signal_display is None or time_display is None or len(signal_display) == 0:
+                    continue
+                signal = signal_display.copy()
                 
                 # Apply optional filtering if enabled
                 if self.enable_filter_checkbox.isChecked():
-                    # Get channel-specific sample rate
-                    if self.channel_sample_rates and len(self.channel_sample_rates) > i:
-                        channel_sample_rate = self.channel_sample_rates[i]
-                    else:
-                        channel_sample_rate = self.sample_rate
                     signal = self._apply_filter(signal, channel_sample_rate)
                 
                 # Apply running mean removal if checkbox is checked
                 if self.remove_mean_checkbox.isChecked():
-                    signal = self._remove_running_mean(signal, window_seconds=1.0)
+                    signal = self._remove_running_mean(
+                        signal,
+                        window_seconds=1.0,
+                        sample_rate=channel_sample_rate,
+                        time_data=time_display
+                    )
                 
                 # Plot the time history
                 color = colors[plot_count % len(colors)]
@@ -2596,7 +2736,7 @@ class PSDAnalysisWindow(QMainWindow):
                     legend_label += f" ({', '.join(processing_tags)})"
                 
                 self.time_plot_widget.plot(
-                    self.time_data_display,
+                    time_display,
                     signal,
                     pen=pen,
                     name=legend_label
@@ -2613,7 +2753,7 @@ class PSDAnalysisWindow(QMainWindow):
     
     def _calculate_psd(self):
         """Calculate PSD with current parameters for all channels using FULL RESOLUTION data."""
-        if self.signal_data_full is None:
+        if not self.channel_signal_full and self.signal_data_full is None:
             show_warning(
                 self,
                 "No Data Loaded",
@@ -2628,7 +2768,12 @@ class PSDAnalysisWindow(QMainWindow):
             overlap_percent = self.overlap_spin.value()
             
             # Validate all parameters before calculation
-            data_duration = len(self.time_data_full) / self.sample_rate if self.sample_rate else None
+            data_duration = None
+            if self.channel_time_full:
+                time_min, time_max = self._get_time_bounds()
+                data_duration = max(0.0, time_max - time_min)
+            elif self.time_data_full is not None and self.sample_rate:
+                data_duration = len(self.time_data_full) / self.sample_rate
             params = {
                 'overlap': overlap_percent,
                 'df': df,
@@ -2649,11 +2794,10 @@ class PSDAnalysisWindow(QMainWindow):
             # Note: Frequency range is for DISPLAY only, not calculation
             # PSD is calculated for full frequency range up to Nyquist
             
-            # Determine number of channels and shape
-            if self.signal_data_full.ndim == 1:
-                num_channels = 1
-            else:
-                num_channels = self.signal_data_full.shape[1]  # samples x channels
+            # Determine number of channels from selected dataset
+            num_channels = len(self.channel_names) if self.channel_names else 0
+            if num_channels == 0 and self.signal_data_full is not None:
+                num_channels = 1 if self.signal_data_full.ndim == 1 else self.signal_data_full.shape[1]
             
             self.psd_results = {}
             self.rms_values = {}
@@ -2691,17 +2835,10 @@ class PSDAnalysisWindow(QMainWindow):
                     progress.setValue(channel_idx)
                     QApplication.processEvents()
                     
-                    # Get this channel's sample rate (support for multi-rate)
-                    if self.channel_sample_rates and len(self.channel_sample_rates) > channel_idx:
-                        channel_sample_rate = self.channel_sample_rates[channel_idx]
-                    else:
-                        channel_sample_rate = self.sample_rate  # Fallback to reference rate
-                    
-                    # Extract signal for this channel from FULL resolution data
-                    if self.signal_data_full.ndim == 1:
-                        signal = self.signal_data_full.copy()
-                    else:
-                        signal = self.signal_data_full[:, channel_idx].copy()
+                    _, signal_full, channel_sample_rate = self._get_channel_full(channel_idx)
+                    if signal_full is None or channel_sample_rate is None or len(signal_full) == 0:
+                        continue
+                    signal = signal_full.copy()
                     
                     # Apply optional filtering if enabled
                     if self.enable_filter_checkbox.isChecked():
@@ -2848,73 +2985,77 @@ class PSDAnalysisWindow(QMainWindow):
                 unit = self.channel_units[i] if i < len(self.channel_units) else ''
                 # Get individual flight name for this channel
                 flight_name = self.channel_flight_names[i] if i < len(self.channel_flight_names) else None
-                
+
+                if flight_name:
+                    # Remove 'flight_' prefix for cleaner display
+                    clean_flight_name = flight_name.replace('flight_', '')
+                    legend_prefix = f"{clean_flight_name} - {channel_name}"
+                else:
+                    legend_prefix = channel_name
+                rms_text = f"{rms:.2f} {unit}" if unit else f"{rms:.2f}"
+                base_legend_label = f"{legend_prefix}: RMS={rms_text}"
+
+                frequencies_to_plot = frequencies_plot
+                psd_to_plot = psd
+                legend_label = base_legend_label
+                channel_use_octave_plot = False
+
                 # Convert to octave bands if requested
                 if use_octave and octave_fraction is not None:
                     try:
-                        # Use FULL narrowband PSD for octave conversion (not truncated)
                         frequencies_plot_oct, psd_oct = convert_psd_to_octave_bands(
                             frequencies,  # Full frequency array
                             self.psd_results[channel_name],  # Full PSD array
                             octave_fraction=octave_fraction,
-                            freq_min=freq_min,
-                            freq_max=freq_max
+                            freq_min=actual_freq_min,
+                            freq_max=actual_freq_max
                         )
+                        octave_name = self.octave_combo.currentText()
                         frequencies_to_plot = frequencies_plot_oct
                         psd_to_plot = psd_oct
-                        # Add octave info to legend with individual flight name
-                        octave_name = self.octave_combo.currentText()
-                        if flight_name:
-                            # Remove 'flight_' prefix for cleaner display
-                            clean_flight_name = flight_name.replace('flight_', '')
-                            if unit:
-                                legend_label = f"{clean_flight_name} - {channel_name} ({octave_name}): RMS={rms:.2f} {unit}"
-                            else:
-                                legend_label = f"{clean_flight_name} - {channel_name} ({octave_name}): RMS={rms:.2f}"
-                        else:
-                            if unit:
-                                legend_label = f"{channel_name} ({octave_name}): RMS={rms:.2f} {unit}"
-                            else:
-                                legend_label = f"{channel_name} ({octave_name}): RMS={rms:.2f}"
+                        legend_label = f"{legend_prefix} ({octave_name}): RMS={rms_text}"
+                        channel_use_octave_plot = True
                     except Exception as e:
-                        show_warning(self, "Octave Conversion Error", f"Failed to convert to octave bands: {str(e)}\nShowing narrowband data.")
-                        frequencies_to_plot = frequencies_plot
-                        psd_to_plot = psd
-                        if flight_name:
-                            # Remove 'flight_' prefix for cleaner display
-                            clean_flight_name = flight_name.replace('flight_', '')
-                            if unit:
-                                legend_label = f"{clean_flight_name} - {channel_name}: RMS={rms:.2f} {unit}"
-                            else:
-                                legend_label = f"{clean_flight_name} - {channel_name}: RMS={rms:.2f}"
-                        else:
-                            if unit:
-                                legend_label = f"{channel_name}: RMS={rms:.2f} {unit}"
-                            else:
-                                legend_label = f"{channel_name}: RMS={rms:.2f}"
-                else:
+                        show_warning(
+                            self,
+                            "Octave Conversion Error",
+                            f"Failed to convert to octave bands: {str(e)}\nShowing narrowband data."
+                        )
+
+                # Enforce log-safe data for plotting
+                plot_mask = (
+                    np.isfinite(frequencies_to_plot)
+                    & np.isfinite(psd_to_plot)
+                    & (frequencies_to_plot > 0)
+                    & (psd_to_plot > 0)
+                )
+
+                if not np.any(plot_mask):
+                    # Fallback to narrowband data for this channel if octave output is not plottable
+                    fallback_mask = (
+                        np.isfinite(frequencies_plot)
+                        & np.isfinite(psd)
+                        & (frequencies_plot > 0)
+                        & (psd > 0)
+                    )
+                    if not np.any(fallback_mask):
+                        continue
+
                     frequencies_to_plot = frequencies_plot
                     psd_to_plot = psd
-                    # Create legend label with RMS and individual flight name
-                    if flight_name:
-                        # Remove 'flight_' prefix for cleaner display
-                        clean_flight_name = flight_name.replace('flight_', '')
-                        if unit:
-                            legend_label = f"{clean_flight_name} - {channel_name}: RMS={rms:.2f} {unit}"
-                        else:
-                            legend_label = f"{clean_flight_name} - {channel_name}: RMS={rms:.2f}"
-                    else:
-                        if unit:
-                            legend_label = f"{channel_name}: RMS={rms:.2f} {unit}"
-                        else:
-                            legend_label = f"{channel_name}: RMS={rms:.2f}"
+                    legend_label = base_legend_label
+                    channel_use_octave_plot = False
+                    plot_mask = fallback_mask
+
+                frequencies_to_plot = frequencies_to_plot[plot_mask]
+                psd_to_plot = psd_to_plot[plot_mask]
                 
                 # Plot the PSD
                 color = colors[plot_count % len(colors)]
                 pen = pg.mkPen(color=color, width=2)
                 
                 # Use bar plot for octave bands, line plot for narrowband
-                if use_octave:
+                if channel_use_octave_plot:
                     # Use combined markers and lines for octave bands
                     # This ensures connectivity even with sparse data points
                     self.plot_widget.plot(
@@ -2997,7 +3138,7 @@ class PSDAnalysisWindow(QMainWindow):
     
     def _open_spectrogram(self):
         """Open spectrogram window for selected channels (up to 4) using FULL RESOLUTION data."""
-        if self.signal_data_full is None:
+        if (not self.channel_signal_full and self.signal_data_full is None):
             return
         
         # Find all selected channels
@@ -3023,23 +3164,24 @@ class PSDAnalysisWindow(QMainWindow):
         # Prepare data for selected channels
         channels_data = []
         channel_sample_rates_list = []  # Store sample rate for each selected channel
+        time_data_for_window = None
         for idx in selected_channels:
             channel_name = self.channel_names[idx]
             # Use FULL resolution data for spectrogram calculations
-            if self.signal_data_full.ndim == 1:
-                signal = self.signal_data_full
-            else:
-                signal = self.signal_data_full[:, idx]
+            time_full, signal, channel_sr = self._get_channel_full(idx)
+            if signal is None or time_full is None:
+                continue
             unit = self.channel_units[idx] if idx < len(self.channel_units) else ''
             # Get flight name for this specific channel (empty for CSV)
             flight_name = self.channel_flight_names[idx] if idx < len(self.channel_flight_names) else ''
-            # Get sample rate for this channel
-            if self.channel_sample_rates and idx < len(self.channel_sample_rates):
-                channel_sr = self.channel_sample_rates[idx]
-            else:
-                channel_sr = self.sample_rate  # Fallback
             channels_data.append((channel_name, signal, unit, flight_name))
             channel_sample_rates_list.append(channel_sr)
+            if time_data_for_window is None:
+                time_data_for_window = time_full
+
+        if not channels_data or time_data_for_window is None:
+            show_warning(self, "No Data", "Could not prepare channel data for spectrogram.")
+            return
         
         # Get current PSD parameters to pass to spectrogram
         window = self.window_combo.currentText().lower()
@@ -3060,7 +3202,7 @@ class PSDAnalysisWindow(QMainWindow):
             window_obj.activateWindow()
         else:
             window_obj = SpectrogramWindow(
-                self.time_data_full,
+                time_data_for_window,
                 channels_data,  # Pass list of (name, signal, unit, flight_name) tuples
                 channel_sample_rates_list,  # Pass list of sample rates (one per channel)
                 window_type=window,
@@ -3075,17 +3217,22 @@ class PSDAnalysisWindow(QMainWindow):
     
     def _open_event_manager(self):
         """Open the Event Manager window."""
-        if self.time_data_full is None:
+        if not self.channel_time_full and self.time_data_full is None:
+            return
+
+        min_time, max_time = self._get_time_bounds()
+        if max_time <= min_time:
             return
         
         # Create event manager if it doesn't exist
         if self.event_manager is None:
-            max_time = self.time_data_full[-1]
-            self.event_manager = EventManagerWindow(max_time=max_time)
+            self.event_manager = EventManagerWindow(max_time=max_time, min_time=min_time)
             
             # Connect signals
             self.event_manager.events_updated.connect(self._on_events_updated)
             self.event_manager.interactive_mode_changed.connect(self._on_interactive_mode_changed)
+        else:
+            self.event_manager.set_time_bounds(min_time=min_time, max_time=max_time)
         
         # Show the window
         self.event_manager.show()
@@ -3146,7 +3293,8 @@ class PSDAnalysisWindow(QMainWindow):
         time_value = mouse_point.x()
         
         # Clamp to valid range
-        time_value = max(0, min(time_value, self.time_data_full[-1]))
+        min_time, max_time = self._get_time_bounds()
+        time_value = max(min_time, min(time_value, max_time))
         
         if self.selection_start is None:
             # First click - set start time
@@ -3218,7 +3366,7 @@ class PSDAnalysisWindow(QMainWindow):
     
     def _calculate_event_psds(self):
         """Calculate PSDs for all defined events using FULL RESOLUTION data."""
-        if self.signal_data_full is None or not self.events:
+        if (not self.channel_signal_full and self.signal_data_full is None) or not self.events:
             return
         
         try:
@@ -3233,10 +3381,9 @@ class PSDAnalysisWindow(QMainWindow):
             # PSD is calculated for full frequency range up to Nyquist
             
             # Determine number of channels
-            if self.signal_data_full.ndim == 1:
-                num_channels = 1
-            else:
-                num_channels = self.signal_data_full.shape[1]
+            num_channels = len(self.channel_names) if self.channel_names else 0
+            if num_channels == 0:
+                return
             
             # Clear previous results
             self.psd_results = {}
@@ -3244,32 +3391,33 @@ class PSDAnalysisWindow(QMainWindow):
             
             # Calculate PSD for each event and channel
             for event in self.events:
-                # Get time indices for this event using FULL resolution time data
-                start_idx = int(event.start_time * self.sample_rate)
-                end_idx = int(event.end_time * self.sample_rate)
-                
-                # Clamp to valid range
-                start_idx = max(0, start_idx)
-                end_idx = min(len(self.time_data_full), end_idx)
-                
                 # Calculate PSD for each channel
                 for channel_idx in range(num_channels):
                     channel_name = self.channel_names[channel_idx]
+                    time_full, signal_full, channel_sample_rate = self._get_channel_full(channel_idx)
+                    if time_full is None or signal_full is None or len(signal_full) == 0:
+                        continue
+                    if channel_sample_rate is None or channel_sample_rate <= 0:
+                        continue
+
+                    start_idx = int(np.searchsorted(time_full, event.start_time, side='left'))
+                    end_idx = int(np.searchsorted(time_full, event.end_time, side='right'))
+                    start_idx = max(0, min(start_idx, len(signal_full)))
+                    end_idx = max(start_idx, min(end_idx, len(signal_full)))
+                    if end_idx - start_idx < 2:
+                        continue
                     
                     # Extract signal segment from FULL resolution data
-                    if self.signal_data_full.ndim == 1:
-                        signal_segment = self.signal_data_full[start_idx:end_idx]
-                    else:
-                        signal_segment = self.signal_data_full[start_idx:end_idx, channel_idx]
+                    signal_segment = signal_full[start_idx:end_idx]
                     
                     # Calculate PSD using updated function signature
                     # Calculate nperseg from df for overlap calculation
-                    nperseg = int(self.sample_rate / df)
+                    nperseg = int(channel_sample_rate / df)
                     noverlap = int(nperseg * overlap_percent / 100.0)
                     
                     frequencies, psd = calculate_psd_welch(
                         signal_segment,
-                        self.sample_rate,
+                        channel_sample_rate,
                         df=df,
                         noverlap=noverlap,
                         window=window
@@ -3599,13 +3747,13 @@ class PSDAnalysisWindow(QMainWindow):
             # Load all selected channels
             print(f"Loading {len(selected_items)} channel(s)...")
             
+            all_time_full = []
+            all_time_display = []
             all_signals_full = []
             all_signals_display = []
             all_channel_names = []
             all_channel_units = []
             all_sample_rates = []  # Store sample rate for each channel
-            time_data_full = None
-            time_data_display = None
             sample_rate = None  # Reference sample rate (will be max of all)
             decimation_factor = 1
             flight_info = []
@@ -3634,66 +3782,54 @@ class PSDAnalysisWindow(QMainWindow):
                 # Track max sample rate
                 if sample_rate is None or result['sample_rate'] > sample_rate:
                     sample_rate = result['sample_rate']
-                    decimation_factor = result.get('decimation_factor', 1)
+                decimation_factor = max(decimation_factor, result.get('decimation_factor', 1))
             
             print(f"\nReference sample rate (max): {sample_rate} Hz")
             
-            # Second pass: align time data if needed
+            # Second pass: collect per-channel data (no padding/resampling)
             for idx, ch_data in enumerate(channel_data_list):
                 result = ch_data['result']
-                
-                # Store first channel's time as reference
-                if time_data_full is None:
-                    time_data_full = result['time_full']
-                    time_data_display = result['time_display']
-                
+
                 # Check if sample rates differ
                 if result['sample_rate'] != sample_rate:
                     print(f"  Channel {idx+1}: Different sample rate {result['sample_rate']} Hz (reference: {sample_rate} Hz)")
                     print(f"    Multi-rate support: Each channel will use its own sample rate for PSD calculation")
-                
+
+                all_time_full.append(result['time_full'])
+                all_time_display.append(result['time_display'])
                 all_signals_full.append(result['data_full'])
                 all_signals_display.append(result['data_display'])
                 all_channel_names.append(ch_data['channel_key'])
                 all_channel_units.append(ch_data['units'])
                 all_sample_rates.append(result['sample_rate'])  # Store each channel's sample rate
                 flight_info.append(ch_data['flight_key'])
-            
-            # Align signal lengths with zero-padding if needed
-            if len(all_signals_full) > 1:
-                # Find maximum length
-                max_len_full = max(len(sig) for sig in all_signals_full)
-                max_len_display = max(len(sig) for sig in all_signals_display)
-                
-                # Zero-pad shorter signals to match longest
-                all_signals_full_padded = []
-                all_signals_display_padded = []
-                
-                for i, (sig_full, sig_display) in enumerate(zip(all_signals_full, all_signals_display)):
-                    if len(sig_full) < max_len_full:
-                        # Pad with zeros at the end
-                        padded_full = np.pad(sig_full, (0, max_len_full - len(sig_full)), mode='constant', constant_values=0)
-                        print(f"    Channel {i+1}: Padded from {len(sig_full)} to {max_len_full} samples")
-                    else:
-                        padded_full = sig_full
-                    
-                    if len(sig_display) < max_len_display:
-                        padded_display = np.pad(sig_display, (0, max_len_display - len(sig_display)), mode='constant', constant_values=0)
-                    else:
-                        padded_display = sig_display
-                    
-                    all_signals_full_padded.append(padded_full)
-                    all_signals_display_padded.append(padded_display)
-                
-                # Stack signals into 2D array (samples x channels)
-                self.signal_data_full = np.column_stack(all_signals_full_padded)
-                self.signal_data_display = np.column_stack(all_signals_display_padded)
-            else:
-                # Single channel - no padding needed
+
+            # Store canonical per-channel data for all mixed-rate operations
+            self.channel_time_full = all_time_full
+            self.channel_time_display = all_time_display
+            self.channel_signal_full = all_signals_full
+            self.channel_signal_display = all_signals_display
+
+            # Keep legacy references for compatibility with older code paths.
+            self.time_data_full = all_time_full[0] if all_time_full else None
+            self.time_data_display = all_time_display[0] if all_time_display else None
+            if len(all_signals_full) == 1:
                 self.signal_data_full = all_signals_full[0].reshape(-1, 1)
                 self.signal_data_display = all_signals_display[0].reshape(-1, 1)
-            self.time_data_full = time_data_full
-            self.time_data_display = time_data_display
+            else:
+                same_full_length = len(set(len(sig) for sig in all_signals_full)) == 1
+                same_display_length = len(set(len(sig) for sig in all_signals_display)) == 1
+                same_full_time = all(np.array_equal(t, all_time_full[0]) for t in all_time_full[1:]) if len(all_time_full) > 1 else True
+                same_display_time = all(np.array_equal(t, all_time_display[0]) for t in all_time_display[1:]) if len(all_time_display) > 1 else True
+                if same_full_length and same_full_time:
+                    self.signal_data_full = np.column_stack(all_signals_full)
+                else:
+                    self.signal_data_full = all_signals_full[0].reshape(-1, 1)
+                if same_display_length and same_display_time:
+                    self.signal_data_display = np.column_stack(all_signals_display)
+                else:
+                    self.signal_data_display = all_signals_display[0].reshape(-1, 1)
+
             self.sample_rate = sample_rate  # Reference sample rate (max)
             self.channel_names = all_channel_names
             self.channel_units = all_channel_units
@@ -3714,26 +3850,26 @@ class PSDAnalysisWindow(QMainWindow):
                 self.current_file = f"Multiple flights ({len(selected_items)} channels)"
                 self.flight_name = "Multiple flights"  # Multiple flights
             
-            print(f"\nFinal full data shape: {self.signal_data_full.shape}")
-            print(f"Final display data shape: {self.signal_data_display.shape}")
-            print(f"Time data full shape: {self.time_data_full.shape}")
-            print(f"Time data display shape: {self.time_data_display.shape}")
+            print(f"\nLoaded channels: {len(self.channel_names)}")
+            for idx, (name, sr, sig, t) in enumerate(zip(self.channel_names, self.channel_sample_rates, self.channel_signal_full, self.channel_time_full), start=1):
+                print(f"  [{idx}] {name}: sr={sr}, samples={len(sig)}, t=[{float(t[0]):.3f}, {float(t[-1]):.3f}]")
             
-            # Calculate duration from full resolution time vector
-            duration = self.time_data_full[-1] - self.time_data_full[0]
+            # Calculate global duration from per-channel time bounds
+            time_min, time_max = self._get_time_bounds()
+            duration = max(0.0, time_max - time_min)
             
             # Update UI
             self.file_label.setText(f"Loaded: {self.current_file}")
             if decimation_factor > 1:
                 self.info_label.setText(
-                    f"Sample Rate: {self.sample_rate:.0f} Hz | "
+                    f"Reference SR: {self.sample_rate:.0f} Hz | "
                     f"Duration: {duration:.2f} s | "
                     f"Channels: {len(self.channel_names)} | "
                     f"Decimated {decimation_factor}x for display"
                 )
             else:
                 self.info_label.setText(
-                    f"Sample Rate: {self.sample_rate:.0f} Hz | "
+                    f"Reference SR: {self.sample_rate:.0f} Hz | "
                     f"Duration: {duration:.2f} s | "
                     f"Channels: {len(self.channel_names)} (Full resolution)"
                 )
@@ -3767,9 +3903,9 @@ class PSDAnalysisWindow(QMainWindow):
                 message = (
                     f"Successfully loaded {len(self.channel_names)} channel(s)\n"
                     f"Channels: {', '.join(self.channel_names)}\n"
-                    f"Sample Rate: {self.sample_rate:.0f} Hz\n"
+                    f"Reference Sample Rate: {self.sample_rate:.0f} Hz\n"
                     f"Duration: {duration:.2f} seconds\n"
-                    f"Samples: {len(self.time_data_full)} (full), {len(self.time_data_display)} (display)\n\n"
+                    f"Time Range: {time_min:.3f} to {time_max:.3f} s\n\n"
                     f"Note: Data decimated {decimation_factor}x for display.\n"
                     f"Full resolution will be used for PSD calculations."
                 )
@@ -3777,9 +3913,9 @@ class PSDAnalysisWindow(QMainWindow):
                 message = (
                     f"Successfully loaded {len(self.channel_names)} channel(s)\n"
                     f"Channels: {', '.join(self.channel_names)}\n"
-                    f"Sample Rate: {self.sample_rate:.0f} Hz\n"
+                    f"Reference Sample Rate: {self.sample_rate:.0f} Hz\n"
                     f"Duration: {duration:.2f} seconds\n"
-                    f"Samples: {len(self.time_data_full)} (full resolution)"
+                    f"Time Range: {time_min:.3f} to {time_max:.3f} s"
                 )
             
             show_information(self, "Data Loaded", message)
@@ -3827,7 +3963,7 @@ class PSDAnalysisWindow(QMainWindow):
         if self.octave_checkbox.isChecked() and self.frequencies and self.psd_results:
             self._update_plot()
 
-    def _remove_running_mean(self, signal, window_seconds=1.0):
+    def _remove_running_mean(self, signal, window_seconds=1.0, sample_rate=None, time_data=None):
         """
         Remove running mean from signal using a moving average filter.
         
@@ -3878,9 +4014,24 @@ class PSDAnalysisWindow(QMainWindow):
         """
         from scipy.ndimage import uniform_filter1d
         
-        # Calculate window size in samples
-        # Use display sample rate (may be decimated)
-        display_sample_rate = len(self.time_data_display) / (self.time_data_display[-1] - self.time_data_display[0])
+        # Calculate window size in samples from channel-specific timing when available.
+        display_sample_rate = None
+        if time_data is not None and len(time_data) > 1:
+            dt = float(np.median(np.diff(time_data)))
+            if dt > 0:
+                display_sample_rate = 1.0 / dt
+        if display_sample_rate is None and sample_rate is not None and sample_rate > 0:
+            display_sample_rate = float(sample_rate)
+        if (
+            display_sample_rate is None and
+            self.time_data_display is not None and
+            len(self.time_data_display) > 1 and
+            (self.time_data_display[-1] - self.time_data_display[0]) > 0
+        ):
+            display_sample_rate = len(self.time_data_display) / (self.time_data_display[-1] - self.time_data_display[0])
+        if display_sample_rate is None:
+            return signal
+
         window_samples = int(window_seconds * display_sample_rate)
         
         # Ensure window size is at least 3 samples and odd

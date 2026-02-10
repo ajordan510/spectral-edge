@@ -25,7 +25,12 @@ SpectralEdge includes several utility tools designed to help with common data pr
    - Split by equal count or custom time slices
    - Maintains SpectralEdge-compatible structure
 
-3. **MATLAB to HDF5** *(Coming Soon)*
+3. **HDF5 (SpectralEdge) to MATLAB (MARVIN)**
+   - Export one `.mat` file per flight/channel pair
+   - Each output contains one MARVIN-compatible structure variable
+   - Preserves channel timing and units metadata
+
+4. **MATLAB to HDF5** *(Coming Soon)*
    - Convert MATLAB .mat files to SpectralEdge HDF5 format
 
 ### Features

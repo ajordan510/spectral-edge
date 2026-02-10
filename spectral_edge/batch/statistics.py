@@ -16,6 +16,7 @@ from spectral_edge.utils.plot_theme import (
     apply_axis_styling,
     BASE_FONT_SIZE,
     LINE_COLOR,
+    add_watermark,
 )
 
 
@@ -130,19 +131,19 @@ def plot_pdf(pdf_data: Dict, stats_config) -> Tuple["mpl.Figure", "mpl.Axes"]:
     mean = pdf_data["mean"]
     std = pdf_data["std"]
 
-    ax.plot(bins, counts, linewidth=1.2, label="PDF", color=LINE_COLOR)
+    ax.plot(bins, counts, linewidth=0.9, label="PDF", color=LINE_COLOR)
 
     x = np.linspace(bins.min(), bins.max(), 400)
     if getattr(stats_config, "show_normal", False):
-        ax.plot(x, stats.norm.pdf(x, mean, std), linestyle="--", linewidth=1.0, color="#d62728", label="Normal")
+        ax.plot(x, stats.norm.pdf(x, mean, std), linestyle="--", linewidth=0.8, color="#d62728", label="Normal")
     if getattr(stats_config, "show_rayleigh", False):
-        ax.plot(x, stats.rayleigh.pdf(x, scale=std), linestyle="--", linewidth=1.0, label="Rayleigh")
+        ax.plot(x, stats.rayleigh.pdf(x, scale=std), linestyle="--", linewidth=0.8, label="Rayleigh")
     if getattr(stats_config, "show_uniform", False):
         ax.plot(
             x,
             stats.uniform.pdf(x, loc=bins.min(), scale=bins.max() - bins.min()),
             linestyle="--",
-            linewidth=1.0,
+            linewidth=0.8,
             label="Uniform",
         )
 
@@ -151,6 +152,7 @@ def plot_pdf(pdf_data: Dict, stats_config) -> Tuple["mpl.Figure", "mpl.Axes"]:
     max_abs = max(abs(float(bins.min())), abs(float(bins.max())))
     if max_abs > 0:
         ax.set_xlim(-max_abs, max_abs)
+    add_watermark(ax)
     ax.legend(fontsize=max(6.5, BASE_FONT_SIZE - 1.0), loc="best")
     fig.tight_layout()
     return fig, ax
@@ -180,9 +182,10 @@ def plot_running_stat(running_data: Dict, stat_key: str, title: str, y_label: st
         fig.tight_layout()
         return fig, ax
 
-    ax.plot(time, values, linewidth=1.1, color=LINE_COLOR)
+    ax.plot(time, values, linewidth=0.8, color=LINE_COLOR)
     style_axes(ax, title, "Time (s)", y_label)
     apply_axis_styling(ax, font_size=BASE_FONT_SIZE, include_grid=True)
+    add_watermark(ax)
     fig.tight_layout()
     return fig, ax
 

@@ -323,7 +323,7 @@ class BatchProcessor:
         tuple
             (min_time, max_time) or (None, None) if full duration is requested
         """
-        if self.config.process_full_duration:
+        if self._include_full_duration():
             return None, None
 
         if not self.config.events:
@@ -333,6 +333,10 @@ class BatchProcessor:
         max_time = max(event.end_time for event in self.config.events)
 
         return min_time, max_time
+
+    def _include_full_duration(self) -> bool:
+        """Return True if full-duration outputs should be included."""
+        return self.config.process_full_duration or bool(self.config.events)
 
     def _process_channel_hdf5(self, flight_key: str, channel_key: str):
         """
@@ -400,7 +404,7 @@ class BatchProcessor:
         )
 
         # Process full duration if requested
-        if self.config.process_full_duration:
+        if self._include_full_duration():
             self._process_event(
                 flight_key, channel_key, "full_duration",
                 time_array, signal_array, sample_rate, units,
@@ -480,7 +484,7 @@ class BatchProcessor:
         flight_key = Path(file_path).stem  # Use filename as flight key
         
         # Process full duration if requested
-        if self.config.process_full_duration:
+        if self._include_full_duration():
             self._process_event(
                 flight_key, channel_key, "full_duration",
                 time_array, signal_array, sample_rate, units,

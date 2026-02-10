@@ -1,0 +1,103 @@
+{
+  "source_type": "hdf5",
+  "source_files": [
+    "C:/Users/alexj/OneDrive/Desktop/spectral-edge/data/sample_flight_data.hdf5"
+  ],
+  "selected_channels": [
+    [
+      "flight_001",
+      "accelerometer_x"
+    ],
+    [
+      "flight_001",
+      "accelerometer_y"
+    ],
+    [
+      "flight_001",
+      "accelerometer_z"
+    ],
+    [
+      "flight_001",
+      "pressure_1"
+    ],
+    [
+      "flight_001",
+      "temperature_1"
+    ]
+  ],
+  "events": [],
+  "process_full_duration": true,
+  "filter_config": {
+    "enabled": false,
+    "filter_type": "lowpass",
+    "filter_design": "butterworth",
+    "filter_order": 4,
+    "cutoff_low": 100.0,
+    "cutoff_high": 2000.0
+  },
+  "psd_config": {
+    "method": "maximax",
+    "window": "hann",
+    "overlap_percent": 50.0,
+    "use_efficient_fft": true,
+    "desired_df": 1.0,
+    "freq_min": 10.0,
+    "freq_max": 2000.0,
+    "remove_running_mean": true,
+    "running_mean_window": 1.0,
+    "frequency_spacing": "constant_bandwidth"
+  },
+  "spectrogram_config": {
+    "enabled": false,
+    "desired_df": 1.0,
+    "overlap_percent": 50.0,
+    "use_efficient_fft": true,
+    "snr_threshold": 20.0,
+    "freq_min": 20.0,
+    "freq_max": 2000.0,
+    "colormap": "viridis"
+  },
+  "display_config": {
+    "psd_y_axis_min": 1e-05,
+    "psd_y_axis_max": 10.0,
+    "psd_x_axis_min": 10.0,
+    "psd_x_axis_max": 3000.0,
+    "psd_auto_scale": false,
+    "psd_show_legend": true,
+    "psd_show_grid": true,
+    "spectrogram_auto_scale": true,
+    "spectrogram_time_min": 0.0,
+    "spectrogram_time_max": 10.0,
+    "spectrogram_freq_min": 20.0,
+    "spectrogram_freq_max": 2000.0
+  },
+  "output_config": {
+    "excel_enabled": true,
+    "csv_enabled": true,
+    "powerpoint_enabled": true,
+    "hdf5_writeback_enabled": true,
+    "output_directory": "C:\\Users\\alexj\\OneDrive\\Desktop\\spectral-edge\\data"
+  },
+  "powerpoint_config": {
+    "layout": "psd_only",
+    "include_parameters": true,
+    "include_statistics": true,
+    "include_rms_table": true
+  },
+  "statistics_config": {
+    "enabled": true,
+    "pdf_bins": 50,
+    "running_window_seconds": 1.0,
+    "show_mean": true,
+    "show_std": true,
+    "show_skewness": false,
+    "show_kurtosis": false,
+    "show_normal": true,
+    "show_rayleigh": false,
+    "show_uniform": false,
+    "max_plot_points": 5000
+  },
+  "config_name": "",
+  "created_timestamp": "2026-02-06T06:36:09.879963",
+  "modified_timestamp": "2026-02-06T06:39:40.666456"
+}

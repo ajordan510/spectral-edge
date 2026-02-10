@@ -125,11 +125,11 @@ class PSDConfig:
 class PowerPointConfig:
     """Configuration for PowerPoint report generation."""
 
-    layout: str = "psd_only"
+    layout: str = "time_psd_spec_one_slide"
     include_parameters: bool = True
-    include_statistics: bool = False
-    include_rms_table: bool = False
-    include_3sigma_columns: bool = False
+    include_statistics: bool = True
+    include_rms_table: bool = True
+    include_3sigma_columns: bool = True
 
     def validate(self):
         valid_layouts = [

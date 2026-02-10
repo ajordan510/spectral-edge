@@ -358,6 +358,17 @@ class HDF5FlightDataLoader:
 
         # Get sample rate from channel info (already loaded in metadata)
         sample_rate = channel_info.sample_rate
+        if not sample_rate or sample_rate <= 0:
+            if len(time_dataset) > 1:
+                t0 = float(time_dataset[0])
+                t1 = float(time_dataset[1])
+                if t1 > t0:
+                    sample_rate = 1.0 / (t1 - t0)
+            if not sample_rate or sample_rate <= 0:
+                raise ValueError(
+                    f"Invalid sample rate for {channel_info.full_path}. "
+                    "Ensure channel metadata includes sample_rate or time data is valid."
+                )
         total_samples = len(data_dataset)
 
         # Determine indices for time range using efficient calculation

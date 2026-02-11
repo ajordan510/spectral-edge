@@ -130,6 +130,7 @@ class PowerPointConfig:
     include_statistics: bool = True
     include_rms_table: bool = True
     include_3sigma_columns: bool = True
+    reference_curves: List["ReferenceCurveConfig"] = field(default_factory=list)
 
     def validate(self):
         valid_layouts = [
@@ -142,6 +143,21 @@ class PowerPointConfig:
         ]
         if self.layout not in valid_layouts:
             raise ValueError(f"Invalid PowerPoint layout: {self.layout}")
+
+
+@dataclass
+class ReferenceCurveConfig:
+    """Configuration for one reference curve overlay."""
+
+    name: str = ""
+    frequencies: List[float] = field(default_factory=list)
+    psd: List[float] = field(default_factory=list)
+    enabled: bool = True
+    source: str = "imported"  # builtin or imported
+    builtin_id: Optional[str] = None
+    file_path: Optional[str] = None
+    color: Optional[str] = None
+    line_style: str = "dashed"
 
 
 @dataclass
@@ -424,6 +440,14 @@ class BatchConfig:
             data['output_config'] = OutputConfig(**data['output_config'])
 
         if 'powerpoint_config' in data and isinstance(data['powerpoint_config'], dict):
+            if 'reference_curves' in data['powerpoint_config'] and isinstance(data['powerpoint_config']['reference_curves'], list):
+                curves = []
+                for curve in data['powerpoint_config']['reference_curves']:
+                    if isinstance(curve, dict):
+                        curves.append(ReferenceCurveConfig(**curve))
+                    elif isinstance(curve, ReferenceCurveConfig):
+                        curves.append(curve)
+                data['powerpoint_config']['reference_curves'] = curves
             data['powerpoint_config'] = PowerPointConfig(**data['powerpoint_config'])
 
         if 'statistics_config' in data and isinstance(data['statistics_config'], dict):

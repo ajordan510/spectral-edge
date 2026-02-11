@@ -37,7 +37,9 @@ from matplotlib import colormaps
 # Import utilities
 from spectral_edge.utils.message_box import show_information, show_warning, show_critical
 from spectral_edge.utils.hdf5_loader import HDF5FlightDataLoader
+from spectral_edge.utils.signal_conditioning import apply_processing_pipeline, build_processing_note
 from spectral_edge.utils.theme import apply_context_menu_style
+from spectral_edge.gui.flight_navigator_enhanced import FlightNavigator
 
 
 class SpectrogramCache:
@@ -189,6 +191,12 @@ class SegmentedSpectrogramDisplayWindow(QMainWindow):
         self.segment_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(self.segment_info_label)
 
+        self.conditioning_info_label = QLabel("Signal Conditioning: Filter: off | Running Mean Not Removed")
+        self.conditioning_info_label.setStyleSheet("color: #9ca3af; font-style: italic;")
+        self.conditioning_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.conditioning_info_label.setWordWrap(True)
+        main_layout.addWidget(self.conditioning_info_label)
+
         self.spectrogram_plot = pg.PlotWidget()
         self.spectrogram_plot.setMinimumHeight(700)
         self.spectrogram_plot.setLabel('left', 'Frequency', units='Hz', color='#e0e0e0', size='11pt')
@@ -294,7 +302,7 @@ class SegmentedSpectrogramViewer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Segmented Spectrogram Viewer")
-        self.setMinimumSize(1050, 820)
+        self.setMinimumSize(920, 820)
         
         # State variables
         self.hdf5_loader = None
@@ -302,12 +310,15 @@ class SegmentedSpectrogramViewer(QMainWindow):
         self.sample_rate = None
         self.channel_name = None
         self.flight_key = None
+        self.channel_units = ""
         
         self.segments = []  # List of (start_idx, end_idx) tuples
         self.current_segment_idx = 0
         self.spectrogram_cache = SpectrogramCache(max_size=10)
         self.generator_thread = None
         self.display_window = None
+        self.mean_window_seconds = 1.0
+        self._efficient_fft_base_label = "Use efficient FFT size"
         
         # Create UI
         self._create_ui()
@@ -337,12 +348,19 @@ class SegmentedSpectrogramViewer(QMainWindow):
         main_layout.addWidget(file_group)
         
         # Segmentation settings
-        seg_group = self._create_segmentation_settings()
+        seg_group = self._create_segmentation_settings_group()
         main_layout.addWidget(seg_group)
-        
-        # Spectrogram parameters
-        params_group = self._create_spectrogram_parameters()
-        main_layout.addWidget(params_group)
+
+        spec_params_group = self._create_spectrogram_parameters_group()
+        main_layout.addWidget(spec_params_group)
+
+        conditioning_group = self._create_signal_conditioning_group()
+        main_layout.addWidget(conditioning_group)
+
+        display_params_group = self._create_display_parameters_group()
+        main_layout.addWidget(display_params_group)
+
+        self._connect_parameter_signals()
 
         self.display_hint_label = QLabel(
             "Spectrogram display opens in a dedicated popup window after generation."
@@ -353,6 +371,13 @@ class SegmentedSpectrogramViewer(QMainWindow):
         # Action buttons
         button_layout = QHBoxLayout()
         button_layout.addStretch()
+
+        self.generate_button = QPushButton("Generate Spectrograms")
+        self.generate_button.setMinimumWidth(160)
+        self.generate_button.setMinimumHeight(35)
+        self.generate_button.setEnabled(False)
+        self.generate_button.clicked.connect(self._on_generate_clicked)
+        button_layout.addWidget(self.generate_button)
         
         self.export_current_button = QPushButton("Export Current")
         self.export_current_button.setMinimumWidth(130)
@@ -381,7 +406,7 @@ class SegmentedSpectrogramViewer(QMainWindow):
         group = QGroupBox("Input File")
         layout = QGridLayout()
         layout.setContentsMargins(10, 10, 10, 10)
-        layout.setHorizontalSpacing(6)
+        layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(6)
         
         # File path selection
@@ -405,41 +430,47 @@ class SegmentedSpectrogramViewer(QMainWindow):
         self.file_info_label = QLabel("No file selected")
         self.file_info_label.setStyleSheet("color: #9ca3af; font-style: italic;")
         layout.addWidget(self.file_info_label, 1, 0, 1, 3)
-        
-        # Flight selection
+
         layout.addWidget(
-            QLabel("Flight:"),
+            QLabel("Selected Flight:"),
             2,
             0,
             alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
         )
-        self.flight_combo = QComboBox()
-        self.flight_combo.setEnabled(False)
-        self.flight_combo.currentTextChanged.connect(self._on_flight_changed)
-        layout.addWidget(self.flight_combo, 2, 1, 1, 2)
-        
-        # Channel selection
+        self.selected_flight_value = QLabel("None selected")
+        self.selected_flight_value.setStyleSheet("color: #9ca3af;")
+        layout.addWidget(self.selected_flight_value, 2, 1, 1, 2)
+
         layout.addWidget(
-            QLabel("Channel:"),
+            QLabel("Selected Channel:"),
             3,
             0,
             alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
         )
-        self.channel_combo = QComboBox()
-        self.channel_combo.setEnabled(False)
-        self.channel_combo.currentTextChanged.connect(self._on_channel_changed)
-        layout.addWidget(self.channel_combo, 3, 1, 1, 2)
+        self.selected_channel_value = QLabel("None selected")
+        self.selected_channel_value.setStyleSheet("color: #9ca3af;")
+        layout.addWidget(self.selected_channel_value, 3, 1, 1, 2)
+
+        layout.addWidget(
+            QLabel("Sample Rate:"),
+            4,
+            0,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.selected_sr_value = QLabel("N/A")
+        self.selected_sr_value.setStyleSheet("color: #9ca3af;")
+        layout.addWidget(self.selected_sr_value, 4, 1, 1, 2)
         
         layout.setColumnStretch(1, 1)
         group.setLayout(layout)
         return group
     
-    def _create_segmentation_settings(self) -> QGroupBox:
+    def _create_segmentation_settings_group(self) -> QGroupBox:
         """Create segmentation settings group."""
         group = QGroupBox("Segmentation Settings")
         layout = QGridLayout()
         layout.setContentsMargins(10, 10, 10, 10)
-        layout.setHorizontalSpacing(6)
+        layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(6)
         
         # Segment duration
@@ -454,184 +485,312 @@ class SegmentedSpectrogramViewer(QMainWindow):
         self.segment_duration_spin.setMaximum(3600.0)
         self.segment_duration_spin.setValue(60.0)
         self.segment_duration_spin.setSuffix(" s")
-        self.segment_duration_spin.setMaximumWidth(180)
+        self.segment_duration_spin.setMaximumWidth(170)
         self.segment_duration_spin.setEnabled(False)
         layout.addWidget(self.segment_duration_spin, 0, 1)
         
         # Overlap
         layout.addWidget(
-            QLabel("Overlap:"),
-            1,
+            QLabel("Segment Overlap:"),
             0,
+            2,
             alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
         )
         self.segment_overlap_spin = QSpinBox()
         self.segment_overlap_spin.setMinimum(0)
         self.segment_overlap_spin.setMaximum(90)
-        self.segment_overlap_spin.setValue(50)
+        self.segment_overlap_spin.setValue(0)
         self.segment_overlap_spin.setSuffix(" %")
         self.segment_overlap_spin.setEnabled(False)
-        self.segment_overlap_spin.setMaximumWidth(180)
-        layout.addWidget(self.segment_overlap_spin, 1, 1)
+        self.segment_overlap_spin.setMaximumWidth(170)
+        layout.addWidget(self.segment_overlap_spin, 0, 3)
         
         # Total segments display
         self.total_segments_label = QLabel("Total Segments: 0")
         self.total_segments_label.setStyleSheet("color: #60a5fa; font-weight: bold;")
-        layout.addWidget(self.total_segments_label, 2, 0, 1, 2)
-        
-        # Generate button
-        self.generate_button = QPushButton("Generate Spectrograms")
-        self.generate_button.setMinimumHeight(35)
-        self.generate_button.setEnabled(False)
-        self.generate_button.clicked.connect(self._on_generate_clicked)
-        layout.addWidget(self.generate_button, 3, 0, 1, 2)
+        layout.addWidget(self.total_segments_label, 1, 0, 1, 4)
         
         layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(3, 1)
         group.setLayout(layout)
         return group
-    
-    def _create_spectrogram_parameters(self) -> QGroupBox:
-        """Create spectrogram parameters group."""
+
+    def _create_spectrogram_parameters_group(self) -> QGroupBox:
+        """Create spectrogram-parameter controls group."""
         group = QGroupBox("Spectrogram Parameters")
         layout = QGridLayout()
         layout.setContentsMargins(10, 10, 10, 10)
-        layout.setHorizontalSpacing(6)
+        layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(6)
 
         row = 0
-
-        layout.addWidget(QLabel("Window:"), row, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(
+            QLabel("Window:"),
+            row,
+            0,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
         self.window_combo = QComboBox()
         self.window_combo.addItems(['hann', 'hamming', 'blackman', 'bartlett'])
-        self.window_combo.setMaximumWidth(180)
+        self.window_combo.setMaximumWidth(170)
         layout.addWidget(self.window_combo, row, 1)
-
-        layout.addWidget(QLabel("Overlap (%):"), row, 2, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(
+            QLabel("Spectrogram Overlap (%):"),
+            row,
+            2,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
         self.spec_overlap_spin = QSpinBox()
         self.spec_overlap_spin.setRange(0, 95)
         self.spec_overlap_spin.setValue(75)
         self.spec_overlap_spin.setSuffix(" %")
-        self.spec_overlap_spin.setMaximumWidth(180)
+        self.spec_overlap_spin.setMaximumWidth(170)
         layout.addWidget(self.spec_overlap_spin, row, 3)
         row += 1
 
-        layout.addWidget(QLabel("df (Hz):"), row, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(
+            QLabel("df (Hz):"),
+            row,
+            0,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
         self.df_spin = QDoubleSpinBox()
         self.df_spin.setRange(0.01, 1000.0)
         self.df_spin.setDecimals(2)
         self.df_spin.setSingleStep(0.1)
         self.df_spin.setValue(1.0)
-        self.df_spin.setMaximumWidth(180)
+        self.df_spin.setMaximumWidth(170)
         layout.addWidget(self.df_spin, row, 1)
-
-        layout.addWidget(QLabel("Freq Min (Hz):"), row, 2, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.freq_min_spin = QDoubleSpinBox()
-        self.freq_min_spin.setRange(0, 1000000)
-        self.freq_min_spin.setValue(0.0)
-        self.freq_min_spin.setMaximumWidth(180)
-        layout.addWidget(self.freq_min_spin, row, 3)
-        row += 1
 
         self.efficient_fft_checkbox = QCheckBox("Use efficient FFT size")
         self.efficient_fft_checkbox.setChecked(True)
         self.efficient_fft_checkbox.setToolTip("Round segment length to nearest power of two for faster FFT computation")
-        layout.addWidget(self.efficient_fft_checkbox, row, 0, 1, 2)
-
-        self.actual_df_label = QLabel("(actual df = --)")
-        self.actual_df_label.setStyleSheet("color: #9ca3af; font-size: 10pt;")
-        layout.addWidget(self.actual_df_label, row, 2, 1, 2)
+        layout.addWidget(
+            QLabel("Efficient FFT Size:"),
+            row,
+            2,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        layout.addWidget(
+            self.efficient_fft_checkbox,
+            row,
+            3,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
         row += 1
 
-        layout.addWidget(QLabel("Freq Max (Hz):"), row, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(
+            QLabel("Freq Min (Hz):"),
+            row,
+            0,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.freq_min_spin = QDoubleSpinBox()
+        self.freq_min_spin.setRange(0, 1000000)
+        self.freq_min_spin.setValue(0.0)
+        self.freq_min_spin.setMaximumWidth(170)
+        layout.addWidget(self.freq_min_spin, row, 1)
+
+        layout.addWidget(
+            QLabel("Freq Max (Hz):"),
+            row,
+            2,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
         self.freq_max_spin = QDoubleSpinBox()
         self.freq_max_spin.setRange(0, 1000000)
         self.freq_max_spin.setValue(25000.0)
-        self.freq_max_spin.setMaximumWidth(180)
-        layout.addWidget(self.freq_max_spin, row, 1)
+        self.freq_max_spin.setMaximumWidth(170)
+        layout.addWidget(self.freq_max_spin, row, 3)
 
-        layout.addWidget(QLabel("Colormap:"), row, 2, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(3, 1)
+        group.setLayout(layout)
+        return group
+
+    def _create_signal_conditioning_group(self) -> QGroupBox:
+        """Create signal-conditioning controls group."""
+        group = QGroupBox("Signal Conditioning")
+        layout = QGridLayout()
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(6)
+
+        row = 0
+        layout.addWidget(
+            QLabel("Enable Filter:"),
+            row,
+            0,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.conditioning_filter_checkbox = QCheckBox("Enable")
+        layout.addWidget(
+            self.conditioning_filter_checkbox,
+            row,
+            1,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+
+        layout.addWidget(
+            QLabel("Filter Type:"),
+            row,
+            2,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.conditioning_filter_type_combo = QComboBox()
+        self.conditioning_filter_type_combo.addItems(["lowpass", "highpass", "bandpass"])
+        self.conditioning_filter_type_combo.setCurrentText("bandpass")
+        self.conditioning_filter_type_combo.setMaximumWidth(170)
+        self.conditioning_filter_type_combo.setEnabled(False)
+        layout.addWidget(self.conditioning_filter_type_combo, row, 3)
+        row += 1
+
+        self.conditioning_low_cutoff_label = QLabel("Low Cutoff (Hz):")
+        layout.addWidget(
+            self.conditioning_low_cutoff_label,
+            row,
+            0,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.conditioning_low_cutoff_spin = QDoubleSpinBox()
+        self.conditioning_low_cutoff_spin.setRange(0.1, 1000000.0)
+        self.conditioning_low_cutoff_spin.setDecimals(2)
+        self.conditioning_low_cutoff_spin.setSingleStep(1.0)
+        self.conditioning_low_cutoff_spin.setValue(100.0)
+        self.conditioning_low_cutoff_spin.setMaximumWidth(170)
+        self.conditioning_low_cutoff_spin.setEnabled(False)
+        layout.addWidget(self.conditioning_low_cutoff_spin, row, 1)
+
+        self.conditioning_high_cutoff_label = QLabel("High Cutoff (Hz):")
+        layout.addWidget(
+            self.conditioning_high_cutoff_label,
+            row,
+            2,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.conditioning_high_cutoff_spin = QDoubleSpinBox()
+        self.conditioning_high_cutoff_spin.setRange(0.1, 1000000.0)
+        self.conditioning_high_cutoff_spin.setDecimals(2)
+        self.conditioning_high_cutoff_spin.setSingleStep(1.0)
+        self.conditioning_high_cutoff_spin.setValue(2000.0)
+        self.conditioning_high_cutoff_spin.setMaximumWidth(170)
+        self.conditioning_high_cutoff_spin.setEnabled(False)
+        layout.addWidget(self.conditioning_high_cutoff_spin, row, 3)
+        row += 1
+
+        layout.addWidget(
+            QLabel("Remove Running Mean:"),
+            row,
+            0,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.conditioning_remove_mean_checkbox = QCheckBox("Remove")
+        layout.addWidget(
+            self.conditioning_remove_mean_checkbox,
+            row,
+            1,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        row += 1
+
+        self.conditioning_design_label = QLabel("Filter Design: 6th-order Butterworth")
+        self.conditioning_design_label.setStyleSheet("color: #9ca3af;")
+        self.conditioning_design_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.conditioning_design_label, row, 2, 1, 2)
+        row += 1
+
+        self.conditioning_note_label = QLabel("Signal Conditioning: Filter: off | Running Mean Not Removed")
+        self.conditioning_note_label.setStyleSheet("color: #9ca3af; font-size: 10pt;")
+        self.conditioning_note_label.setWordWrap(True)
+        self.conditioning_note_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.conditioning_note_label, row, 0, 1, 4)
+
+        layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(3, 1)
+        group.setLayout(layout)
+        return group
+
+    def _create_display_parameters_group(self) -> QGroupBox:
+        """Create display controls group."""
+        group = QGroupBox("Display Parameters")
+        layout = QGridLayout()
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(6)
+
+        row = 0
+        layout.addWidget(
+            QLabel("Show Colorbar:"),
+            row,
+            0,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.show_colorbar_checkbox = QCheckBox("Show")
+        self.show_colorbar_checkbox.setChecked(True)
+        layout.addWidget(
+            self.show_colorbar_checkbox,
+            row,
+            1,
+            alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        )
+
+        layout.addWidget(
+            QLabel("Colormap:"),
+            row,
+            2,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
         self.colormap_combo = QComboBox()
         self.colormap_combo.addItems(['viridis', 'plasma', 'inferno', 'magma', 'jet', 'hot', 'cool'])
         self.colormap_combo.setCurrentText('viridis')
-        self.colormap_combo.setMaximumWidth(180)
+        self.colormap_combo.setMaximumWidth(170)
         layout.addWidget(self.colormap_combo, row, 3)
         row += 1
 
-        layout.addWidget(QLabel("SNR (dB):"), row, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(
+            QLabel("SNR (dB):"),
+            row,
+            2,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
         self.snr_spin = QSpinBox()
         self.snr_spin.setRange(10, 100)
         self.snr_spin.setSingleStep(5)
         self.snr_spin.setValue(60)
-        self.snr_spin.setMaximumWidth(180)
-        layout.addWidget(self.snr_spin, row, 1)
-
-        self.show_colorbar_checkbox = QCheckBox("Show colorbar")
-        self.show_colorbar_checkbox.setChecked(True)
-        layout.addWidget(self.show_colorbar_checkbox, row, 2, 1, 2)
-        row += 1
-
-        self.auto_limits_checkbox = QCheckBox("Auto axis limits")
-        self.auto_limits_checkbox.setChecked(True)
-        layout.addWidget(self.auto_limits_checkbox, row, 0, 1, 2)
-
-        self.apply_limits_button = QPushButton("Apply Axis Limits")
-        self.apply_limits_button.setEnabled(False)
-        self.apply_limits_button.clicked.connect(self._apply_manual_axis_limits)
-        layout.addWidget(self.apply_limits_button, row, 2, 1, 2)
-        row += 1
-
-        layout.addWidget(QLabel("X Min (s):"), row, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.time_min_edit = QLineEdit("0.0")
-        self.time_min_edit.setEnabled(False)
-        self.time_min_edit.setMaximumWidth(180)
-        layout.addWidget(self.time_min_edit, row, 1)
-
-        layout.addWidget(QLabel("X Max (s):"), row, 2, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.time_max_edit = QLineEdit("100.0")
-        self.time_max_edit.setEnabled(False)
-        self.time_max_edit.setMaximumWidth(180)
-        layout.addWidget(self.time_max_edit, row, 3)
-        row += 1
-
-        layout.addWidget(QLabel("Y Min (Hz):"), row, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.freq_axis_min_edit = QLineEdit("0.0")
-        self.freq_axis_min_edit.setEnabled(False)
-        self.freq_axis_min_edit.setMaximumWidth(180)
-        layout.addWidget(self.freq_axis_min_edit, row, 1)
-
-        layout.addWidget(QLabel("Y Max (Hz):"), row, 2, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.freq_axis_max_edit = QLineEdit("1000.0")
-        self.freq_axis_max_edit.setEnabled(False)
-        self.freq_axis_max_edit.setMaximumWidth(180)
-        layout.addWidget(self.freq_axis_max_edit, row, 3)
-        row += 1
-
-        self.update_current_button = QPushButton("Update Current Segment")
-        self.update_current_button.setEnabled(False)
-        self.update_current_button.clicked.connect(self._on_update_current_clicked)
-        layout.addWidget(self.update_current_button, row, 0, 1, 2)
-
-        self.update_all_button = QPushButton("Update All Segments")
-        self.update_all_button.setEnabled(False)
-        self.update_all_button.clicked.connect(self._on_update_all_clicked)
-        layout.addWidget(self.update_all_button, row, 2, 1, 2)
+        self.snr_spin.setMaximumWidth(170)
+        layout.addWidget(self.snr_spin, row, 3)
 
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)
+        group.setLayout(layout)
+        return group
+
+    def _connect_parameter_signals(self):
+        """Wire UI control changes to refresh/replot behavior."""
+        self.segment_duration_spin.valueChanged.connect(self._update_total_segments_preview)
+        self.segment_overlap_spin.valueChanged.connect(self._update_total_segments_preview)
 
         self.df_spin.valueChanged.connect(self._refresh_actual_df_preview)
         self.efficient_fft_checkbox.toggled.connect(self._refresh_actual_df_preview)
         self.spec_overlap_spin.valueChanged.connect(self._refresh_actual_df_preview)
+
+        self.conditioning_filter_checkbox.toggled.connect(self._on_conditioning_filter_enabled_changed)
+        self.conditioning_filter_checkbox.toggled.connect(self._on_conditioning_controls_changed)
+        self.conditioning_filter_type_combo.currentTextChanged.connect(self._on_conditioning_filter_type_changed)
+        self.conditioning_filter_type_combo.currentTextChanged.connect(self._on_conditioning_controls_changed)
+        self.conditioning_low_cutoff_spin.valueChanged.connect(self._on_conditioning_controls_changed)
+        self.conditioning_high_cutoff_spin.valueChanged.connect(self._on_conditioning_controls_changed)
+        self.conditioning_remove_mean_checkbox.toggled.connect(self._on_conditioning_controls_changed)
 
         self.colormap_combo.currentTextChanged.connect(self._replot_current_from_cache)
         self.snr_spin.valueChanged.connect(self._replot_current_from_cache)
         self.show_colorbar_checkbox.toggled.connect(self._replot_current_from_cache)
         self.freq_min_spin.valueChanged.connect(self._replot_current_from_cache)
         self.freq_max_spin.valueChanged.connect(self._replot_current_from_cache)
-        self.auto_limits_checkbox.toggled.connect(self._on_auto_limits_toggled)
 
-        group.setLayout(layout)
-        return group
+        self._refresh_actual_df_preview()
+        self._on_conditioning_filter_type_changed()
+        self._update_conditioning_note_labels()
 
     def _apply_styling(self):
         """Apply dark theme styling."""
@@ -773,6 +932,7 @@ class SegmentedSpectrogramViewer(QMainWindow):
             self.display_window.last_button.clicked.connect(self._on_last_clicked)
             self.display_window.segment_slider.valueChanged.connect(self._on_slider_changed)
 
+        self._update_conditioning_note_labels()
         self.display_window.show()
         self.display_window.raise_()
 
@@ -784,10 +944,90 @@ class SegmentedSpectrogramViewer(QMainWindow):
     def _refresh_actual_df_preview(self):
         """Update the actual df preview based on sample rate and FFT settings."""
         if self.sample_rate and self.sample_rate > 0:
-            nperseg, _, actual_df = self._calculate_fft_parameters()
-            self.actual_df_label.setText(f"(actual df = {actual_df:.3f} Hz, nperseg={nperseg})")
+            _, _, actual_df = self._calculate_fft_parameters()
+            self.efficient_fft_checkbox.setText(
+                f"{self._efficient_fft_base_label} (actual df = {actual_df:.3f} Hz)"
+            )
         else:
-            self.actual_df_label.setText("(actual df = --)")
+            self.efficient_fft_checkbox.setText(
+                f"{self._efficient_fft_base_label} (actual df = --)"
+            )
+
+    def _update_total_segments_preview(self, *_args):
+        """Update total-segment count immediately when segment controls change."""
+        if self.signal_data is None or self.sample_rate is None or self.sample_rate <= 0:
+            self.total_segments_label.setText("Total Segments: 0")
+            return
+
+        segment_samples = int(self.segment_duration_spin.value() * self.sample_rate)
+        if segment_samples <= 0:
+            self.total_segments_label.setText("Total Segments: 0")
+            return
+
+        overlap_samples = int(segment_samples * self.segment_overlap_spin.value() / 100.0)
+        step_samples = max(1, segment_samples - overlap_samples)
+        total_samples = len(self.signal_data)
+        if total_samples <= 0:
+            self.total_segments_label.setText("Total Segments: 0")
+            return
+
+        segments_count = 0
+        start_idx = 0
+        while start_idx < total_samples:
+            end_idx = min(start_idx + segment_samples, total_samples)
+            segments_count += 1
+            if end_idx >= total_samples:
+                break
+            start_idx += step_samples
+
+        self.total_segments_label.setText(f"Total Segments: {segments_count}")
+
+    def _build_conditioning_filter_settings(self) -> dict:
+        """Build shared filter-settings payload from segmented-viewer controls."""
+        return {
+            "enabled": self.conditioning_filter_checkbox.isChecked(),
+            "filter_type": self.conditioning_filter_type_combo.currentText().strip().lower(),
+            "filter_design": "butterworth",
+            "filter_order": 6,
+            "cutoff_low": self.conditioning_low_cutoff_spin.value(),
+            "cutoff_high": self.conditioning_high_cutoff_spin.value(),
+        }
+
+    def _on_conditioning_filter_enabled_changed(self, enabled: bool):
+        """Enable/disable filter controls."""
+        self.conditioning_filter_type_combo.setEnabled(enabled)
+        self._on_conditioning_filter_type_changed()
+
+    def _on_conditioning_filter_type_changed(self, *_args):
+        """Show/hide cutoff controls based on selected filter type."""
+        filter_type = self.conditioning_filter_type_combo.currentText().strip().lower()
+        enabled = self.conditioning_filter_checkbox.isChecked()
+        show_low = filter_type in {"highpass", "bandpass"}
+        show_high = filter_type in {"lowpass", "bandpass"}
+
+        self.conditioning_low_cutoff_label.setVisible(show_low)
+        self.conditioning_low_cutoff_spin.setVisible(show_low)
+        self.conditioning_high_cutoff_label.setVisible(show_high)
+        self.conditioning_high_cutoff_spin.setVisible(show_high)
+
+        self.conditioning_low_cutoff_spin.setEnabled(enabled and show_low)
+        self.conditioning_high_cutoff_spin.setEnabled(enabled and show_high)
+
+    def _on_conditioning_controls_changed(self, *_args):
+        """Refresh conditioning labels when any conditioning control changes."""
+        self._update_conditioning_note_labels()
+
+    def _update_conditioning_note_labels(self):
+        """Update conditioning summary text in parameter and display windows."""
+        note = build_processing_note(
+            filter_settings=self._build_conditioning_filter_settings(),
+            remove_mean=self.conditioning_remove_mean_checkbox.isChecked(),
+            mean_window_seconds=self.mean_window_seconds,
+        )
+        if hasattr(self, "conditioning_note_label"):
+            self.conditioning_note_label.setText(f"Signal Conditioning: {note}")
+        if self.display_window is not None and hasattr(self.display_window, "conditioning_info_label"):
+            self.display_window.conditioning_info_label.setText(f"Signal Conditioning: {note}")
 
     def _calculate_fft_parameters(self, sample_count: Optional[int] = None) -> Tuple[int, int, float]:
         """Compute nperseg/noverlap from df and overlap controls."""
@@ -807,63 +1047,6 @@ class SegmentedSpectrogramViewer(QMainWindow):
         noverlap = min(max(0, noverlap), nperseg - 1)
         actual_df = self.sample_rate / float(nperseg)
         return nperseg, noverlap, actual_df
-
-    def _set_axis_input_enabled(self, enabled: bool):
-        """Enable or disable manual axis controls."""
-        self.time_min_edit.setEnabled(enabled)
-        self.time_max_edit.setEnabled(enabled)
-        self.freq_axis_min_edit.setEnabled(enabled)
-        self.freq_axis_max_edit.setEnabled(enabled)
-        self.apply_limits_button.setEnabled(enabled)
-
-    def _on_auto_limits_toggled(self, checked: bool):
-        """Handle auto/manual axis limit mode changes."""
-        self._set_axis_input_enabled(not checked)
-        if checked:
-            self._replot_current_from_cache()
-
-    def _parse_manual_axis_limits(self, show_error: bool) -> Optional[Tuple[float, float, float, float]]:
-        """Parse and validate manual axis limit inputs."""
-        try:
-            x_min = float(self.time_min_edit.text())
-            x_max = float(self.time_max_edit.text())
-            y_min = float(self.freq_axis_min_edit.text())
-            y_max = float(self.freq_axis_max_edit.text())
-        except ValueError:
-            if show_error:
-                show_warning(
-                    self,
-                    "Invalid Limits",
-                    "Axis limits must be numeric values (standard or scientific notation).",
-                )
-            return None
-
-        if x_min >= x_max:
-            if show_error:
-                show_warning(self, "Invalid Limits", "X-axis minimum must be less than maximum.")
-            return None
-        if y_min >= y_max:
-            if show_error:
-                show_warning(self, "Invalid Limits", "Y-axis minimum must be less than maximum.")
-            return None
-        if y_min < 0:
-            if show_error:
-                show_warning(self, "Invalid Limits", "Y-axis limits must be non-negative.")
-            return None
-        return x_min, x_max, y_min, y_max
-
-    def _apply_manual_axis_limits(self):
-        """Apply manual axis limits when auto mode is disabled."""
-        if self.auto_limits_checkbox.isChecked() or self.display_window is None:
-            return
-
-        limits = self._parse_manual_axis_limits(show_error=True)
-        if limits is None:
-            return
-
-        x_min, x_max, y_min, y_max = limits
-        self.display_window.spectrogram_plot.setXRange(x_min, x_max, padding=0)
-        self.display_window.spectrogram_plot.setYRange(y_min, y_max, padding=0)
 
     def _remove_colorbar(self):
         """Remove existing colorbar from popup display."""
@@ -901,8 +1084,11 @@ class SegmentedSpectrogramViewer(QMainWindow):
             self._load_hdf5_file(file_path)
     
     def _load_hdf5_file(self, file_path: str):
-        """Load HDF5 file and populate flight/channel lists."""
+        """Load HDF5 file and launch enhanced navigator for channel selection."""
         try:
+            if self.hdf5_loader is not None:
+                self.hdf5_loader.close()
+
             self.hdf5_loader = HDF5FlightDataLoader(file_path)
             
             # Update file path display
@@ -912,42 +1098,77 @@ class SegmentedSpectrogramViewer(QMainWindow):
             file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
             self.file_info_label.setText(f"Size: {file_size_mb:.1f} MB")
             self.file_info_label.setStyleSheet("color: #60a5fa;")
-            
-            # Populate flight combo
-            flights = self.hdf5_loader.get_flight_list()
-            self.flight_combo.clear()
-            self.flight_combo.addItems(flights)
-            self.flight_combo.setEnabled(True)
-            
+
+            selected_item = self._launch_channel_navigator()
+            if selected_item is None:
+                self._clear_selected_channel()
+                return
+
+            self._apply_selected_channel(*selected_item)
+
         except Exception as e:
             show_critical(self, "Error Loading File", f"Failed to load HDF5 file:\n\n{str(e)}")
             self.file_info_label.setText("Error loading file")
             self.file_info_label.setStyleSheet("color: #ef4444;")
-    
-    def _on_flight_changed(self):
-        """Handle flight selection change."""
-        flight_key = self.flight_combo.currentText()
-        if not flight_key or not self.hdf5_loader:
-            return
-        
-        try:
-            # Get channels for this flight
-            channels = self.hdf5_loader.get_channel_list(flight_key)
-            
-            # Populate channel combo
-            self.channel_combo.clear()
-            self.channel_combo.addItems(channels)
-            self.channel_combo.setEnabled(True)
-            
-        except Exception as e:
-            show_critical(self, "Error", f"Failed to load flight channels:\n\n{str(e)}")
-    
-    def _on_channel_changed(self):
-        """Handle channel selection change."""
-        channel_name = self.channel_combo.currentText()
-        flight_key = self.flight_combo.currentText()
+            self._clear_selected_channel()
 
-        if not channel_name or not flight_key or not self.hdf5_loader:
+    def _launch_channel_navigator(self) -> Optional[Tuple[str, str, object]]:
+        """Launch enhanced flight navigator and return one selected item."""
+        if self.hdf5_loader is None:
+            return None
+
+        navigator = FlightNavigator(
+            self.hdf5_loader,
+            self,
+            max_selected_channels=1,
+            selection_limit_message=(
+                "Segmented Spectrogram Viewer supports one channel at a time. "
+                "Select one channel or cancel."
+            ),
+        )
+        navigator.setModal(True)
+
+        if navigator.exec() != navigator.DialogCode.Accepted:
+            return None
+
+        if len(navigator.selected_items) != 1:
+            show_warning(
+                self,
+                "Selection Required",
+                "Please select exactly one channel to continue.",
+            )
+            return None
+
+        return navigator.selected_items[0]
+
+    def _clear_selected_channel(self):
+        """Clear currently selected channel state and disable generation."""
+        self.signal_data = None
+        self.sample_rate = None
+        self.channel_name = None
+        self.flight_key = None
+        self.channel_units = ""
+        self.segments = []
+        self.current_segment_idx = 0
+        self.spectrogram_cache.clear()
+        self.total_segments_label.setText("Total Segments: 0")
+        self.selected_flight_value.setText("None selected")
+        self.selected_channel_value.setText("None selected")
+        self.selected_sr_value.setText("N/A")
+        self.selected_flight_value.setStyleSheet("color: #9ca3af;")
+        self.selected_channel_value.setStyleSheet("color: #9ca3af;")
+        self.selected_sr_value.setStyleSheet("color: #9ca3af;")
+        self.segment_duration_spin.setEnabled(False)
+        self.segment_overlap_spin.setEnabled(False)
+        self.generate_button.setEnabled(False)
+        self.export_current_button.setEnabled(False)
+        self.export_all_button.setEnabled(False)
+        self._set_navigation_enabled(False)
+        self._refresh_actual_df_preview()
+
+    def _apply_selected_channel(self, flight_key: str, channel_name: str, channel_info):
+        """Load selected channel data and update UI state."""
+        if self.hdf5_loader is None:
             return
 
         try:
@@ -956,36 +1177,55 @@ class SegmentedSpectrogramViewer(QMainWindow):
                 channel_name,
                 decimate_for_display=False,
             )
-
-            self.signal_data = data_dict['data_full']
-            self.sample_rate = float(data_dict['sample_rate'])
-            self.channel_name = channel_name
-            self.flight_key = flight_key
-
-            duration = len(self.signal_data) / self.sample_rate
-            self.file_info_label.setText(
-                f"Size: {os.path.getsize(self.file_path_edit.text()) / (1024 * 1024):.1f} MB | "
-                f"Duration: {duration:.1f}s | "
-                f"Sample Rate: {self.sample_rate:.0f} Hz"
-            )
-
-            self.segment_duration_spin.setEnabled(True)
-            self.segment_overlap_spin.setEnabled(True)
-            self.generate_button.setEnabled(True)
-
-            nyquist = self.sample_rate / 2.0
-            self.freq_max_spin.setMaximum(nyquist)
-            self.freq_max_spin.setValue(min(nyquist, 25000.0))
-            self.freq_axis_max_edit.setText(f"{nyquist:.3f}")
-            self._refresh_actual_df_preview()
-
         except Exception as e:
             show_critical(self, "Error", f"Failed to load channel data:\n\n{str(e)}")
+            self._clear_selected_channel()
+            return
+
+        self.signal_data = data_dict['data_full']
+        self.sample_rate = float(data_dict['sample_rate'])
+        self.channel_name = channel_name
+        self.flight_key = flight_key
+        self.channel_units = str(getattr(channel_info, "units", "") or "")
+        self.segments = []
+        self.current_segment_idx = 0
+        self.spectrogram_cache.clear()
+        self.total_segments_label.setText("Total Segments: 0")
+
+        duration = len(self.signal_data) / self.sample_rate
+        self.file_info_label.setText(
+            f"Size: {os.path.getsize(self.file_path_edit.text()) / (1024 * 1024):.1f} MB | "
+            f"Duration: {duration:.1f}s | "
+            f"Sample Rate: {self.sample_rate:.0f} Hz"
+        )
+        self.file_info_label.setStyleSheet("color: #60a5fa;")
+
+        self.selected_flight_value.setText(str(flight_key))
+        self.selected_channel_value.setText(str(channel_name))
+        self.selected_sr_value.setText(f"{self.sample_rate:.3f} Hz")
+        self.selected_flight_value.setStyleSheet("color: #e0e0e0;")
+        self.selected_channel_value.setStyleSheet("color: #e0e0e0;")
+        self.selected_sr_value.setStyleSheet("color: #e0e0e0;")
+
+        self.segment_duration_spin.setEnabled(True)
+        self.segment_overlap_spin.setEnabled(True)
+        self.generate_button.setEnabled(True)
+        self.export_current_button.setEnabled(False)
+        self.export_all_button.setEnabled(False)
+
+        nyquist = self.sample_rate / 2.0
+        self.freq_max_spin.setMaximum(nyquist)
+        self.freq_max_spin.setValue(min(nyquist, 25000.0))
+        if self.freq_min_spin.value() > self.freq_max_spin.value():
+            self.freq_min_spin.setValue(self.freq_max_spin.value())
+        self._refresh_actual_df_preview()
+        self._update_total_segments_preview()
 
     def _on_generate_clicked(self):
         """Handle generate spectrograms button click."""
         if self.signal_data is None or self.sample_rate is None:
             return
+        self._update_conditioning_note_labels()
 
         segment_duration = self.segment_duration_spin.value()
         overlap_pct = self.segment_overlap_spin.value()
@@ -1006,20 +1246,24 @@ class SegmentedSpectrogramViewer(QMainWindow):
             start_idx += step_samples
 
         self.total_segments_label.setText(f"Total Segments: {len(self.segments)}")
-        self.current_segment_idx = 0
+        if not self.segments:
+            self._set_navigation_enabled(False)
+            self.export_current_button.setEnabled(False)
+            self.export_all_button.setEnabled(False)
+            return
+
+        self.current_segment_idx = min(self.current_segment_idx, len(self.segments) - 1)
 
         self._ensure_display_window()
         self.display_window.segment_slider.setMaximum(max(0, len(self.segments) - 1))
-        self.display_window.segment_slider.setValue(0)
+        self.display_window.segment_slider.setValue(self.current_segment_idx)
         self._set_navigation_enabled(True)
 
-        self.update_current_button.setEnabled(True)
-        self.update_all_button.setEnabled(True)
         self.export_current_button.setEnabled(True)
         self.export_all_button.setEnabled(True)
 
         self.spectrogram_cache.clear()
-        self._display_segment(0)
+        self._display_segment(self.current_segment_idx)
 
     def _display_segment(self, segment_idx: int):
         """Display spectrogram for the given segment."""
@@ -1051,11 +1295,18 @@ class SegmentedSpectrogramViewer(QMainWindow):
             return
 
         segment_data = self.signal_data[start_idx:end_idx]
-        nperseg, noverlap, _ = self._calculate_fft_parameters(sample_count=len(segment_data))
+        conditioned_segment_data = apply_processing_pipeline(
+            segment_data,
+            self.sample_rate,
+            filter_settings=self._build_conditioning_filter_settings(),
+            remove_mean=self.conditioning_remove_mean_checkbox.isChecked(),
+            mean_window_seconds=self.mean_window_seconds,
+        )
+        nperseg, noverlap, _ = self._calculate_fft_parameters(sample_count=len(conditioned_segment_data))
         window = self.window_combo.currentText().lower()
 
         self.generator_thread = SpectrogramGenerator(
-            segment_data,
+            conditioned_segment_data,
             self.sample_rate,
             nperseg,
             noverlap,
@@ -1069,6 +1320,7 @@ class SegmentedSpectrogramViewer(QMainWindow):
         self.display_window.segment_info_label.setText(
             f"Generating spectrogram for segment {segment_idx + 1}..."
         )
+        self._update_conditioning_note_labels()
 
     def _on_spectrogram_generated(self, segment_idx: int, spectrogram_data):
         """Handle spectrogram generation completion."""
@@ -1167,19 +1419,8 @@ class SegmentedSpectrogramViewer(QMainWindow):
             colorbar.axis.setTextPen('#e0e0e0')
             self.display_window.colorbar_item = colorbar
 
-        if self.auto_limits_checkbox.isChecked():
-            plot.setXRange(t_start, t_end, padding=0.02)
-            plot.setYRange(f_start, f_end, padding=0.02)
-            self.time_min_edit.setText(f"{t_start:.3f}")
-            self.time_max_edit.setText(f"{t_end:.3f}")
-            self.freq_axis_min_edit.setText(f"{f_start:.3f}")
-            self.freq_axis_max_edit.setText(f"{f_end:.3f}")
-        else:
-            limits = self._parse_manual_axis_limits(show_error=False)
-            if limits is not None:
-                x_min, x_max, y_min, y_max = limits
-                plot.setXRange(x_min, x_max, padding=0)
-                plot.setYRange(y_min, y_max, padding=0)
+        plot.setXRange(t_start, t_end, padding=0.02)
+        plot.setYRange(f_start, f_end, padding=0.02)
 
     def _on_first_clicked(self):
         """Navigate to first segment."""
@@ -1204,23 +1445,6 @@ class SegmentedSpectrogramViewer(QMainWindow):
     def _on_slider_changed(self, value: int):
         """Handle slider value change."""
         self._display_segment(value)
-
-    def _on_update_current_clicked(self):
-        """Regenerate current segment with new parameters."""
-        if self.current_segment_idx in self.spectrogram_cache.cache:
-            del self.spectrogram_cache.cache[self.current_segment_idx]
-        self._display_segment(self.current_segment_idx)
-
-    def _on_update_all_clicked(self):
-        """Regenerate all segments with new parameters."""
-        self.spectrogram_cache.clear()
-        self._display_segment(self.current_segment_idx)
-
-        show_information(
-            self,
-            "Cache Cleared",
-            "Spectrogram cache has been cleared. Segments will be regenerated with new parameters as you navigate through them."
-        )
 
     def _on_export_current_clicked(self):
         """Export current segment spectrogram."""
@@ -1283,12 +1507,19 @@ class SegmentedSpectrogramViewer(QMainWindow):
                 if self.spectrogram_cache.get(i) is None:
                     start_idx, end_idx = self.segments[i]
                     segment_data = self.signal_data[start_idx:end_idx]
+                    conditioned_segment_data = apply_processing_pipeline(
+                        segment_data,
+                        self.sample_rate,
+                        filter_settings=self._build_conditioning_filter_settings(),
+                        remove_mean=self.conditioning_remove_mean_checkbox.isChecked(),
+                        mean_window_seconds=self.mean_window_seconds,
+                    )
 
-                    nperseg, noverlap, _ = self._calculate_fft_parameters(sample_count=len(segment_data))
+                    nperseg, noverlap, _ = self._calculate_fft_parameters(sample_count=len(conditioned_segment_data))
                     window = self.window_combo.currentText().lower()
 
                     f, t, Sxx = signal.spectrogram(
-                        segment_data,
+                        conditioned_segment_data,
                         fs=self.sample_rate,
                         window=window,
                         nperseg=nperseg,

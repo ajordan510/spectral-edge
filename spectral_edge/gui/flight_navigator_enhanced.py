@@ -27,7 +27,8 @@ from PyQt6.QtGui import QFont, QAction
 from spectral_edge.utils.hdf5_loader import HDF5FlightDataLoader
 from spectral_edge.utils.selection_manager import SelectionManager
 from spectral_edge.utils.message_box import show_warning, show_information
-from typing import List, Dict, Tuple, Set
+from typing import List, Dict, Tuple, Optional
+import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -48,7 +49,7 @@ class ColumnConfig:
     width: int = 150
 
 
-class EnhancedFlightNavigator(QDialog):
+class FlightNavigator(QDialog):
     """
     Enhanced dialog for navigating and selecting flights and channels from HDF5 files.
     
@@ -68,7 +69,13 @@ class EnhancedFlightNavigator(QDialog):
     # Signal emitted when data is selected
     data_selected = pyqtSignal(object)
     
-    def __init__(self, loader: HDF5FlightDataLoader, parent=None):
+    def __init__(
+        self,
+        loader: HDF5FlightDataLoader,
+        parent=None,
+        max_selected_channels: Optional[int] = None,
+        selection_limit_message: Optional[str] = None,
+    ):
         """
         Initialize Enhanced Flight Navigator dialog.
         
@@ -82,6 +89,8 @@ class EnhancedFlightNavigator(QDialog):
         super().__init__(parent)
         self.loader = loader
         self.selection_manager = SelectionManager()
+        self.max_selected_channels = max_selected_channels
+        self.selection_limit_message = selection_limit_message
         
         # Data storage
         self.selected_items = []  # List of (flight_key, channel_key, channel_info)
@@ -91,17 +100,18 @@ class EnhancedFlightNavigator(QDialog):
         # View mode
         self.current_view_mode = ViewMode.BY_FLIGHT
         
-        # Column configuration (default visible: Name, Units, Sample Rate, Location)
+        # Column configuration (default visible: Name, Units, Sample Rate,
+        # Location, Time Range, Sensor ID, Flight)
         self.columns = [
             ColumnConfig("name", "Channel Name", True, 200),
             ColumnConfig("units", "Units", True, 80),
             ColumnConfig("sample_rate", "Sample Rate", True, 100),
             ColumnConfig("location", "Location", True, 150),
-            ColumnConfig("time_range", "Time Range", False, 120),
-            ColumnConfig("sensor_id", "Sensor ID", False, 100),
+            ColumnConfig("time_range", "Time Range", True, 120),
+            ColumnConfig("sensor_id", "Sensor ID", True, 100),
             ColumnConfig("description", "Description", False, 200),
             ColumnConfig("range", "Range", False, 100),
-            ColumnConfig("flight", "Flight", False, 100),
+            ColumnConfig("flight", "Flight", True, 100),
         ]
         
         # Search/filter state
@@ -152,17 +162,24 @@ class EnhancedFlightNavigator(QDialog):
                 left: 10px;
                 padding: 0 5px;
             }
-            QTreeWidget {
+            QTreeWidget#channelTree {
                 background-color: #2d3748;
                 color: #e0e0e0;
                 border: 1px solid #4a5568;
                 font-size: 10pt;
             }
-            QTreeWidget::item:hover {
+            QTreeWidget#channelTree::item:hover {
                 background-color: #4a5568;
             }
-            QTreeWidget::item:selected {
+            QTreeWidget#channelTree::item:selected {
                 background-color: #3b82f6;
+            }
+            QTreeWidget#channelTree QHeaderView::section {
+                background-color: #1a1f2e;
+                color: #60a5fa;
+                font-weight: bold;
+                border: 1px solid #4a5568;
+                padding: 4px;
             }
             QLineEdit {
                 background-color: #2d3748;
@@ -287,9 +304,11 @@ class EnhancedFlightNavigator(QDialog):
         
         # Tree widget
         self.tree = QTreeWidget()
+        self.tree.setObjectName("channelTree")
         self.tree.setHeaderHidden(False)
         self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.tree.itemChanged.connect(self._on_item_changed)
+        self._apply_tree_header_styling()
         self._update_tree_columns()
         main_layout.addWidget(self.tree, stretch=1)
         
@@ -328,10 +347,10 @@ class EnhancedFlightNavigator(QDialog):
         # Location filter
         location_layout = QHBoxLayout()
         location_layout.addWidget(QLabel("Location:"))
-        self.location_combo = QComboBox()
-        self.location_combo.addItem("All Locations")
-        self.location_combo.currentTextChanged.connect(self._on_filter_changed)
-        location_layout.addWidget(self.location_combo, stretch=1)
+        self.location_filter = QLineEdit()
+        self.location_filter.setPlaceholderText("Filter locations (contains, case-insensitive)")
+        self.location_filter.textChanged.connect(self._on_filter_changed)
+        location_layout.addWidget(self.location_filter, stretch=1)
         
         # Apply/Reset buttons
         apply_btn = QPushButton("Apply Filters")
@@ -344,10 +363,22 @@ class EnhancedFlightNavigator(QDialog):
         
         filter_layout.addLayout(location_layout)
         
-        # Result count
+        # Result count and tree expansion behavior
+        options_layout = QHBoxLayout()
         self.result_label = QLabel("Showing all channels")
         self.result_label.setStyleSheet("color: #9ca3af; font-size: 9pt;")
-        filter_layout.addWidget(self.result_label)
+        options_layout.addWidget(self.result_label)
+        options_layout.addStretch()
+
+        self.always_expanded_check = QCheckBox("Always Expanded")
+        self.always_expanded_check.setChecked(True)
+        self.always_expanded_check.setToolTip(
+            "Keep channel trees expanded after filtering and view changes."
+        )
+        self.always_expanded_check.stateChanged.connect(self._on_tree_expansion_changed)
+        options_layout.addWidget(self.always_expanded_check)
+
+        filter_layout.addLayout(options_layout)
         
         return filter_group
     
@@ -407,6 +438,24 @@ class EnhancedFlightNavigator(QDialog):
         
         return button_layout
 
+    def _apply_tree_header_styling(self):
+        """Apply deterministic header styling regardless of parent stylesheet."""
+        if not hasattr(self, "tree"):
+            return
+        header = self.tree.header()
+        if header is None:
+            return
+        header.setObjectName("channelTreeHeader")
+        header.setStyleSheet("""
+            QHeaderView::section {
+                background-color: #1a1f2e;
+                color: #60a5fa;
+                font-weight: bold;
+                border: 1px solid #4a5568;
+                padding: 4px;
+            }
+        """)
+
     
     def _load_all_channels(self):
         """Load all channels from the HDF5 file into memory for filtering"""
@@ -414,7 +463,6 @@ class EnhancedFlightNavigator(QDialog):
         from PyQt6.QtCore import Qt
         
         self.all_channels = []
-        locations = set()
         
         # Count total channels for progress tracking
         total_channels = sum(
@@ -467,10 +515,6 @@ class EnhancedFlightNavigator(QDialog):
                     'sensor_type': sensor_type
                 })
                 
-                # Collect unique locations
-                if hasattr(channel_info, 'location') and channel_info.location:
-                    locations.add(channel_info.location)
-                
                 channel_count += 1
         
         progress.close()
@@ -480,33 +524,72 @@ class EnhancedFlightNavigator(QDialog):
             self.reject()
             return
         
-        # Populate location filter
-        for location in sorted(locations):
-            self.location_combo.addItem(location)
-        
         self.filtered_channels = self.all_channels.copy()
+
+    def _safe_text(self, value, fallback: str = "") -> str:
+        """Convert optional metadata to a safe display/filter string."""
+        if value is None:
+            return fallback
+        text = str(value).strip()
+        if not text:
+            return fallback
+        return text
+
+    def _normalize_units(self, units: str) -> str:
+        """Normalize units to improve robust matching across source variants."""
+        normalized = self._safe_text(units).lower()
+        replacements = (
+            ("\u00b2", "2"),
+            ("\u00b0", "deg"),
+            ("\u00b5", "u"),
+            ("\u03bc", "u"),
+            ("\u03b5", "e"),
+            ("^2", "2"),
+            ("\u00c2\u00b2", "2"),
+            ("\u00c2\u00b0", "deg"),
+            ("\u00c2\u00b5", "u"),
+            ("\u00ce\u00bc", "u"),
+            ("-", " "),
+            ("_", " "),
+        )
+        for old, new in replacements:
+            normalized = normalized.replace(old, new)
+        return re.sub(r"\s+", " ", normalized).strip()
     
     def _infer_sensor_type(self, channel_key: str, channel_info) -> str:
         """Infer sensor type from channel units (primary) and name (fallback)"""
         # Get units from channel_info
-        units = getattr(channel_info, 'units', '').lower().strip()
+        units = self._normalize_units(getattr(channel_info, 'units', ''))
+        units_compact = units.replace(" ", "")
         
         # Map units to sensor types
         if units:
-            # Accelerometer: G, g, m/s², m/s2, etc.
-            if units in ['g', 'gs', 'm/s²', 'm/s2', 'in/s²', 'in/s2']:
+            acceleration_units = {
+                "g", "gs", "grms", "gpk", "gpeak",
+                "m/s2", "m/sec2", "m/s/s",
+                "in/s2", "in/sec2",
+                "ft/s2", "ft/sec2",
+                "mm/s2", "cm/s2",
+            }
+            # Accelerometer: g, g-rms style, m/s2, in/s2, ft/s2, etc.
+            if units_compact in acceleration_units or (
+                units_compact.startswith("g") and "rms" in units_compact
+            ):
                 return "Accelerometer"
             
-            # Pressure: psia, psig, pa, kpa, mpa, bar, psi, etc.
-            if units in ['psia', 'psig', 'psi', 'pa', 'kpa', 'mpa', 'bar', 'mbar', 'torr', 'atm', 'mmhg', 'inhg']:
+            pressure_units = {
+                "pa", "kpa", "mpa", "bar", "mbar", "torr", "atm", "mmhg", "inhg",
+            }
+            # Pressure: PSI-family variants and standard pressure units.
+            if "psi" in units_compact or units_compact in pressure_units:
                 return "Pressure"
             
-            # Temperature: °C, °F, K, C, F, etc.
-            if units in ['°c', '°f', 'c', 'f', 'k', 'degc', 'degf', 'celsius', 'fahrenheit', 'kelvin']:
+            # Temperature: C/F/K with degree and alias variants.
+            if units_compact in {"c", "f", "k", "degc", "degf", "celsius", "fahrenheit", "kelvin"}:
                 return "Temperature"
             
-            # Strain: με, microstrain, strain, etc.
-            if units in ['με', 'microstrain', 'strain', 'ue', 'ustrain', 'µε']:
+            # Strain: microstrain variants.
+            if units_compact in {"microstrain", "strain", "ue", "ustrain"}:
                 return "Strain Gage"
         
         # Fallback to name-based inference if units don't match
@@ -545,6 +628,24 @@ class EnhancedFlightNavigator(QDialog):
         
         self.tree.itemChanged.connect(self._on_item_changed)
         self._update_result_label()
+        if self.always_expanded_check.isChecked():
+            self.tree.expandAll()
+        else:
+            self.tree.collapseAll()
+
+    def _on_tree_expansion_changed(self, _state: int):
+        """Handle Always Expanded toggle for tree item expansion."""
+        if not hasattr(self, "tree"):
+            return
+        if self.always_expanded_check.isChecked():
+            self.tree.expandAll()
+        else:
+            self.tree.collapseAll()
+
+    def showEvent(self, event):
+        """Reassert header styling after Qt style/theme recalculation."""
+        super().showEvent(event)
+        self._apply_tree_header_styling()
     
     def _populate_by_flight(self):
         """Populate tree in 'By Flight' view mode"""
@@ -571,7 +672,7 @@ class EnhancedFlightNavigator(QDialog):
         """Populate tree in 'By Location' view mode"""
         locations = {}
         for channel_data in self.filtered_channels:
-            location = getattr(channel_data['channel_info'], 'location', 'Unknown')
+            location = self._safe_text(getattr(channel_data['channel_info'], 'location', ''), 'Unknown')
             if location not in locations:
                 locations[location] = []
             locations[location].append(channel_data)
@@ -629,18 +730,21 @@ class EnhancedFlightNavigator(QDialog):
             if col.name == "name":
                 channel_item.setText(i, channel_data['channel_key'])
             elif col.name == "units":
-                channel_item.setText(i, getattr(channel_info, 'units', 'N/A'))
+                channel_item.setText(i, self._safe_text(getattr(channel_info, 'units', None), 'N/A'))
             elif col.name == "sample_rate":
                 sr = getattr(channel_info, 'sample_rate', None)
-                channel_item.setText(i, f"{sr} Hz" if sr else 'N/A')
+                if isinstance(sr, (int, float)) and sr > 0:
+                    channel_item.setText(i, f"{sr} Hz")
+                else:
+                    channel_item.setText(i, "N/A")
             elif col.name == "location":
-                channel_item.setText(i, getattr(channel_info, 'location', 'N/A'))
+                channel_item.setText(i, self._safe_text(getattr(channel_info, 'location', None), 'N/A'))
             elif col.name == "time_range":
-                channel_item.setText(i, channel_data['time_range'])
+                channel_item.setText(i, self._safe_text(channel_data.get('time_range', None), 'N/A'))
             elif col.name == "sensor_id":
-                channel_item.setText(i, getattr(channel_info, 'sensor_id', 'N/A'))
+                channel_item.setText(i, self._safe_text(getattr(channel_info, 'sensor_id', None), 'N/A'))
             elif col.name == "description":
-                channel_item.setText(i, getattr(channel_info, 'description', 'N/A'))
+                channel_item.setText(i, self._safe_text(getattr(channel_info, 'description', None), 'N/A'))
             elif col.name == "range":
                 range_min = getattr(channel_info, 'range_min', None)
                 range_max = getattr(channel_info, 'range_max', None)
@@ -668,8 +772,7 @@ class EnhancedFlightNavigator(QDialog):
         }
         
         # Update location filter
-        location_text = self.location_combo.currentText()
-        self.filter_location = "" if location_text == "All Locations" else location_text
+        self.filter_location = self._safe_text(self.location_filter.text())
         
         # Apply filters with debounce
         self.search_timer.start(300)
@@ -685,17 +788,25 @@ class EnhancedFlightNavigator(QDialog):
             
             # Check location filter
             if self.filter_location:
-                channel_location = getattr(channel_data['channel_info'], 'location', '')
-                if channel_location != self.filter_location:
+                channel_location = self._safe_text(
+                    getattr(channel_data['channel_info'], 'location', '')
+                ).lower()
+                if self.filter_location.lower() not in channel_location:
                     continue
             
             # Check search text
             if self.search_text:
                 search_lower = self.search_text.lower()
-                channel_key_lower = channel_data['channel_key'].lower()
-                location_lower = getattr(channel_data['channel_info'], 'location', '').lower()
-                sensor_id_lower = getattr(channel_data['channel_info'], 'sensor_id', '').lower()
-                description_lower = getattr(channel_data['channel_info'], 'description', '').lower()
+                channel_key_lower = self._safe_text(channel_data.get('channel_key', '')).lower()
+                location_lower = self._safe_text(
+                    getattr(channel_data['channel_info'], 'location', '')
+                ).lower()
+                sensor_id_lower = self._safe_text(
+                    getattr(channel_data['channel_info'], 'sensor_id', '')
+                ).lower()
+                description_lower = self._safe_text(
+                    getattr(channel_data['channel_info'], 'description', '')
+                ).lower()
                 
                 if not (search_lower in channel_key_lower or
                         search_lower in location_lower or
@@ -713,7 +824,7 @@ class EnhancedFlightNavigator(QDialog):
         self.search_box.clear()
         for cb in self.sensor_type_checks.values():
             cb.setChecked(False)
-        self.location_combo.setCurrentIndex(0)
+        self.location_filter.clear()
         self.filter_sensor_types = set()
         self.filter_location = ""
         self.search_text = ""
@@ -889,6 +1000,14 @@ class EnhancedFlightNavigator(QDialog):
     def _on_load_clicked(self):
         """Handle Load Selected button click"""
         if self.selected_items:
+            if self.max_selected_channels is not None and len(self.selected_items) > self.max_selected_channels:
+                message = self.selection_limit_message or (
+                    f"Please select no more than {self.max_selected_channels} channel"
+                    f"{'' if self.max_selected_channels == 1 else 's'}."
+                )
+                show_warning(self, "Selection Limit", message)
+                return
+
             # Save to recent
             selection_data = {
                 'items': [(fk, ck) for fk, ck, _ in self.selected_items],
@@ -914,3 +1033,7 @@ class EnhancedFlightNavigator(QDialog):
             List of (flight_key, channel_key) tuples for selected channels
         """
         return [(flight_key, channel_key) for flight_key, channel_key, _ in self.selected_items]
+
+
+# Backward-compatible alias during migration to canonical FlightNavigator name.
+EnhancedFlightNavigator = FlightNavigator

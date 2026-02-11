@@ -34,6 +34,7 @@ def test_spectrogram_spinboxes_use_up_down_arrows(app):
     window.show()
     app.processEvents()
 
+    assert window.minimumWidth() >= 1680
     spinboxes = window.findChildren(QAbstractSpinBox)
     assert spinboxes
     assert all(

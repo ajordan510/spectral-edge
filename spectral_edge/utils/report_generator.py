@@ -55,7 +55,13 @@ class ReportGenerator:
     >>> generator.save("report.pptx")
     """
 
-    def __init__(self, title: str = "PSD Analysis Report", template_path: Optional[str] = None):
+    def __init__(
+        self,
+        title: str = "PSD Analysis Report",
+        template_path: Optional[str] = None,
+        watermark_text: Optional[str] = None,
+        watermark_scope: str = "plot_slides",
+    ):
         """
         Initialize the report generator.
 
@@ -73,6 +79,8 @@ class ReportGenerator:
             )
 
         self.title = title
+        self.watermark_text = str(watermark_text).strip() if watermark_text else None
+        self.watermark_scope = (watermark_scope or "plot_slides").strip().lower()
 
         if template_path and Path(template_path).exists():
             self.presentation = Presentation(template_path)
@@ -83,6 +91,30 @@ class ReportGenerator:
             self.presentation.slide_height = Inches(7.5)
 
         self._slide_count = 0
+
+    def _add_slide_watermark(self, slide) -> None:
+        """Add a top-right slide watermark when enabled for plot slides."""
+        if not self.watermark_text:
+            return
+        if self.watermark_scope not in {"plot_slides", "all"}:
+            return
+
+        watermark_box = slide.shapes.add_textbox(
+            Inches(10.20), Inches(0.04), Inches(2.90), Inches(0.24)
+        )
+        frame = watermark_box.text_frame
+        frame.word_wrap = False
+        frame.margin_left = 0
+        frame.margin_right = 0
+        frame.margin_top = 0
+        frame.margin_bottom = 0
+        para = frame.paragraphs[0]
+        para.text = self.watermark_text
+        para.alignment = PP_ALIGN.RIGHT
+        para.font.name = "Arial"
+        para.font.size = Pt(9)
+        para.font.bold = False
+        para.font.color.rgb = RGBColor(0x9C, 0xA3, 0xAF)
 
     def _style_slide_title(self, paragraph, size_pt: float = 28.0) -> None:
         """Apply consistent title typography across report slides."""
@@ -236,6 +268,7 @@ class ReportGenerator:
         """
         slide_layout = self.presentation.slide_layouts[6]  # Blank layout
         slide = self.presentation.slides.add_slide(slide_layout)
+        self._add_slide_watermark(slide)
 
         # Add title
         title_box = slide.shapes.add_textbox(
@@ -316,6 +349,7 @@ class ReportGenerator:
         """Add a slide with a single full-width plot image."""
         slide_layout = self.presentation.slide_layouts[6]
         slide = self.presentation.slides.add_slide(slide_layout)
+        self._add_slide_watermark(slide)
 
         # Title
         title_box = slide.shapes.add_textbox(
@@ -340,6 +374,7 @@ class ReportGenerator:
         """Add a slide with two side-by-side plots."""
         slide_layout = self.presentation.slide_layouts[6]
         slide = self.presentation.slides.add_slide(slide_layout)
+        self._add_slide_watermark(slide)
 
         title_box = slide.shapes.add_textbox(
             Inches(0.5), Inches(0.3), Inches(12.333), Inches(0.6)
@@ -366,6 +401,7 @@ class ReportGenerator:
         """Add a slide with a top plot and two bottom plots."""
         slide_layout = self.presentation.slide_layouts[6]
         slide = self.presentation.slides.add_slide(slide_layout)
+        self._add_slide_watermark(slide)
 
         title_box = slide.shapes.add_textbox(
             Inches(0.5), Inches(0.3), Inches(12.333), Inches(0.6)
@@ -427,6 +463,7 @@ class ReportGenerator:
         """Add a slide with PDF and running stats plots plus summary text."""
         slide_layout = self.presentation.slide_layouts[6]
         slide = self.presentation.slides.add_slide(slide_layout)
+        self._add_slide_watermark(slide)
 
         title_box = slide.shapes.add_textbox(
             Inches(0.5), Inches(0.3), Inches(12.333), Inches(0.6)
@@ -511,6 +548,7 @@ class ReportGenerator:
         """Add a dashboard-style statistics slide."""
         slide_layout = self.presentation.slide_layouts[6]
         slide = self.presentation.slides.add_slide(slide_layout)
+        self._add_slide_watermark(slide)
 
         title_box = slide.shapes.add_textbox(
             Inches(0.5), Inches(0.3), Inches(12.333), Inches(0.6)
@@ -636,6 +674,7 @@ class ReportGenerator:
         """
         slide_layout = self.presentation.slide_layouts[6]  # Blank layout
         slide = self.presentation.slides.add_slide(slide_layout)
+        self._add_slide_watermark(slide)
 
         # Add title
         full_title = f"{title}: {channel_name}" if channel_name else title
@@ -759,6 +798,7 @@ class ReportGenerator:
         """
         slide_layout = self.presentation.slide_layouts[6]  # Blank layout
         slide = self.presentation.slides.add_slide(slide_layout)
+        self._add_slide_watermark(slide)
 
         # Add title
         title_box = slide.shapes.add_textbox(

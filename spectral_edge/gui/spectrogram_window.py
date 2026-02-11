@@ -28,7 +28,9 @@ import numpy as np
 from scipy import signal as scipy_signal
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+from typing import Mapping, Optional
 from spectral_edge.core.psd import get_window_options
+from spectral_edge.utils.signal_conditioning import apply_processing_pipeline, build_processing_note
 from spectral_edge.utils.theme import apply_context_menu_style
 
 
@@ -62,9 +64,21 @@ class SpectrogramWindow(QMainWindow):
     Supports up to 4 channels displayed simultaneously in adaptive layout.
     """
     
-    def __init__(self, time_data, channels_data, sample_rates, 
-                 window_type='hann', df=1.0, overlap_percent=50, 
-                 efficient_fft=True, freq_min=20, freq_max=2000):
+    def __init__(
+        self,
+        time_data,
+        channels_data,
+        sample_rates,
+        window_type='hann',
+        df=1.0,
+        overlap_percent=50,
+        efficient_fft=True,
+        freq_min=20,
+        freq_max=2000,
+        filter_settings: Optional[Mapping[str, object]] = None,
+        remove_mean: bool = False,
+        mean_window_seconds: float = 1.0,
+    ):
         """
         Initialize the spectrogram window.
         
@@ -86,6 +100,9 @@ class SpectrogramWindow(QMainWindow):
         # channels_data is list of (name, signal, unit, flight_name) tuples
         self.channels_data = channels_data[:4]  # Limit to 4 channels
         self.n_channels = len(self.channels_data)
+        self.mean_window_seconds = float(mean_window_seconds)
+        self._conditioning_filter_defaults = self._normalize_filter_settings(filter_settings)
+        self._conditioning_remove_mean_default = bool(remove_mean)
         
         # Handle sample rates (list or single value for backward compatibility)
         if isinstance(sample_rates, (list, tuple)):
@@ -131,7 +148,7 @@ class SpectrogramWindow(QMainWindow):
                 channel_names = ", ".join([name for name, _, _, _ in self.channels_data])
                 self.setWindowTitle(f"SpectralEdge - Spectrogram: {channel_names}")
         
-        self.setMinimumSize(1400, 900)
+        self.setMinimumSize(1680, 900)
         
         # Apply styling
         self._apply_styling()
@@ -148,6 +165,7 @@ class SpectrogramWindow(QMainWindow):
         
         # Create UI
         self._create_ui(window_type, df, overlap_percent, efficient_fft, freq_min, freq_max)
+        self._apply_conditioning_defaults_to_controls()
         self._enforce_spinbox_button_style()
         
         # Calculate initial spectrograms
@@ -294,6 +312,10 @@ class SpectrogramWindow(QMainWindow):
         # Parameters group
         params_group = self._create_parameters_group(window_type, df, overlap_percent, efficient_fft)
         control_layout.addWidget(params_group)
+
+        # Signal conditioning group
+        conditioning_group = self._create_conditioning_group()
+        control_layout.addWidget(conditioning_group)
         
         # Display options group
         display_group = self._create_display_options_group(freq_min, freq_max)
@@ -538,6 +560,152 @@ class SpectrogramWindow(QMainWindow):
         
         group.setLayout(layout)
         return group
+
+    def _create_conditioning_group(self):
+        """Create signal conditioning control group."""
+        group = QGroupBox("Signal Conditioning")
+        layout = QGridLayout()
+
+        row = 0
+
+        self.conditioning_note_label = QLabel()
+        self.conditioning_note_label.setWordWrap(True)
+        self.conditioning_note_label.setStyleSheet(
+            "color: #cbd5e1; font-size: 10pt; padding: 6px; background-color: #252d3d; border-radius: 4px;"
+        )
+        layout.addWidget(self.conditioning_note_label, row, 0, 1, 2)
+        row += 1
+
+        self.conditioning_filter_checkbox = QCheckBox("Enable Filter")
+        self.conditioning_filter_checkbox.toggled.connect(self._on_conditioning_filter_enabled_changed)
+        self.conditioning_filter_checkbox.toggled.connect(self._on_conditioning_controls_changed)
+        layout.addWidget(self.conditioning_filter_checkbox, row, 0, 1, 2)
+        row += 1
+
+        layout.addWidget(QLabel("Filter Type:"), row, 0)
+        self.conditioning_filter_type_combo = QComboBox()
+        self.conditioning_filter_type_combo.addItems(["Lowpass", "Highpass", "Bandpass"])
+        self.conditioning_filter_type_combo.currentTextChanged.connect(self._on_conditioning_filter_type_changed)
+        self.conditioning_filter_type_combo.currentTextChanged.connect(self._on_conditioning_controls_changed)
+        layout.addWidget(self.conditioning_filter_type_combo, row, 1)
+        row += 1
+
+        self.conditioning_low_cutoff_label = QLabel("Low Cutoff (Hz):")
+        layout.addWidget(self.conditioning_low_cutoff_label, row, 0)
+        self.conditioning_low_cutoff_spin = QDoubleSpinBox()
+        self.conditioning_low_cutoff_spin.setRange(0.1, 50000.0)
+        self.conditioning_low_cutoff_spin.setDecimals(2)
+        self.conditioning_low_cutoff_spin.setSingleStep(1.0)
+        self.conditioning_low_cutoff_spin.valueChanged.connect(self._on_conditioning_controls_changed)
+        layout.addWidget(self.conditioning_low_cutoff_spin, row, 1)
+        row += 1
+
+        self.conditioning_high_cutoff_label = QLabel("High Cutoff (Hz):")
+        layout.addWidget(self.conditioning_high_cutoff_label, row, 0)
+        self.conditioning_high_cutoff_spin = QDoubleSpinBox()
+        self.conditioning_high_cutoff_spin.setRange(0.1, 50000.0)
+        self.conditioning_high_cutoff_spin.setDecimals(2)
+        self.conditioning_high_cutoff_spin.setSingleStep(1.0)
+        self.conditioning_high_cutoff_spin.valueChanged.connect(self._on_conditioning_controls_changed)
+        layout.addWidget(self.conditioning_high_cutoff_spin, row, 1)
+        row += 1
+
+        self.conditioning_remove_mean_checkbox = QCheckBox("Remove Running Mean")
+        self.conditioning_remove_mean_checkbox.toggled.connect(self._on_conditioning_controls_changed)
+        layout.addWidget(self.conditioning_remove_mean_checkbox, row, 0, 1, 2)
+        row += 1
+
+        group.setLayout(layout)
+        return group
+
+    def _normalize_filter_settings(self, filter_settings: Optional[Mapping[str, object]]) -> dict:
+        """Normalize incoming filter settings to the spectrogram conditioning schema."""
+        settings = dict(filter_settings or {})
+        filter_type = str(settings.get("filter_type", "lowpass")).strip().lower()
+        if filter_type not in {"lowpass", "highpass", "bandpass"}:
+            filter_type = "lowpass"
+        return {
+            "enabled": bool(settings.get("enabled", False)),
+            "filter_type": filter_type,
+            "filter_design": str(settings.get("filter_design", "butterworth")).strip().lower(),
+            "filter_order": int(settings.get("filter_order", 4)),
+            "cutoff_low": float(settings.get("cutoff_low", 20.0) or 20.0),
+            "cutoff_high": float(settings.get("cutoff_high", 2000.0) or 2000.0),
+        }
+
+    def _apply_conditioning_defaults_to_controls(self):
+        """Apply provided conditioning defaults to UI controls."""
+        defaults = self._conditioning_filter_defaults
+        self.conditioning_filter_checkbox.setChecked(bool(defaults.get("enabled", False)))
+        self.conditioning_filter_type_combo.setCurrentText(
+            str(defaults.get("filter_type", "lowpass")).capitalize()
+        )
+        self.conditioning_low_cutoff_spin.setValue(float(defaults.get("cutoff_low", 20.0)))
+        self.conditioning_high_cutoff_spin.setValue(float(defaults.get("cutoff_high", 2000.0)))
+        self.conditioning_remove_mean_checkbox.setChecked(self._conditioning_remove_mean_default)
+        self._on_conditioning_filter_type_changed()
+        self._on_conditioning_filter_enabled_changed(self.conditioning_filter_checkbox.isChecked())
+        self._update_conditioning_note()
+
+    def _on_conditioning_filter_enabled_changed(self, enabled: bool):
+        """Enable or disable filter controls."""
+        self.conditioning_filter_type_combo.setEnabled(enabled)
+        self._on_conditioning_filter_type_changed()
+
+    def _on_conditioning_filter_type_changed(self, *_args):
+        """Toggle cutoff controls based on selected filter type."""
+        filter_type = self.conditioning_filter_type_combo.currentText().strip().lower()
+        enabled = self.conditioning_filter_checkbox.isChecked()
+
+        show_low = filter_type in {"highpass", "bandpass"}
+        show_high = filter_type in {"lowpass", "bandpass"}
+
+        self.conditioning_low_cutoff_label.setVisible(show_low)
+        self.conditioning_low_cutoff_spin.setVisible(show_low)
+        self.conditioning_high_cutoff_label.setVisible(show_high)
+        self.conditioning_high_cutoff_spin.setVisible(show_high)
+
+        self.conditioning_low_cutoff_spin.setEnabled(enabled and show_low)
+        self.conditioning_high_cutoff_spin.setEnabled(enabled and show_high)
+
+    def _build_conditioning_filter_settings(self) -> dict:
+        """Build shared conditioning filter settings payload from UI."""
+        return {
+            "enabled": self.conditioning_filter_checkbox.isChecked(),
+            "filter_type": self.conditioning_filter_type_combo.currentText().strip().lower(),
+            "filter_design": "butterworth",
+            "filter_order": 4,
+            "cutoff_low": self.conditioning_low_cutoff_spin.value(),
+            "cutoff_high": self.conditioning_high_cutoff_spin.value(),
+        }
+
+    def _update_conditioning_note(self):
+        """Update the single-line conditioning summary label."""
+        note = build_processing_note(
+            filter_settings=self._build_conditioning_filter_settings(),
+            remove_mean=self.conditioning_remove_mean_checkbox.isChecked(),
+            mean_window_seconds=self.mean_window_seconds,
+        )
+        self.conditioning_note_label.setText(f"Signal Conditioning: {note}")
+
+    def _on_conditioning_controls_changed(self, *_args):
+        """Refresh conditioning note when controls change."""
+        self._update_conditioning_note()
+
+    def update_conditioning_defaults(
+        self,
+        filter_settings: Optional[Mapping[str, object]],
+        remove_mean: bool,
+        mean_window_seconds: float = 1.0,
+        recalculate: bool = True,
+    ):
+        """Update conditioning defaults for reused windows from parent PSD settings."""
+        self.mean_window_seconds = float(mean_window_seconds)
+        self._conditioning_filter_defaults = self._normalize_filter_settings(filter_settings)
+        self._conditioning_remove_mean_default = bool(remove_mean)
+        self._apply_conditioning_defaults_to_controls()
+        if recalculate:
+            self._calculate_spectrograms()
     
     def _create_axis_limits_group(self):
         """Create axis limits control group."""
@@ -671,6 +839,9 @@ class SpectrogramWindow(QMainWindow):
         df = self.df_spin.value()
         overlap_percent = self.overlap_spin.value()
         efficient_fft = self.efficient_fft_checkbox.isChecked()
+        filter_settings = self._build_conditioning_filter_settings()
+        remove_mean = self.conditioning_remove_mean_checkbox.isChecked()
+        self._update_conditioning_note()
         
         # Clear previous data
         self.spec_data = []
@@ -680,12 +851,24 @@ class SpectrogramWindow(QMainWindow):
             # Get this channel's sample rate
             channel_sample_rate = self.sample_rates[i]
             
+            conditioned_signal = apply_processing_pipeline(
+                signal_data,
+                channel_sample_rate,
+                filter_settings=filter_settings,
+                remove_mean=remove_mean,
+                mean_window_seconds=self.mean_window_seconds,
+            )
+
             # Calculate nperseg from df for this channel
-            nperseg = int(channel_sample_rate / df)
+            nperseg = max(2, int(channel_sample_rate / max(df, 1e-6)))
             
             # Use efficient FFT size if requested
             if efficient_fft:
                 nperseg = 2 ** int(np.ceil(np.log2(nperseg)))
+
+            if conditioned_signal.size < nperseg:
+                nperseg = max(2, int(conditioned_signal.size))
+            noverlap = min(int(nperseg * overlap_percent / 100), max(nperseg - 1, 0))
             
             # Calculate actual df for this channel
             actual_df_channel = channel_sample_rate / nperseg
@@ -696,12 +879,9 @@ class SpectrogramWindow(QMainWindow):
                 self.actual_df = actual_df_channel
                 self.actual_df_label.setText(f"{self.actual_df:.3f}")
             
-            # Calculate noverlap
-            noverlap = int(nperseg * overlap_percent / 100)
-            
             # Calculate spectrogram
             freqs, times, Sxx = scipy_signal.spectrogram(
-                signal_data,
+                conditioned_signal,
                 fs=channel_sample_rate,  # Use channel-specific sample rate
                 window=window_type,
                 nperseg=nperseg,

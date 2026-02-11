@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QLabel, QTabWidget, QFileDialog, QMessageBox, QProgressBar,
     QGroupBox, QCheckBox, QDoubleSpinBox, QSpinBox, QComboBox,
     QLineEdit, QTextEdit, QTableWidget, QTableWidgetItem, QHeaderView,
-    QToolButton, QButtonGroup, QGridLayout
+    QToolButton, QButtonGroup, QGridLayout, QInputDialog, QScrollArea
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QFont, QDoubleValidator, QIcon, QPixmap, QPainter, QPen, QColor, QPainterPath
@@ -59,13 +59,20 @@ class ScientificDoubleSpinBox(QDoubleSpinBox):
 
 from spectral_edge.batch.config import (
     BatchConfig, FilterConfig, PSDConfig, SpectrogramConfig,
-    DisplayConfig, OutputConfig, EventDefinition
+    DisplayConfig, OutputConfig, EventDefinition, ReferenceCurveConfig
 )
 from spectral_edge.batch.processor import BatchProcessor
 from spectral_edge.batch.batch_worker import BatchWorker
-from spectral_edge.gui.flight_navigator_enhanced import EnhancedFlightNavigator
+from spectral_edge.gui.flight_navigator_enhanced import FlightNavigator
 from spectral_edge.utils.hdf5_loader import HDF5FlightDataLoader
 from spectral_edge.utils.message_box import show_information, show_warning, show_critical, show_question
+from spectral_edge.utils.reference_curves import (
+    REFERENCE_CURVE_COLOR_PALETTE,
+    build_builtin_reference_curve,
+    dedupe_reference_curves,
+    load_reference_curve_csv,
+    sanitize_reference_curve,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +96,7 @@ class BatchProcessorWindow(QMainWindow):
         
         self.config = BatchConfig()
         self.selected_channels = []
+        self.batch_reference_curves = []
         self.batch_worker = None
         self.processing_log = []
         
@@ -881,9 +889,263 @@ class BatchProcessorWindow(QMainWindow):
 
         self.ppt_group.setLayout(ppt_layout)
         layout.addWidget(self.ppt_group)
+
+        self.reference_curves_group = self._create_reference_curves_group()
+        layout.addWidget(self.reference_curves_group)
         
         layout.addStretch()
         self.tab_widget.addTab(tab, "Output")
+
+    def _create_reference_curves_group(self) -> QGroupBox:
+        """Create reference curve controls for PowerPoint PSD overlays."""
+        group = QGroupBox("Reference Curves (PSD Plots)")
+        layout = QVBoxLayout()
+        layout.setSpacing(6)
+
+        note = QLabel(
+            "Applied to PowerPoint PSD plots only. "
+            "Use built-in screening curves or import custom CSV reference curves."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #9ca3af; font-size: 10pt;")
+        layout.addWidget(note)
+
+        builtin_layout = QHBoxLayout()
+        self.batch_minimum_screening_checkbox = QCheckBox("Minimum Screening")
+        self.batch_minimum_screening_checkbox.stateChanged.connect(self._on_batch_builtin_reference_toggled)
+        builtin_layout.addWidget(self.batch_minimum_screening_checkbox)
+
+        self.batch_minimum_screening_plus_3db_checkbox = QCheckBox("Minimum Screening + 3 dB")
+        self.batch_minimum_screening_plus_3db_checkbox.stateChanged.connect(self._on_batch_builtin_reference_toggled)
+        builtin_layout.addWidget(self.batch_minimum_screening_plus_3db_checkbox)
+        builtin_layout.addStretch()
+        layout.addLayout(builtin_layout)
+
+        button_row = QHBoxLayout()
+        import_button = QPushButton("Import Reference Curve...")
+        import_button.clicked.connect(self._on_import_batch_reference_curve)
+        button_row.addWidget(import_button)
+        clear_button = QPushButton("Clear All")
+        clear_button.clicked.connect(self._clear_batch_reference_curves)
+        button_row.addWidget(clear_button)
+        button_row.addStretch()
+        layout.addLayout(button_row)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(150)
+        self.batch_reference_curve_list_widget = QWidget()
+        self.batch_reference_curve_columns = 4
+        self.batch_reference_curve_list_layout = QGridLayout(self.batch_reference_curve_list_widget)
+        self.batch_reference_curve_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.batch_reference_curve_list_layout.setHorizontalSpacing(8)
+        self.batch_reference_curve_list_layout.setVerticalSpacing(6)
+        scroll.setWidget(self.batch_reference_curve_list_widget)
+        layout.addWidget(scroll)
+
+        group.setLayout(layout)
+        self._refresh_batch_reference_curve_list()
+        return group
+
+    def _next_batch_reference_curve_color(self) -> str:
+        color_idx = len(self.batch_reference_curves) % len(REFERENCE_CURVE_COLOR_PALETTE)
+        return REFERENCE_CURVE_COLOR_PALETTE[color_idx]
+
+    def _curve_dict_from_normalized_batch_curve(self, normalized_curve: Dict[str, object]) -> Dict[str, object]:
+        return {
+            "name": normalized_curve["name"],
+            "frequencies": list(normalized_curve["frequencies"]),
+            "psd": list(normalized_curve["psd"]),
+            "enabled": bool(normalized_curve.get("enabled", True)),
+            "source": normalized_curve.get("source", "imported"),
+            "builtin_id": normalized_curve.get("builtin_id"),
+            "file_path": normalized_curve.get("file_path"),
+            "color": normalized_curve.get("color") or self._next_batch_reference_curve_color(),
+            "line_style": normalized_curve.get("line_style", "dashed"),
+        }
+
+    def _build_batch_builtin_curve(self, builtin_id: str) -> Dict[str, object]:
+        curve = build_builtin_reference_curve(
+            builtin_id,
+            enabled=True,
+            color=self._next_batch_reference_curve_color(),
+            line_style="dashed",
+        )
+        return self._curve_dict_from_normalized_batch_curve(curve)
+
+    def _sync_batch_builtin_reference_curves(self):
+        for builtin_id, checkbox in (
+            ("minimum_screening", self.batch_minimum_screening_checkbox),
+            ("minimum_screening_plus_3db", self.batch_minimum_screening_plus_3db_checkbox),
+        ):
+            existing_indexes = [
+                idx for idx, curve in enumerate(self.batch_reference_curves)
+                if curve.get("source") == "builtin" and curve.get("builtin_id") == builtin_id
+            ]
+            if checkbox.isChecked():
+                if not existing_indexes:
+                    self.batch_reference_curves.append(self._build_batch_builtin_curve(builtin_id))
+                elif len(existing_indexes) > 1:
+                    for idx in reversed(existing_indexes[1:]):
+                        self.batch_reference_curves.pop(idx)
+            else:
+                for idx in reversed(existing_indexes):
+                    self.batch_reference_curves.pop(idx)
+
+        try:
+            normalized_curves = dedupe_reference_curves(self.batch_reference_curves)
+        except Exception as exc:
+            logger.warning(f"Failed to normalize batch reference curves: {exc}")
+            normalized_curves = []
+        self.batch_reference_curves = [
+            self._curve_dict_from_normalized_batch_curve(curve)
+            for curve in normalized_curves
+        ]
+
+    def _on_batch_builtin_reference_toggled(self, _state: int):
+        self._sync_batch_builtin_reference_curves()
+        self._refresh_batch_reference_curve_list()
+
+    def _add_batch_reference_curve(self, curve_entry: Dict[str, object]):
+        """Add one reference curve entry and refresh the list (used by UI and tests)."""
+        normalized = sanitize_reference_curve(
+            name=curve_entry.get("name", ""),
+            frequencies=curve_entry.get("frequencies", []),
+            psd=curve_entry.get("psd", []),
+            enabled=curve_entry.get("enabled", True),
+            source=curve_entry.get("source", "imported"),
+            builtin_id=curve_entry.get("builtin_id"),
+            file_path=curve_entry.get("file_path"),
+            color=curve_entry.get("color"),
+            line_style=curve_entry.get("line_style", "dashed"),
+        )
+        self.batch_reference_curves.append(self._curve_dict_from_normalized_batch_curve(normalized))
+        try:
+            normalized_curves = dedupe_reference_curves(self.batch_reference_curves)
+        except Exception as exc:
+            logger.warning(f"Failed to normalize added reference curve: {exc}")
+            normalized_curves = []
+        self.batch_reference_curves = [
+            self._curve_dict_from_normalized_batch_curve(curve)
+            for curve in normalized_curves
+        ]
+        self._refresh_batch_reference_curve_list()
+
+    def _on_import_batch_reference_curve(self):
+        """Import a reference curve CSV for batch PowerPoint PSD overlays."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Reference Curve CSV",
+            "",
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        try:
+            frequencies, psd = load_reference_curve_csv(file_path)
+            default_name = Path(file_path).stem
+            name, ok = QInputDialog.getText(
+                self,
+                "Curve Name",
+                "Enter a name for this reference curve:",
+                QLineEdit.EchoMode.Normal,
+                default_name,
+            )
+            if not ok:
+                return
+            curve_name = (name or default_name).strip() or default_name
+            self._add_batch_reference_curve(
+                {
+                    "name": curve_name,
+                    "frequencies": frequencies.tolist(),
+                    "psd": psd.tolist(),
+                    "enabled": True,
+                    "source": "imported",
+                    "builtin_id": None,
+                    "file_path": file_path,
+                    "color": self._next_batch_reference_curve_color(),
+                    "line_style": "dashed",
+                }
+            )
+            show_information(
+                self,
+                "Reference Curve Imported",
+                f"Imported '{curve_name}' with {len(frequencies)} data points.",
+            )
+        except Exception as exc:
+            show_warning(self, "Reference Curve Import Failed", str(exc))
+
+    def _refresh_batch_reference_curve_list(self):
+        """Refresh reference curve rows in the Output tab."""
+        if not hasattr(self, "batch_reference_curve_list_layout"):
+            return
+
+        while self.batch_reference_curve_list_layout.count():
+            item = self.batch_reference_curve_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for idx, curve in enumerate(self.batch_reference_curves):
+            cell_widget = QWidget()
+            cell_layout = QHBoxLayout(cell_widget)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(4)
+
+            label = curve["name"]
+            if curve.get("source") == "builtin":
+                label = f"{label} [Built-in]"
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(bool(curve.get("enabled", True)))
+            checkbox.setStyleSheet(f"color: {curve.get('color', '#e0e0e0')};")
+            checkbox.stateChanged.connect(lambda state, i=idx: self._toggle_batch_reference_curve(i, state))
+            cell_layout.addWidget(checkbox)
+
+            if curve.get("source") != "builtin":
+                remove_btn = QPushButton("X")
+                remove_btn.setFixedSize(24, 24)
+                remove_btn.setStyleSheet(
+                    "QPushButton { background-color: #dc2626; color: white; border: none; border-radius: 3px; }"
+                    "QPushButton:hover { background-color: #b91c1c; }"
+                )
+                remove_btn.clicked.connect(lambda _, i=idx: self._remove_batch_reference_curve(i))
+                cell_layout.addWidget(remove_btn)
+
+            cell_layout.addStretch()
+            row = idx // self.batch_reference_curve_columns
+            col = idx % self.batch_reference_curve_columns
+            self.batch_reference_curve_list_layout.addWidget(cell_widget, row, col)
+
+    def _toggle_batch_reference_curve(self, index: int, state: int):
+        if 0 <= index < len(self.batch_reference_curves):
+            enabled = (state == Qt.CheckState.Checked.value)
+            curve = self.batch_reference_curves[index]
+            if curve.get("source") == "builtin":
+                builtin_id = curve.get("builtin_id")
+                if builtin_id == "minimum_screening":
+                    self.batch_minimum_screening_checkbox.setChecked(enabled)
+                elif builtin_id == "minimum_screening_plus_3db":
+                    self.batch_minimum_screening_plus_3db_checkbox.setChecked(enabled)
+                return
+            self.batch_reference_curves[index]["enabled"] = enabled
+
+    def _remove_batch_reference_curve(self, index: int):
+        if 0 <= index < len(self.batch_reference_curves):
+            if self.batch_reference_curves[index].get("source") == "builtin":
+                return
+            self.batch_reference_curves.pop(index)
+            self._refresh_batch_reference_curve_list()
+
+    def _clear_batch_reference_curves(self):
+        self.batch_reference_curves = []
+        for checkbox in (
+            self.batch_minimum_screening_checkbox,
+            self.batch_minimum_screening_plus_3db_checkbox,
+        ):
+            checkbox.blockSignals(True)
+            checkbox.setChecked(False)
+            checkbox.blockSignals(False)
+        self._refresh_batch_reference_curve_list()
     
     def _connect_signals(self):
         """Connect signals to slots."""
@@ -1244,7 +1506,7 @@ class BatchProcessorWindow(QMainWindow):
         # Open Enhanced Flight Navigator
         try:
             loader = HDF5FlightDataLoader(self.config.source_files[0])
-            navigator = EnhancedFlightNavigator(loader, parent=self)
+            navigator = FlightNavigator(loader, parent=self)
         except Exception as e:
             show_critical(
                 self,
@@ -1464,6 +1726,8 @@ class BatchProcessorWindow(QMainWindow):
         """Enable/disable PowerPoint options when output is toggled."""
         is_enabled = self.powerpoint_checkbox.isChecked()
         self.ppt_group.setEnabled(is_enabled)
+        if hasattr(self, "reference_curves_group"):
+            self.reference_curves_group.setEnabled(is_enabled)
         self._update_spectrogram_controls()
 
     def _update_filter_cutoff_visibility(self):
@@ -1630,6 +1894,29 @@ class BatchProcessorWindow(QMainWindow):
         self.config.powerpoint_config.include_statistics = self.ppt_include_statistics_checkbox.isChecked()
         self.config.powerpoint_config.include_rms_table = self.ppt_include_rms_table_checkbox.isChecked()
         self.config.powerpoint_config.include_3sigma_columns = self.ppt_include_3sigma_columns_checkbox.isChecked()
+        self.config.powerpoint_config.reference_curves = []
+        try:
+            normalized_curves = dedupe_reference_curves(self.batch_reference_curves)
+        except Exception as exc:
+            logger.warning(f"Failed to normalize reference curves from UI: {exc}")
+            normalized_curves = []
+        for curve in normalized_curves:
+            try:
+                self.config.powerpoint_config.reference_curves.append(
+                    ReferenceCurveConfig(
+                        name=curve["name"],
+                        frequencies=list(curve["frequencies"]),
+                        psd=list(curve["psd"]),
+                        enabled=bool(curve.get("enabled", True)),
+                        source=str(curve.get("source", "imported")),
+                        builtin_id=curve.get("builtin_id"),
+                        file_path=curve.get("file_path"),
+                        color=curve.get("color"),
+                        line_style=str(curve.get("line_style", "dashed")),
+                    )
+                )
+            except Exception as exc:
+                logger.warning(f"Skipping invalid reference curve while saving config: {exc}")
 
         # Statistics config
         self.config.statistics_config.enabled = self.ppt_include_statistics_checkbox.isChecked()
@@ -1757,6 +2044,8 @@ class BatchProcessorWindow(QMainWindow):
         self.csv_checkbox.setChecked(self.config.output_config.csv_enabled)
         self.powerpoint_checkbox.setChecked(self.config.output_config.powerpoint_enabled)
         self.ppt_group.setEnabled(self.powerpoint_checkbox.isChecked())
+        if hasattr(self, "reference_curves_group"):
+            self.reference_curves_group.setEnabled(self.powerpoint_checkbox.isChecked())
 
         # PowerPoint report options
         self._set_selected_ppt_layout(self.config.powerpoint_config.layout)
@@ -1767,6 +2056,55 @@ class BatchProcessorWindow(QMainWindow):
             self.config.powerpoint_config.include_3sigma_columns
         )
         self._on_rms_table_toggled(self.config.powerpoint_config.include_rms_table)
+
+        # Reference curves
+        self.batch_reference_curves = []
+        for curve in getattr(self.config.powerpoint_config, "reference_curves", []):
+            try:
+                if isinstance(curve, dict):
+                    curve_payload = curve
+                else:
+                    curve_payload = {
+                        "name": getattr(curve, "name", ""),
+                        "frequencies": getattr(curve, "frequencies", []),
+                        "psd": getattr(curve, "psd", []),
+                        "enabled": getattr(curve, "enabled", True),
+                        "source": getattr(curve, "source", "imported"),
+                        "builtin_id": getattr(curve, "builtin_id", None),
+                        "file_path": getattr(curve, "file_path", None),
+                        "color": getattr(curve, "color", None),
+                        "line_style": getattr(curve, "line_style", "dashed"),
+                    }
+                normalized = sanitize_reference_curve(
+                    name=curve_payload.get("name", ""),
+                    frequencies=curve_payload.get("frequencies", []),
+                    psd=curve_payload.get("psd", []),
+                    enabled=curve_payload.get("enabled", True),
+                    source=curve_payload.get("source", "imported"),
+                    builtin_id=curve_payload.get("builtin_id"),
+                    file_path=curve_payload.get("file_path"),
+                    color=curve_payload.get("color", None),
+                    line_style=curve_payload.get("line_style", "dashed"),
+                )
+                self.batch_reference_curves.append(self._curve_dict_from_normalized_batch_curve(normalized))
+            except Exception as exc:
+                logger.warning(f"Skipping invalid saved reference curve: {exc}")
+
+        enabled_builtins = {
+            curve.get("builtin_id")
+            for curve in self.batch_reference_curves
+            if curve.get("source") == "builtin" and curve.get("enabled", True)
+        }
+        self.batch_minimum_screening_checkbox.blockSignals(True)
+        self.batch_minimum_screening_checkbox.setChecked("minimum_screening" in enabled_builtins)
+        self.batch_minimum_screening_checkbox.blockSignals(False)
+        self.batch_minimum_screening_plus_3db_checkbox.blockSignals(True)
+        self.batch_minimum_screening_plus_3db_checkbox.setChecked(
+            "minimum_screening_plus_3db" in enabled_builtins
+        )
+        self.batch_minimum_screening_plus_3db_checkbox.blockSignals(False)
+        self._sync_batch_builtin_reference_curves()
+        self._refresh_batch_reference_curve_list()
 
         # Statistics options
         self.stats_bins_spin.setValue(self.config.statistics_config.pdf_bins)
@@ -2063,6 +2401,9 @@ class BatchProcessorWindow(QMainWindow):
         if self.powerpoint_checkbox.isChecked():
             layout_value = self._get_selected_ppt_layout()
             summary_lines.append(f"PPT Layout: {self._get_layout_label(layout_value)}")
+            enabled_curves = sum(1 for curve in self.batch_reference_curves if curve.get("enabled", True))
+            if enabled_curves > 0:
+                summary_lines.append(f"PPT PSD Reference Curves: {enabled_curves} enabled")
             if self.ppt_include_statistics_checkbox.isChecked():
                 summary_lines.append("PPT: Statistics slides enabled")
             if self.ppt_include_rms_table_checkbox.isChecked():

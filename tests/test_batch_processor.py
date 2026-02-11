@@ -15,7 +15,7 @@ from pathlib import Path
 
 from spectral_edge.batch.config import (
     BatchConfig, PSDConfig, FilterConfig, SpectrogramConfig,
-    OutputConfig, EventDefinition
+    OutputConfig, EventDefinition, PowerPointConfig, ReferenceCurveConfig
 )
 from spectral_edge.batch.csv_loader import (
     load_csv_files, detect_csv_format, _extract_units_from_name,
@@ -97,6 +97,51 @@ class TestConfigClasses:
             assert loaded_config.source_type == "csv"
             assert loaded_config.config_name == "test_config"
             assert len(loaded_config.source_files) == 1
+        finally:
+            Path(temp_path).unlink()
+
+    def test_batch_config_reference_curves_roundtrip(self):
+        """Test reference curve persistence in batch config save/load."""
+        config = BatchConfig(
+            source_type="csv",
+            source_files=["test.csv"],
+            powerpoint_config=PowerPointConfig(
+                reference_curves=[
+                    ReferenceCurveConfig(
+                        name="Minimum Screening",
+                        frequencies=[20.0, 80.0, 800.0, 2000.0],
+                        psd=[0.01, 0.04, 0.04, 0.01],
+                        enabled=True,
+                        source="builtin",
+                        builtin_id="minimum_screening",
+                        color="#ff6b6b",
+                        line_style="dashed",
+                    ),
+                    ReferenceCurveConfig(
+                        name="Imported Curve",
+                        frequencies=[30.0, 120.0, 900.0, 1800.0],
+                        psd=[0.02, 0.05, 0.05, 0.02],
+                        enabled=False,
+                        source="imported",
+                        file_path="curve.csv",
+                        color="#4d96ff",
+                        line_style="dashed",
+                    ),
+                ]
+            ),
+        )
+
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as f:
+            temp_path = f.name
+
+        try:
+            config.save(temp_path)
+            loaded_config = BatchConfig.load(temp_path)
+            curves = loaded_config.powerpoint_config.reference_curves
+            assert len(curves) == 2
+            assert curves[0].builtin_id == "minimum_screening"
+            assert curves[1].source == "imported"
+            assert curves[1].enabled is False
         finally:
             Path(temp_path).unlink()
 

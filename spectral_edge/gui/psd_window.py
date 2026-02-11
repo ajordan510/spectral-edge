@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QFileDialog,
     QGroupBox, QGridLayout, QMessageBox, QCheckBox, QScrollArea, QTabWidget, QLineEdit,
-    QDialog, QProgressDialog, QApplication
+    QDialog, QProgressDialog, QApplication, QSizePolicy
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -34,12 +34,20 @@ from spectral_edge.core.psd import (
 from spectral_edge.core.channel_data import ChannelData, align_channels_by_time
 from spectral_edge.gui.spectrogram_window import SpectrogramWindow
 from spectral_edge.gui.event_manager import EventManagerWindow, Event
-from spectral_edge.gui.flight_navigator import FlightNavigator
+from spectral_edge.gui.flight_navigator_enhanced import FlightNavigator
 from spectral_edge.utils.message_box import show_information, show_warning, show_critical
 from spectral_edge.utils.report_generator import ReportGenerator, export_plot_to_image, PPTX_AVAILABLE
 from spectral_edge.gui.cross_spectrum_window import CrossSpectrumWindow
 from spectral_edge.gui.statistics_window import create_statistics_window
-from spectral_edge.utils.theme import apply_context_menu_style
+from spectral_edge.utils.theme import apply_context_menu_style, apply_dark_dialog_theme
+from spectral_edge.utils.signal_conditioning import apply_processing_pipeline, build_processing_note
+from spectral_edge.utils.reference_curves import (
+    REFERENCE_CURVE_COLOR_PALETTE,
+    build_builtin_reference_curve,
+    dedupe_reference_curves,
+    load_reference_curve_csv,
+    sanitize_reference_curve,
+)
 from spectral_edge.gui.input_validator import ParameterValidator
 from spectral_edge.gui.parameter_tooltips import apply_tooltips_to_window
 from spectral_edge.gui.parameter_presets import PresetManager, apply_preset_to_window
@@ -51,6 +59,7 @@ from spectral_edge.utils.plot_theme import (
     style_colorbar,
     apply_axis_styling,
     BASE_FONT_SIZE,
+    get_watermark_text,
 )
 
 
@@ -153,7 +162,13 @@ class PSDReportOptionsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Report Options")
         self.setMinimumWidth(500)
+        apply_dark_dialog_theme(self, object_name="psdReportOptionsDialog")
         self._build_ui()
+
+    def showEvent(self, event):
+        """Re-assert dialog-scoped dark theme in case parent styles are re-applied."""
+        apply_dark_dialog_theme(self, object_name="psdReportOptionsDialog")
+        super().showEvent(event)
 
     @classmethod
     def get_default_options(cls) -> dict:
@@ -319,6 +334,8 @@ class PSDAnalysisWindow(QMainWindow):
         # Comparison curves storage
         # Each curve is a dict: {name, frequencies, psd, color, line_style, visible}
         self.comparison_curves = []
+        self.minimum_screening_checkbox = None
+        self.minimum_screening_plus_3db_checkbox = None
 
         # Cross-spectrum window
         self.cross_spectrum_window = None
@@ -1654,16 +1671,29 @@ class PSDAnalysisWindow(QMainWindow):
         group = QGroupBox("Reference Curves")
         layout = QVBoxLayout()
         layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(3)
+        layout.setSpacing(6)
 
         # Description
         desc_label = QLabel(
-            "Import reference PSD curves from CSV files to overlay on the plot. "
-            "CSV format: two columns (frequency, PSD) with optional header."
+            "Quick-add built-in screening curves or import custom reference PSD curves "
+            "from CSV (two columns: frequency, PSD)."
         )
         desc_label.setWordWrap(True)
         desc_label.setStyleSheet("color: #9ca3af; font-size: 10pt;")
         layout.addWidget(desc_label)
+
+        quick_layout = QVBoxLayout()
+        self.quick_curves_layout = quick_layout
+        quick_layout.setContentsMargins(0, 0, 0, 0)
+        quick_layout.setSpacing(4)
+        quick_layout.addWidget(QLabel("Quick Curves:"))
+        self.minimum_screening_checkbox = QCheckBox("Minimum Screening")
+        self.minimum_screening_checkbox.stateChanged.connect(self._on_builtin_reference_toggled)
+        quick_layout.addWidget(self.minimum_screening_checkbox)
+        self.minimum_screening_plus_3db_checkbox = QCheckBox("Minimum Screening + 3 dB")
+        self.minimum_screening_plus_3db_checkbox.stateChanged.connect(self._on_builtin_reference_toggled)
+        quick_layout.addWidget(self.minimum_screening_plus_3db_checkbox)
+        layout.addLayout(quick_layout)
 
         # Import button
         import_button = QPushButton("Import Reference Curve...")
@@ -1673,7 +1703,10 @@ class PSDAnalysisWindow(QMainWindow):
         # List of loaded curves (scroll area)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMaximumHeight(400)  # Increased from 150 to utilize available space
+        scroll.setMinimumHeight(170)
+        scroll.setMaximumHeight(500)
+        scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.comparison_scroll = scroll
 
         self.comparison_list_widget = QWidget()
         self.comparison_list_widget.setObjectName("comparisonWidget")
@@ -1681,7 +1714,7 @@ class PSDAnalysisWindow(QMainWindow):
         self.comparison_list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         scroll.setWidget(self.comparison_list_widget)
-        layout.addWidget(scroll)
+        layout.addWidget(scroll, 1)
 
         # Clear all button
         clear_button = QPushButton("Clear All Reference Curves")
@@ -1691,10 +1724,140 @@ class PSDAnalysisWindow(QMainWindow):
         group.setLayout(layout)
         return group
 
+    def _format_rms_with_unit(self, rms_value: float, unit: str, decimals: int = 2) -> str:
+        """Format RMS text consistently for channel and reference legend labels."""
+        try:
+            value = float(rms_value)
+        except (TypeError, ValueError):
+            value = 0.0
+        unit_text = (unit or "").strip()
+        if unit_text:
+            return f"{value:.{decimals}f} {unit_text}"
+        return f"{value:.{decimals}f}"
+
+    def _next_comparison_curve_color(self):
+        color_idx = len(self.comparison_curves) % len(REFERENCE_CURVE_COLOR_PALETTE)
+        return REFERENCE_CURVE_COLOR_PALETTE[color_idx]
+
+    def _build_builtin_comparison_curve_data(self, builtin_id: str):
+        curve = build_builtin_reference_curve(
+            builtin_id,
+            enabled=True,
+            color=self._next_comparison_curve_color(),
+            line_style="dashed",
+        )
+        frequencies = np.asarray(curve["frequencies"], dtype=np.float64)
+        psd = np.asarray(curve["psd"], dtype=np.float64)
+        try:
+            rms = calculate_rms_from_psd(
+                frequencies,
+                psd,
+                freq_min=self.freq_min_spin.value(),
+                freq_max=self.freq_max_spin.value(),
+            )
+        except Exception:
+            rms = 0.0
+        return {
+            "name": curve["name"],
+            "frequencies": frequencies,
+            "psd": psd,
+            "color": curve["color"],
+            "line_style": curve["line_style"],
+            "visible": True,
+            "enabled": True,
+            "source": curve["source"],
+            "builtin_id": curve["builtin_id"],
+            "file_path": None,
+            "rms": rms,
+        }
+
+    def _on_builtin_reference_toggled(self, _state: int):
+        self._sync_builtin_reference_curves()
+        self._update_comparison_list()
+        self._update_plot()
+
+    def _sync_builtin_reference_curves(self):
+        for builtin_id, checkbox in (
+            ("minimum_screening", self.minimum_screening_checkbox),
+            ("minimum_screening_plus_3db", self.minimum_screening_plus_3db_checkbox),
+        ):
+            if checkbox is None:
+                continue
+            existing_indexes = [
+                idx for idx, curve in enumerate(self.comparison_curves)
+                if curve.get("source") == "builtin" and curve.get("builtin_id") == builtin_id
+            ]
+            if checkbox.isChecked():
+                if not existing_indexes:
+                    self.comparison_curves.append(self._build_builtin_comparison_curve_data(builtin_id))
+                elif len(existing_indexes) > 1:
+                    for idx in reversed(existing_indexes[1:]):
+                        self.comparison_curves.pop(idx)
+            else:
+                for idx in reversed(existing_indexes):
+                    self.comparison_curves.pop(idx)
+
+        try:
+            normalized_curves = [self._normalize_comparison_curve(curve) for curve in self.comparison_curves]
+            normalized_curves = dedupe_reference_curves(normalized_curves)
+        except Exception as exc:
+            show_warning(self, "Reference Curve Warning", f"Failed to normalize reference curves: {exc}")
+            normalized_curves = []
+        self.comparison_curves = [self._curve_dict_from_normalized(curve) for curve in normalized_curves]
+
+    def _curve_line_style_to_qt(self, line_style):
+        style = str(line_style).strip().lower()
+        if style in {"-", "solid"}:
+            return Qt.PenStyle.SolidLine
+        if style in {":", "dot", "dotted"}:
+            return Qt.PenStyle.DotLine
+        if style in {"-.", "dashdot", "dash-dot"}:
+            return Qt.PenStyle.DashDotLine
+        return Qt.PenStyle.DashLine
+
+    def _normalize_comparison_curve(self, curve):
+        normalized = sanitize_reference_curve(
+            name=curve.get("name", ""),
+            frequencies=curve.get("frequencies", []),
+            psd=curve.get("psd", []),
+            enabled=curve.get("visible", curve.get("enabled", True)),
+            source=curve.get("source", "imported"),
+            builtin_id=curve.get("builtin_id"),
+            file_path=curve.get("file_path"),
+            color=curve.get("color"),
+            line_style=curve.get("line_style", "dashed"),
+        )
+        return normalized
+
+    def _curve_dict_from_normalized(self, normalized_curve):
+        frequencies = np.asarray(normalized_curve["frequencies"], dtype=np.float64)
+        psd = np.asarray(normalized_curve["psd"], dtype=np.float64)
+        try:
+            rms = calculate_rms_from_psd(
+                frequencies,
+                psd,
+                freq_min=self.freq_min_spin.value(),
+                freq_max=self.freq_max_spin.value(),
+            )
+        except Exception:
+            rms = 0.0
+        return {
+            "name": normalized_curve["name"],
+            "frequencies": frequencies,
+            "psd": psd,
+            "color": normalized_curve.get("color") or self._next_comparison_curve_color(),
+            "line_style": normalized_curve.get("line_style", "dashed"),
+            "visible": normalized_curve.get("enabled", True),
+            "enabled": normalized_curve.get("enabled", True),
+            "source": normalized_curve.get("source", "imported"),
+            "builtin_id": normalized_curve.get("builtin_id"),
+            "file_path": normalized_curve.get("file_path"),
+            "rms": rms,
+        }
+
     def _import_comparison_curve(self):
         """Import a reference PSD curve from a CSV file."""
         from PyQt6.QtWidgets import QFileDialog, QInputDialog
-        import pandas as pd
 
         # Style the file dialog to match dark theme
         file_dialog = QFileDialog(self)
@@ -1743,24 +1906,7 @@ class PSDAnalysisWindow(QMainWindow):
         file_path = file_paths[0]
 
         try:
-            # Try to load the CSV
-            df = pd.read_csv(file_path)
-
-            # Check if we have at least 2 columns
-            if df.shape[1] < 2:
-                show_warning(self, "Invalid File",
-                            "CSV must have at least 2 columns (frequency, PSD).")
-                return
-
-            # Get the first two columns as frequency and PSD
-            frequencies = df.iloc[:, 0].values.astype(float)
-            psd = df.iloc[:, 1].values.astype(float)
-
-            # Validate data
-            if len(frequencies) < 2:
-                show_warning(self, "Invalid Data",
-                            "Reference curve must have at least 2 data points.")
-                return
+            frequencies, psd = load_reference_curve_csv(file_path)
 
             # Get a name for this curve with styled dialog
             default_name = Path(file_path).stem
@@ -1803,33 +1949,17 @@ class PSDAnalysisWindow(QMainWindow):
             if not ok or not name:
                 name = default_name
 
-            # Define colors for comparison curves (different from channel colors)
-            comparison_colors = ['#ff6b6b', '#ffd93d', '#6bcb77', '#4d96ff', '#ff6f91', '#845ec2']
-            color_idx = len(self.comparison_curves) % len(comparison_curves)
-            color = comparison_colors[color_idx]
-
-            # Calculate RMS for the reference curve using current frequency range
-            freq_min = self.freq_min_spin.value()
-            freq_max = self.freq_max_spin.value()
-            rms = calculate_rms_from_psd(
-                frequencies,
-                psd,
-                freq_min=freq_min,
-                freq_max=freq_max
+            normalized_curve = sanitize_reference_curve(
+                name=name,
+                frequencies=frequencies,
+                psd=psd,
+                enabled=True,
+                source="imported",
+                file_path=file_path,
+                color=self._next_comparison_curve_color(),
+                line_style="dashed",
             )
-
-            # Add to comparison curves
-            curve_data = {
-                'name': name,
-                'frequencies': frequencies,
-                'psd': psd,
-                'color': color,
-                'line_style': Qt.PenStyle.DashLine,
-                'visible': True,
-                'file_path': file_path,
-                'rms': rms  # Store RMS value
-            }
-            self.comparison_curves.append(curve_data)
+            self.comparison_curves.append(self._curve_dict_from_normalized(normalized_curve))
 
             # Update the comparison list UI
             self._update_comparison_list()
@@ -1868,49 +1998,79 @@ class PSDAnalysisWindow(QMainWindow):
                 unit = self.channel_units[0]
             else:
                 unit = 'g'  # Default to g if no channels loaded
-            label_text = f"{curve['name']} ({unit}RMS: {rms_value:.4f})"
+            rms_text = self._format_rms_with_unit(rms_value, unit)
+            label_text = f"{curve['name']} (RMS={rms_text})"
+            if curve.get("source") == "builtin":
+                label_text = f"{curve['name']} [Built-in] (RMS={rms_text})"
             checkbox = QCheckBox(label_text)
-            checkbox.setChecked(curve['visible'])
+            checkbox.setChecked(curve.get('visible', True))
             checkbox.setStyleSheet(f"color: {curve['color']};")
             checkbox.stateChanged.connect(lambda state, idx=i: self._toggle_comparison_curve(idx, state))
             row_layout.addWidget(checkbox)
 
-            # Remove button
-            remove_btn = QPushButton("X")
-            remove_btn.setFixedSize(25, 25)
-            remove_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #dc2626;
-                    color: white;
-                    border: none;
-                    border-radius: 3px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #b91c1c;
-                }
-            """)
-            remove_btn.clicked.connect(lambda _, idx=i: self._remove_comparison_curve(idx))
-            row_layout.addWidget(remove_btn)
+            # Remove button for imported curves only
+            if curve.get("source") != "builtin":
+                remove_btn = QPushButton("X")
+                remove_btn.setFixedSize(25, 25)
+                remove_btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #dc2626;
+                        color: white;
+                        border: none;
+                        border-radius: 3px;
+                        font-weight: bold;
+                    }
+                    QPushButton:hover {
+                        background-color: #b91c1c;
+                    }
+                """)
+                remove_btn.clicked.connect(lambda _, idx=i: self._remove_comparison_curve(idx))
+                row_layout.addWidget(remove_btn)
 
             self.comparison_list_layout.addWidget(row_widget)
 
     def _toggle_comparison_curve(self, index: int, state: int):
         """Toggle visibility of a comparison curve."""
         if 0 <= index < len(self.comparison_curves):
-            self.comparison_curves[index]['visible'] = (state == Qt.CheckState.Checked.value)
+            visible = (state == Qt.CheckState.Checked.value)
+            curve = self.comparison_curves[index]
+            if curve.get("source") == "builtin":
+                builtin_id = curve.get("builtin_id")
+                if builtin_id == "minimum_screening" and self.minimum_screening_checkbox is not None:
+                    self.minimum_screening_checkbox.setChecked(visible)
+                elif builtin_id == "minimum_screening_plus_3db" and self.minimum_screening_plus_3db_checkbox is not None:
+                    self.minimum_screening_plus_3db_checkbox.setChecked(visible)
+                return
+            curve['visible'] = visible
+            curve['enabled'] = visible
             self._update_plot()
 
     def _remove_comparison_curve(self, index: int):
         """Remove a comparison curve."""
         if 0 <= index < len(self.comparison_curves):
-            self.comparison_curves.pop(index)
-            self._update_comparison_list()
-            self._update_plot()
+            curve = self.comparison_curves[index]
+            if curve.get("source") == "builtin":
+                builtin_id = curve.get("builtin_id")
+                if builtin_id == "minimum_screening" and self.minimum_screening_checkbox is not None:
+                    self.minimum_screening_checkbox.setChecked(False)
+                elif builtin_id == "minimum_screening_plus_3db" and self.minimum_screening_plus_3db_checkbox is not None:
+                    self.minimum_screening_plus_3db_checkbox.setChecked(False)
+            else:
+                self.comparison_curves.pop(index)
+                self._update_comparison_list()
+                self._update_plot()
 
     def _clear_comparison_curves(self):
         """Clear all comparison curves."""
         self.comparison_curves.clear()
+        if self.minimum_screening_checkbox is not None:
+            self.minimum_screening_checkbox.blockSignals(True)
+            self.minimum_screening_checkbox.setChecked(False)
+            self.minimum_screening_checkbox.blockSignals(False)
+        if self.minimum_screening_plus_3db_checkbox is not None:
+            self.minimum_screening_plus_3db_checkbox.blockSignals(True)
+            self.minimum_screening_plus_3db_checkbox.setChecked(False)
+            self.minimum_screening_plus_3db_checkbox.blockSignals(False)
         self._update_comparison_list()
         self._update_plot()
 
@@ -1978,27 +2138,73 @@ class PSDAnalysisWindow(QMainWindow):
             )
             return
 
+        filter_settings = self._get_statistics_filter_settings()
+        remove_mean = self.remove_mean_checkbox.isChecked()
+        mean_window_seconds = 1.0
+        processing_note = build_processing_note(
+            filter_settings,
+            remove_mean=remove_mean,
+            mean_window_seconds=mean_window_seconds,
+        )
+        processing_flags = {
+            "filter_enabled": bool(filter_settings.get("enabled", False)),
+            "filter_type": filter_settings.get("filter_type", "lowpass"),
+            "low_cutoff_hz": filter_settings.get("cutoff_low"),
+            "high_cutoff_hz": filter_settings.get("cutoff_high"),
+            "running_mean_removed": remove_mean,
+            "running_mean_window_s": mean_window_seconds,
+        }
+
         # Prepare channel data
         channels_data = []
         for i, name in enumerate(self.channel_names):
             _, signal, _ = self._get_channel_full(i)
             if signal is None:
                 continue
+            channel_sample_rate = (
+                self.channel_sample_rates[i]
+                if i < len(self.channel_sample_rates)
+                else self.sample_rate
+            )
+            conditioned_signal = apply_processing_pipeline(
+                signal,
+                channel_sample_rate,
+                filter_settings=filter_settings,
+                remove_mean=remove_mean,
+                mean_window_seconds=mean_window_seconds,
+            )
             unit = self.channel_units[i] if i < len(self.channel_units) else ''
             flight = self.channel_flight_names[i] if i < len(self.channel_flight_names) else ''
-            channels_data.append((name, signal, unit, flight))
+            channels_data.append((name, conditioned_signal, unit, flight))
+
+        self._statistics_processing_note = processing_note
 
         # Create or show statistics window
         if self.statistics_window is None or not self.statistics_window.isVisible():
             self.statistics_window = create_statistics_window(
                 channels_data=channels_data,
                 sample_rate=self.sample_rate,
-                parent=self
+                parent=self,
+                processing_note=processing_note,
+                processing_flags=processing_flags,
             )
             self.statistics_window.show()
         else:
             self.statistics_window.raise_()
             self.statistics_window.activateWindow()
+
+    def _get_statistics_filter_settings(self):
+        """Build filter settings payload for shared signal-conditioning utilities."""
+        if not self.enable_filter_checkbox.isChecked():
+            return {"enabled": False}
+        return {
+            "enabled": True,
+            "filter_type": self.filter_type_combo.currentText().strip().lower(),
+            "filter_design": "butterworth",
+            "filter_order": 4,
+            "cutoff_low": self.low_cutoff_spin.value(),
+            "cutoff_high": self.high_cutoff_spin.value(),
+        }
 
     def _generate_report(self):
         """Generate a PowerPoint report with the current analysis."""
@@ -2041,7 +2247,11 @@ class PSDAnalysisWindow(QMainWindow):
             else:
                 subtitle = ""
 
-            report = ReportGenerator(title=title)
+            report = ReportGenerator(
+                title=title,
+                watermark_text=get_watermark_text(),
+                watermark_scope="plot_slides",
+            )
             report.add_title_slide(subtitle=subtitle)
 
             parameters = {
@@ -2057,9 +2267,17 @@ class PSDAnalysisWindow(QMainWindow):
                 parameters["Maximax Overlap"] = f"{self.maximax_overlap_spin.value()}%"
 
             if report_options["include_parameters"]:
-                report.add_text_slide(
-                    title="Processing Parameters",
-                    content="\n".join([f"{key}: {value}" for key, value in parameters.items()])
+                processing_note = build_processing_note(
+                    self._get_statistics_filter_settings(),
+                    remove_mean=self.remove_mean_checkbox.isChecked(),
+                    mean_window_seconds=1.0,
+                )
+                report.add_bulleted_sections_slide(
+                    title="Processing Configuration",
+                    sections=[
+                        ("Calculation Parameters", [f"{key}: {value}" for key, value in parameters.items()]),
+                        ("Signal Conditioning", [processing_note]),
+                    ],
                 )
 
             time_image = export_plot_to_image(self.time_plot_widget)
@@ -2187,6 +2405,25 @@ class PSDAnalysisWindow(QMainWindow):
         if signal is None or len(signal) < 10 or channel_sample_rate is None:
             return None
 
+        filter_settings = self._get_statistics_filter_settings()
+        remove_mean = self.remove_mean_checkbox.isChecked()
+        mean_window_seconds = 1.0
+        conditioned_signal = apply_processing_pipeline(
+            signal,
+            channel_sample_rate,
+            filter_settings=filter_settings,
+            remove_mean=remove_mean,
+            mean_window_seconds=mean_window_seconds,
+        )
+        show_rayleigh = False
+        if self.statistics_window is not None and hasattr(self.statistics_window, "rayleigh_checkbox"):
+            show_rayleigh = bool(self.statistics_window.rayleigh_checkbox.isChecked())
+        processing_note = build_processing_note(
+            filter_settings,
+            remove_mean=remove_mean,
+            mean_window_seconds=mean_window_seconds,
+        )
+
         class _StatsConfig:
             pdf_bins = 50
             running_window_seconds = 1.0
@@ -2198,8 +2435,9 @@ class PSDAnalysisWindow(QMainWindow):
             show_normal = True
             show_rayleigh = False
             show_uniform = False
+        _StatsConfig.show_rayleigh = bool(show_rayleigh)
 
-        stats = compute_statistics(signal, channel_sample_rate, _StatsConfig())
+        stats = compute_statistics(conditioned_signal, channel_sample_rate, _StatsConfig())
         pdf_fig, _ = plot_pdf(stats["pdf"], _StatsConfig())
         mean_fig, _ = plot_running_stat(stats["running"], "mean", "Running Mean", "Mean")
         std_fig, _ = plot_running_stat(stats["running"], "std", "Running Std", "Std")
@@ -2223,6 +2461,7 @@ class PSDAnalysisWindow(QMainWindow):
             ("Max", f"{stats['overall']['max']:.4f}"),
             ("RMS", f"{stats['overall']['rms']:.4f}"),
             ("Crest Factor", f"{stats['overall']['crest_factor']:.4f}"),
+            ("Conditioning", processing_note),
         ]
         return {
             "pdf": _fig_to_bytes(pdf_fig),
@@ -2379,12 +2618,17 @@ class PSDAnalysisWindow(QMainWindow):
 
         for curve in self.comparison_curves:
             # Recalculate RMS for this curve
-            rms = calculate_rms_from_psd(
-                curve['frequencies'],
-                curve['psd'],
-                freq_min=freq_min,
-                freq_max=freq_max
-            )
+            curve_freqs = np.asarray(curve['frequencies'], dtype=np.float64)
+            curve_psd = np.asarray(curve['psd'], dtype=np.float64)
+            try:
+                rms = calculate_rms_from_psd(
+                    curve_freqs,
+                    curve_psd,
+                    freq_min=freq_min,
+                    freq_max=freq_max
+                )
+            except Exception:
+                rms = 0.0
             curve['rms'] = rms
 
         # Update the UI to show new RMS values
@@ -2992,7 +3236,7 @@ class PSDAnalysisWindow(QMainWindow):
                     legend_prefix = f"{clean_flight_name} - {channel_name}"
                 else:
                     legend_prefix = channel_name
-                rms_text = f"{rms:.2f} {unit}" if unit else f"{rms:.2f}"
+                rms_text = self._format_rms_with_unit(rms, unit)
                 base_legend_label = f"{legend_prefix}: RMS={rms_text}"
 
                 frequencies_to_plot = frequencies_plot
@@ -3080,15 +3324,18 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Plot comparison curves (reference/spec limit curves)
         for curve in self.comparison_curves:
-            if not curve['visible']:
+            if not curve.get('visible', True):
                 continue
 
-            # Apply frequency mask to comparison curve
-            curve_freqs = curve['frequencies']
-            curve_psd = curve['psd']
-
-            # Filter to display frequency range
-            curve_mask = (curve_freqs >= freq_min) & (curve_freqs <= freq_max)
+            # Plot full valid comparison curve (do not trim to PSD parameter range)
+            curve_freqs = np.asarray(curve['frequencies'], dtype=np.float64)
+            curve_psd = np.asarray(curve['psd'], dtype=np.float64)
+            curve_mask = (
+                np.isfinite(curve_freqs)
+                & np.isfinite(curve_psd)
+                & (curve_freqs > 0)
+                & (curve_psd > 0)
+            )
             if not np.any(curve_mask):
                 continue
 
@@ -3099,7 +3346,7 @@ class PSDAnalysisWindow(QMainWindow):
             pen = pg.mkPen(
                 color=curve['color'],
                 width=2,
-                style=curve.get('line_style', Qt.PenStyle.DashLine)
+                style=self._curve_line_style_to_qt(curve.get('line_style', 'dashed'))
             )
 
             # Get RMS value and units for legend
@@ -3109,12 +3356,13 @@ class PSDAnalysisWindow(QMainWindow):
                 unit = self.channel_units[0]
             else:
                 unit = 'g'  # Default to g if no channels loaded
+            rms_text = self._format_rms_with_unit(rms_value, unit)
 
             self.plot_widget.plot(
                 curve_freqs_plot,
                 curve_psd_plot,
                 pen=pen,
-                name=f"Ref: {curve['name']} ({unit}RMS: {rms_value:.4f})"
+                name=f"Ref: {curve['name']}: RMS={rms_text}"
             )
             plot_count += 1
 
@@ -3190,6 +3438,9 @@ class PSDAnalysisWindow(QMainWindow):
         efficient_fft = self.efficient_fft_checkbox.isChecked()
         freq_min = self.freq_min_spin.value()
         freq_max = self.freq_max_spin.value()
+        filter_settings = self._get_statistics_filter_settings()
+        remove_mean = self.remove_mean_checkbox.isChecked()
+        mean_window_seconds = 1.0
         
         # Create unique key for this channel combination
         channels_key = "_".join([name for name, _, _, _ in channels_data])
@@ -3197,6 +3448,13 @@ class PSDAnalysisWindow(QMainWindow):
         # Create or show spectrogram window
         if channels_key in self.spectrogram_windows:
             window_obj = self.spectrogram_windows[channels_key]
+            if hasattr(window_obj, "update_conditioning_defaults"):
+                window_obj.update_conditioning_defaults(
+                    filter_settings=filter_settings,
+                    remove_mean=remove_mean,
+                    mean_window_seconds=mean_window_seconds,
+                    recalculate=True,
+                )
             window_obj.show()
             window_obj.raise_()
             window_obj.activateWindow()
@@ -3210,7 +3468,10 @@ class PSDAnalysisWindow(QMainWindow):
                 overlap_percent=overlap_percent,
                 efficient_fft=efficient_fft,
                 freq_min=freq_min,
-                freq_max=freq_max
+                freq_max=freq_max,
+                filter_settings=filter_settings,
+                remove_mean=remove_mean,
+                mean_window_seconds=mean_window_seconds,
             )
             window_obj.show()
             self.spectrogram_windows[channels_key] = window_obj

@@ -16,7 +16,10 @@ from spectral_edge.utils.plot_theme import (
     apply_axis_styling,
     BASE_FONT_SIZE,
     LINE_COLOR,
-    add_watermark,
+)
+from spectral_edge.utils.statistics_overlays import (
+    fit_rayleigh_from_signal,
+    build_rayleigh_curve,
 )
 
 
@@ -99,12 +102,16 @@ def compute_statistics(
         skewness = float(stats.skew(signal))
         kurtosis = float(stats.kurtosis(signal))
 
+    rayleigh_scale, rayleigh_x_max = fit_rayleigh_from_signal(signal)
+
     return {
         "pdf": {
             "bins": bin_centers,
             "counts": counts,
             "mean": mean,
-            "std": std
+            "std": std,
+            "rayleigh_scale": rayleigh_scale,
+            "rayleigh_x_max": rayleigh_x_max,
         },
         "running": running,
         "overall": {
@@ -134,10 +141,15 @@ def plot_pdf(pdf_data: Dict, stats_config) -> Tuple["mpl.Figure", "mpl.Axes"]:
     ax.plot(bins, counts, linewidth=0.9, label="PDF", color=LINE_COLOR)
 
     x = np.linspace(bins.min(), bins.max(), 400)
-    if getattr(stats_config, "show_normal", False):
+    if getattr(stats_config, "show_normal", False) and np.isfinite(std) and std > 0:
         ax.plot(x, stats.norm.pdf(x, mean, std), linestyle="--", linewidth=0.8, color="#d62728", label="Normal")
     if getattr(stats_config, "show_rayleigh", False):
-        ax.plot(x, stats.rayleigh.pdf(x, scale=std), linestyle="--", linewidth=0.8, label="Rayleigh")
+        rayleigh_x, rayleigh_y = build_rayleigh_curve(
+            pdf_data.get("rayleigh_scale", None),
+            pdf_data.get("rayleigh_x_max", None),
+        )
+        if rayleigh_x is not None and rayleigh_y is not None:
+            ax.plot(rayleigh_x, rayleigh_y, linestyle="--", linewidth=0.8, label="Rayleigh")
     if getattr(stats_config, "show_uniform", False):
         ax.plot(
             x,
@@ -152,7 +164,6 @@ def plot_pdf(pdf_data: Dict, stats_config) -> Tuple["mpl.Figure", "mpl.Axes"]:
     max_abs = max(abs(float(bins.min())), abs(float(bins.max())))
     if max_abs > 0:
         ax.set_xlim(-max_abs, max_abs)
-    add_watermark(ax)
     ax.legend(fontsize=max(6.5, BASE_FONT_SIZE - 1.0), loc="best")
     fig.tight_layout()
     return fig, ax
@@ -185,7 +196,6 @@ def plot_running_stat(running_data: Dict, stat_key: str, title: str, y_label: st
     ax.plot(time, values, linewidth=0.8, color=LINE_COLOR)
     style_axes(ax, title, "Time (s)", y_label)
     apply_axis_styling(ax, font_size=BASE_FONT_SIZE, include_grid=True)
-    add_watermark(ax)
     fig.tight_layout()
     return fig, ax
 

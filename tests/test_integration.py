@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer
 
 from spectral_edge.utils.hdf5_loader import HDF5FlightDataLoader
-from spectral_edge.gui.flight_navigator import FlightNavigator
+from spectral_edge.gui.flight_navigator_enhanced import FlightNavigator
 from spectral_edge.gui.psd_window import PSDAnalysisWindow
 
 
@@ -139,6 +139,24 @@ class IntegrationTester:
         """Remove test HDF5 file."""
         if self.test_hdf5_file and os.path.exists(self.test_hdf5_file):
             os.remove(self.test_hdf5_file)
+
+
+@pytest.fixture(scope="module")
+def app():
+    """Provide a QApplication instance for GUI integration tests."""
+    application = QApplication.instance()
+    if application is None:
+        application = QApplication([])
+    return application
+
+
+@pytest.fixture(scope="module")
+def tester():
+    """Provide a shared integration tester with prepared HDF5 test data."""
+    integration_tester = IntegrationTester()
+    integration_tester.create_test_hdf5()
+    yield integration_tester
+    integration_tester.cleanup_test_hdf5()
 
 
 def test_hdf5_loader_integration(tester: IntegrationTester):

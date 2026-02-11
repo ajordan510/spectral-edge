@@ -25,7 +25,6 @@ from spectral_edge.utils.plot_theme import (
     apply_axis_styling,
     BASE_FONT_SIZE,
     LINE_COLOR,
-    add_watermark,
     get_watermark_text,
 )
 from spectral_edge.batch.output_psd import apply_frequency_spacing
@@ -33,8 +32,23 @@ from spectral_edge.batch.spectrogram_generator import generate_spectrogram
 from spectral_edge.batch.statistics import compute_statistics, plot_pdf, plot_running_stat
 from spectral_edge.utils.hdf5_loader import HDF5FlightDataLoader
 from spectral_edge.batch.csv_loader import load_csv_files
+from spectral_edge.utils.signal_conditioning import apply_processing_pipeline, build_processing_note
+from spectral_edge.utils.reference_curves import prepare_reference_curves_for_plot, REFERENCE_CURVE_COLOR_PALETTE
 
 logger = logging.getLogger(__name__)
+
+
+def _build_batch_filter_settings(config: "BatchConfig") -> Dict[str, object]:
+    """Convert batch filter config into shared conditioning settings."""
+    fc = config.filter_config
+    return {
+        "enabled": bool(getattr(fc, "enabled", False)),
+        "filter_type": str(getattr(fc, "filter_type", "lowpass")).strip().lower(),
+        "filter_design": str(getattr(fc, "filter_design", "butterworth")).strip().lower(),
+        "filter_order": int(getattr(fc, "filter_order", 4)),
+        "cutoff_low": getattr(fc, "cutoff_low", None),
+        "cutoff_high": getattr(fc, "cutoff_high", None),
+    }
 
 
 def generate_powerpoint_report(
@@ -47,7 +61,11 @@ def generate_powerpoint_report(
     Generate a PowerPoint presentation from batch processing results.
     """
     try:
-        report_gen = ReportGenerator(title=title)
+        report_gen = ReportGenerator(
+            title=title,
+            watermark_text=get_watermark_text(),
+            watermark_scope="plot_slides",
+        )
         report_gen.add_title_slide(
             subtitle=f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
@@ -60,6 +78,12 @@ def generate_powerpoint_report(
         include_psd = _layout_includes_psd(layout)
         include_spec = _layout_includes_spectrogram(layout)
         include_stats = config.powerpoint_config.include_statistics
+        conditioning_filter_settings = _build_batch_filter_settings(config)
+        conditioning_note = build_processing_note(
+            conditioning_filter_settings,
+            remove_mean=config.psd_config.remove_running_mean,
+            mean_window_seconds=config.psd_config.running_mean_window,
+        )
 
         events = _get_event_definitions(config)
 
@@ -84,6 +108,7 @@ def generate_powerpoint_report(
                 signal_data = None
                 time_full_slice = None
                 signal_full_slice = None
+                conditioned_signal_full_slice = None
                 if (flight_key, channel_key) in time_history_cache:
                     time_full, signal_full, units_loaded, sample_rate_loaded = time_history_cache[(flight_key, channel_key)]
                     if not units:
@@ -93,14 +118,24 @@ def generate_powerpoint_report(
                     time_full_slice, signal_full_slice = _slice_event_signal(
                         time_full, signal_full, start_time, end_time
                     )
-                    time_data, signal_data = _decimate_time_series(time_full_slice, signal_full_slice)
+                    if sample_rate is None and time_full_slice is not None and len(time_full_slice) > 1:
+                        sample_rate = float(1.0 / np.median(np.diff(time_full_slice)))
+                    if signal_full_slice is not None and sample_rate and len(signal_full_slice) > 0:
+                        conditioned_signal_full_slice = apply_processing_pipeline(
+                            signal_full_slice,
+                            sample_rate,
+                            filter_settings=conditioning_filter_settings,
+                            remove_mean=config.psd_config.remove_running_mean,
+                            mean_window_seconds=config.psd_config.running_mean_window,
+                        )
+                    else:
+                        conditioned_signal_full_slice = signal_full_slice
+                    time_data, signal_data = _decimate_time_series(time_full_slice, conditioned_signal_full_slice)
 
                 if sample_rate is None and time_full_slice is not None and len(time_full_slice) > 1:
                     sample_rate = float(1.0 / np.median(np.diff(time_full_slice)))
 
                 plot_channel_title = f"{flight_key}, {event_name} - {channel_key}"
-                watermark_text = get_watermark_text()
-
                 # PSD plot
                 psd_image = None
                 if include_psd:
@@ -112,7 +147,6 @@ def generate_powerpoint_report(
                         plot_title=f"PSD: {plot_channel_title}",
                         layout=layout,
                         slot_role=psd_role,
-                        watermark_text=watermark_text,
                     )
 
                 # Time history plot
@@ -126,17 +160,16 @@ def generate_powerpoint_report(
                         plot_title=f"Time History: {plot_channel_title}",
                         layout=layout,
                         slot_role=time_role,
-                        watermark_text=watermark_text,
                     )
 
                 # Spectrogram plot
                 spec_image = None
                 if include_spec:
                     spectrogram_data = event_result.get('spectrogram')
-                    if spectrogram_data is None and time_full_slice is not None and signal_full_slice is not None and sample_rate and len(time_full_slice) > 0:
+                    if spectrogram_data is None and time_full_slice is not None and conditioned_signal_full_slice is not None and sample_rate and len(time_full_slice) > 0:
                         try:
                             spec_freqs, spec_times, Sxx = generate_spectrogram(
-                                signal_full_slice,
+                                conditioned_signal_full_slice,
                                 sample_rate,
                                 desired_df=config.spectrogram_config.desired_df,
                                 overlap_percent=config.spectrogram_config.overlap_percent,
@@ -159,7 +192,6 @@ def generate_powerpoint_report(
                             plot_title=f"Spectrogram: {plot_channel_title}",
                             layout=layout,
                             slot_role=spec_role,
-                            watermark_text=watermark_text,
                         )
 
                 # Slide generation
@@ -202,8 +234,8 @@ def generate_powerpoint_report(
                         report_gen.add_single_plot_slide(time_image, slide_title)
 
                 # Statistics slide
-                if include_stats and time_full_slice is not None and signal_full_slice is not None and len(time_full_slice) > 0:
-                    stats = compute_statistics(signal_full_slice, sample_rate, config.statistics_config)
+                if include_stats and time_full_slice is not None and conditioned_signal_full_slice is not None and len(time_full_slice) > 0:
+                    stats = compute_statistics(conditioned_signal_full_slice, sample_rate, config.statistics_config)
                     pdf_fig, _ = plot_pdf(stats['pdf'], config.statistics_config)
                     pdf_bytes = _fig_to_bytes(pdf_fig)
 
@@ -218,6 +250,7 @@ def generate_powerpoint_report(
                     kurt_bytes = _fig_to_bytes(running_kurt_fig)
 
                     summary = _format_stats_summary_dict(stats['overall'], units)
+                    summary.append(("Conditioning", conditioning_note))
                     report_gen.add_statistics_dashboard_slide(
                         slide_title,
                         pdf_bytes,
@@ -528,7 +561,6 @@ def _create_time_history_plot(
     plot_title: str,
     layout: str,
     slot_role: str = "single",
-    watermark_text: Optional[str] = None,
 ) -> bytes:
     apply_light_matplotlib_theme()
     fig, ax = plt.subplots(figsize=_get_plot_figsize(layout, "time", slot_role))
@@ -536,7 +568,6 @@ def _create_time_history_plot(
     ylabel = f"Amplitude ({units})" if units else "Amplitude"
     style_axes(ax, plot_title, "Time (s)", ylabel)
     apply_axis_styling(ax, font_size=BASE_FONT_SIZE, include_grid=True)
-    add_watermark(ax, watermark_text)
     fig.tight_layout()
     return _fig_to_bytes(fig)
 
@@ -548,7 +579,6 @@ def _create_psd_plot(
     plot_title: str,
     layout: str,
     slot_role: str = "single",
-    watermark_text: Optional[str] = None,
 ) -> bytes:
     frequencies = event_result['frequencies']
     psd_values = event_result['psd']
@@ -564,14 +594,39 @@ def _create_psd_plot(
 
     apply_light_matplotlib_theme()
     fig, ax = plt.subplots(figsize=_get_plot_figsize(layout, "psd", slot_role))
-    ax.loglog(frequencies, psd_values, linewidth=1.0, color=LINE_COLOR)
+    ax.loglog(frequencies, psd_values, linewidth=1.0, color=LINE_COLOR, label="PSD")
+
+    reference_curve_entries = []
+    if hasattr(config, "powerpoint_config"):
+        reference_curve_entries = getattr(config.powerpoint_config, "reference_curves", []) or []
+    reference_curves = []
+    if len(frequencies) > 1:
+        reference_curves = prepare_reference_curves_for_plot(
+            reference_curve_entries,
+            freq_min=float(np.min(frequencies)),
+            freq_max=float(np.max(frequencies)),
+            clip_to_range=False,
+            logger=logger,
+        )
+
+    for idx, curve in enumerate(reference_curves):
+        curve_color = curve.get("color") or REFERENCE_CURVE_COLOR_PALETTE[idx % len(REFERENCE_CURVE_COLOR_PALETTE)]
+        ax.loglog(
+            curve["frequencies"],
+            curve["psd"],
+            linewidth=1.2,
+            linestyle=curve.get("line_style", "--"),
+            color=curve_color,
+            label=f"Ref: {curve['name']}",
+        )
 
     ylabel = f"PSD ({units}^2/Hz)" if units else "PSD"
     style_axes(ax, plot_title, "Frequency (Hz)", ylabel)
     apply_axis_styling(ax, font_size=BASE_FONT_SIZE, include_grid=config.display_config.psd_show_grid)
     if not config.display_config.psd_show_grid:
         ax.grid(False)
-    add_watermark(ax, watermark_text)
+    if config.display_config.psd_show_legend and reference_curves:
+        ax.legend(fontsize=max(6.5, BASE_FONT_SIZE - 1.0), loc="best")
 
     if not config.display_config.psd_auto_scale:
         if config.display_config.psd_x_axis_min and config.display_config.psd_x_axis_max:
@@ -589,7 +644,6 @@ def _create_spectrogram_plot(
     plot_title: str,
     layout: str,
     slot_role: str = "single",
-    watermark_text: Optional[str] = None,
 ) -> Optional[bytes]:
     apply_light_matplotlib_theme()
     fig, ax = plt.subplots(figsize=_get_plot_figsize(layout, "spectrogram", slot_role))
@@ -622,7 +676,6 @@ def _create_spectrogram_plot(
 
     style_axes(ax, plot_title, "Time (s)", "Frequency (Hz)")
     apply_axis_styling(ax, font_size=BASE_FONT_SIZE, include_grid=False)
-    add_watermark(ax, watermark_text)
     cbar = plt.colorbar(im, ax=ax)
     cbar.set_label("PSD (dB)")
     style_colorbar(cbar, font_size=BASE_FONT_SIZE)

@@ -29,7 +29,10 @@ from typing import List, Tuple, Optional, Dict
 
 from spectral_edge.utils.message_box import show_information, show_warning, show_critical
 from spectral_edge.utils.report_generator import ReportGenerator, export_plot_to_image, PPTX_AVAILABLE
+from spectral_edge.utils.signal_conditioning import build_processing_note
 from spectral_edge.utils.theme import apply_context_menu_style
+from spectral_edge.utils.statistics_overlays import fit_rayleigh_from_signal, build_rayleigh_curve
+from spectral_edge.utils.plot_theme import get_watermark_text
 
 
 class StatisticsCalculationThread(QThread):
@@ -72,6 +75,9 @@ class StatisticsCalculationThread(QThread):
                     'std': std,
                     'unit': unit
                 }
+                rayleigh_scale, rayleigh_x_max = fit_rayleigh_from_signal(signal)
+                pdf_data[name]["rayleigh_scale"] = rayleigh_scale
+                pdf_data[name]["rayleigh_x_max"] = rayleigh_x_max
 
                 # Calculate running statistics using optimized uniform_filter1d
                 window_samples = int(self.window_seconds * self.sample_rate)
@@ -176,7 +182,9 @@ class StatisticsWindow(QMainWindow):
         self,
         channels_data: List[Tuple[str, np.ndarray, str, str]],
         sample_rate: float,
-        parent=None
+        parent=None,
+        processing_note: str = "",
+        processing_flags: Optional[Dict[str, object]] = None,
     ):
         """
         Initialize the Statistics Analysis window.
@@ -196,6 +204,12 @@ class StatisticsWindow(QMainWindow):
         self.sample_rate = sample_rate
         self.channel_names = [ch[0] for ch in channels_data]
         self.channel_units = [ch[2] for ch in channels_data]
+        self.processing_note = processing_note or build_processing_note(
+            filter_settings={"enabled": False},
+            remove_mean=False,
+            mean_window_seconds=1.0,
+        )
+        self.processing_flags = processing_flags or {}
 
         # Channel selection checkboxes
         self.channel_checkboxes = []
@@ -268,6 +282,14 @@ class StatisticsWindow(QMainWindow):
                 border-radius: 3px;
                 padding: 5px;
             }
+            QScrollArea {
+                background-color: #1a1f2e;
+                border: 1px solid #4a5568;
+                border-radius: 4px;
+            }
+            QWidget#channelWidget {
+                background-color: #1a1f2e;
+            }
             QCheckBox {
                 color: #e0e0e0;
             }
@@ -329,6 +351,13 @@ class StatisticsWindow(QMainWindow):
         title.setStyleSheet("color: #60a5fa;")
         layout.addWidget(title)
 
+        self.conditioning_note_label = QLabel(f"Signal Conditioning: {self.processing_note}")
+        self.conditioning_note_label.setWordWrap(True)
+        self.conditioning_note_label.setStyleSheet(
+            "color: #cbd5e1; font-size: 10pt; padding: 6px; background-color: #252d3d; border-radius: 4px;"
+        )
+        layout.addWidget(self.conditioning_note_label)
+
         # Channel selection
         channel_group = self._create_channel_group()
         layout.addWidget(channel_group)
@@ -383,6 +412,7 @@ class StatisticsWindow(QMainWindow):
         scroll.setMaximumHeight(150)
 
         channel_widget = QWidget()
+        channel_widget.setObjectName("channelWidget")
         channel_layout = QVBoxLayout(channel_widget)
         channel_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
@@ -662,15 +692,18 @@ class StatisticsWindow(QMainWindow):
 
             # Plot Rayleigh distribution
             if self.rayleigh_checkbox.isChecked():
-                x = np.linspace(0, data['bins'].max(), 200)
-                # Rayleigh scale parameter from RMS
-                scale = data['std'] * np.sqrt(2 / (4 - np.pi))
-                y = stats.rayleigh.pdf(x, scale=scale)
-                self.pdf_plot.plot(
-                    x, y,
-                    pen=pg.mkPen(color=color, width=2, style=Qt.PenStyle.DashLine),
-                    name=f"{name} (Rayleigh)"
+                rayleigh_x, rayleigh_y = build_rayleigh_curve(
+                    data.get("rayleigh_scale"),
+                    data.get("rayleigh_x_max"),
+                    n_points=300,
                 )
+                if rayleigh_x is not None and rayleigh_y is not None:
+                    self.pdf_plot.plot(
+                        rayleigh_x,
+                        rayleigh_y,
+                        pen=pg.mkPen(color=color, width=2, style=Qt.PenStyle.DashLine),
+                        name=f"{name} (Rayleigh)"
+                    )
 
             # Plot uniform distribution
             if self.uniform_checkbox.isChecked():
@@ -758,7 +791,13 @@ class StatisticsWindow(QMainWindow):
             self.summary_label.setText("No channels selected.")
             return
 
-        lines = ["=" * 60, "STATISTICAL SUMMARY", "=" * 60, ""]
+        lines = [
+            "=" * 60,
+            "STATISTICAL SUMMARY",
+            "=" * 60,
+            f"Signal Conditioning: {self.processing_note}",
+            "",
+        ]
 
         for name, data in self.pdf_data.items():
             overall = data['overall']
@@ -821,35 +860,56 @@ class StatisticsWindow(QMainWindow):
             return
 
         try:
-            report = ReportGenerator(title="Statistics Analysis Report")
+            report = ReportGenerator(
+                title="Statistics Analysis Report",
+                watermark_text=get_watermark_text(),
+                watermark_scope="plot_slides",
+            )
             report.add_title_slide(subtitle="Signal Statistical Analysis")
+            report.add_bulleted_sections_slide(
+                title="Processing Configuration",
+                sections=[
+                    (
+                        "Statistics Parameters",
+                        [
+                            f"PDF bins: {self.bins_spin.value()}",
+                            f"Running window: {self.window_spin.value()} s",
+                            f"Signal Conditioning: {self.processing_note}",
+                        ],
+                    ),
+                    (
+                        "Distribution Overlays",
+                        [
+                            f"Normal: {'On' if self.normal_checkbox.isChecked() else 'Off'}",
+                            f"Rayleigh: {'On' if self.rayleigh_checkbox.isChecked() else 'Off'}",
+                            f"Uniform: {'On' if self.uniform_checkbox.isChecked() else 'Off'}",
+                        ],
+                    ),
+                ],
+            )
 
             # Add PDF plot
             pdf_image = export_plot_to_image(self.pdf_plot)
-            report.add_psd_plot(
-                pdf_image,
-                title="Probability Density Function",
-                parameters={"Bins": str(self.bins_spin.value())},
-                rms_values={name: data['overall']['rms'] for name, data in self.pdf_data.items()},
-                units=next(iter(self.pdf_data.values())).get('unit', '')
-            )
+            report.add_single_plot_slide(pdf_image, "Probability Density Function")
 
             # Add running stats plot
             stats_image = export_plot_to_image(self.running_stats_plot)
-            report.add_comparison_plot(
-                stats_image,
-                title="Running Statistics",
-                description=f"Window size: {self.window_spin.value()} s"
-            )
+            report.add_single_plot_slide(stats_image, "Running Statistics")
 
-            # Add summary
-            channels = list(self.pdf_data.keys())
-            rms_values = {name: data['overall']['rms'] for name, data in self.pdf_data.items()}
-            report.add_summary_table(
-                channels=channels,
-                rms_values=rms_values,
-                units=next(iter(self.pdf_data.values())).get('unit', '')
-            )
+            # Add summary table
+            unit = next(iter(self.pdf_data.values())).get("unit", "")
+            headers = ["Channel", "RMS"]
+            rows = []
+            for channel_name, stats_data in self.pdf_data.items():
+                rms_value = stats_data.get("overall", {}).get("rms")
+                if rms_value is None:
+                    rms_text = ""
+                elif unit:
+                    rms_text = f"{rms_value:.4f} {unit}"
+                else:
+                    rms_text = f"{rms_value:.4f}"
+                rows.append([channel_name, rms_text])
+            report.add_rms_table_slide("RMS Summary", headers, rows)
 
             saved_path = report.save(file_path)
             show_information(self, "Report Generated",
@@ -860,7 +920,13 @@ class StatisticsWindow(QMainWindow):
                         f"Failed to generate report: {str(e)}")
 
 
-def create_statistics_window(channels_data, sample_rate, parent=None):
+def create_statistics_window(
+    channels_data,
+    sample_rate,
+    parent=None,
+    processing_note: str = "",
+    processing_flags: Optional[Dict[str, object]] = None,
+):
     """
     Factory function to create a StatisticsWindow.
 
@@ -881,4 +947,10 @@ def create_statistics_window(channels_data, sample_rate, parent=None):
     StatisticsWindow
         The created statistics window.
     """
-    return StatisticsWindow(channels_data, sample_rate, parent)
+    return StatisticsWindow(
+        channels_data,
+        sample_rate,
+        parent,
+        processing_note=processing_note,
+        processing_flags=processing_flags,
+    )

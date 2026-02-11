@@ -13,7 +13,7 @@ Date: 2026-01-27
 import sys
 from PyQt6.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel
 from spectral_edge.utils.hdf5_loader import HDF5FlightDataLoader
-from spectral_edge.gui.flight_navigator import FlightNavigator
+from spectral_edge.gui.flight_navigator_enhanced import FlightNavigator
 
 
 class TestWindow(QMainWindow):

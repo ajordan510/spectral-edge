@@ -85,6 +85,23 @@
    - Compare multiple channels
    - Export results
 
+## PowerPoint Slide Catalog
+
+The following are the canonical slide templates used across PSD GUI, Statistics GUI, and Batch PowerPoint exports. Style/layout changes should be made in shared methods in `spectral_edge/utils/report_generator.py`.
+
+| Canonical Slide Name | Generator Method | Used By |
+|---|---|---|
+| Title Slide | `add_title_slide(...)` | PSD GUI, Statistics GUI, Batch |
+| Processing Configuration Slide | `add_bulleted_sections_slide(...)` | PSD GUI, Statistics GUI, Batch |
+| Single Plot Slide | `add_single_plot_slide(...)` | PSD GUI, Statistics GUI, Batch |
+| Two-Plot Slide | `add_two_plot_slide(...)` | PSD GUI, Batch |
+| Three-Plot Slide | `add_three_plot_slide(...)` | PSD GUI, Batch |
+| Statistics Dashboard Slide | `add_statistics_dashboard_slide(...)` | PSD GUI, Batch |
+| RMS Summary Table Slide | `add_rms_table_slide(...)` | PSD GUI, Statistics GUI, Batch |
+| Text Slide | `add_text_slide(...)` | Shared fallback/notes |
+
+Template governance: update shared slide methods in `spectral_edge/utils/report_generator.py` so style changes propagate everywhere.
+
 ## Testing
 
 ### Quick Functionality Test

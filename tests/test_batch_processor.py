@@ -32,8 +32,6 @@ class TestConfigClasses:
         config = FilterConfig(
             enabled=True,
             filter_type="lowpass",
-            filter_design="butterworth",
-            filter_order=4,
             cutoff_high=1000.0
         )
         config.validate()  # Should not raise
@@ -48,8 +46,6 @@ class TestConfigClasses:
         config = FilterConfig(
             enabled=True,
             filter_type="bandpass",
-            filter_design="butterworth",
-            filter_order=4,
             user_highpass_hz=0.3,
             user_lowpass_hz=50000.0,
         )

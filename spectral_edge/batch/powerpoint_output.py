@@ -35,16 +35,9 @@ from spectral_edge.batch.csv_loader import load_csv_files
 from spectral_edge.utils.signal_conditioning import apply_processing_pipeline, build_processing_note
 from spectral_edge.utils.reference_curves import prepare_reference_curves_for_plot, REFERENCE_CURVE_COLOR_PALETTE
 
+from spectral_edge.batch.output_utils import sanitize_filename_component as _sanitize_filename_component
+
 logger = logging.getLogger(__name__)
-
-
-def _sanitize_filename_component(value: Optional[str]) -> str:
-    """Return a filesystem-safe filename component."""
-    text = (value or "").strip()
-    if not text:
-        return ""
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in text)
-    return safe.strip("_")
 
 
 def _build_batch_filter_settings(config: "BatchConfig") -> Dict[str, object]:
@@ -100,9 +93,10 @@ def generate_powerpoint_report(
 
         events = _get_event_definitions(config)
 
-        time_history_cache = {}
-        if include_time or include_stats or include_spec:
-            time_history_cache = _load_time_history_cache(results, config, events)
+        # Only fall back to re-loading raw data when the processor didn't
+        # cache conditioned signals (e.g. results from an older run).
+        _needs_time_data = include_time or include_stats or include_spec
+        time_history_cache = None  # lazy-loaded below only when needed
 
         for event_name, start_time, end_time in events:
             for (flight_key, channel_key), event_dict in results.channel_results.items():
@@ -122,28 +116,44 @@ def generate_powerpoint_report(
                 time_full_slice = None
                 signal_full_slice = None
                 conditioned_signal_full_slice = None
-                if (flight_key, channel_key) in time_history_cache:
-                    time_full, signal_full, units_loaded, sample_rate_loaded = time_history_cache[(flight_key, channel_key)]
-                    if not units:
-                        units = units_loaded
-                    if sample_rate is None:
-                        sample_rate = sample_rate_loaded
-                    time_full_slice, signal_full_slice = _slice_event_signal(
-                        time_full, signal_full, start_time, end_time
-                    )
-                    if sample_rate is None and time_full_slice is not None and len(time_full_slice) > 1:
+
+                # Prefer conditioned data cached by the processor (avoids
+                # re-loading files and re-applying signal conditioning).
+                cached_time = event_result.get('conditioned_time')
+                cached_signal = event_result.get('conditioned_signal')
+
+                if cached_time is not None and cached_signal is not None and _needs_time_data:
+                    time_full_slice = cached_time
+                    conditioned_signal_full_slice = cached_signal
+                    if sample_rate is None and len(time_full_slice) > 1:
                         sample_rate = float(1.0 / np.median(np.diff(time_full_slice)))
-                    if signal_full_slice is not None and sample_rate and len(signal_full_slice) > 0:
-                        conditioned_signal_full_slice = apply_processing_pipeline(
-                            signal_full_slice,
-                            sample_rate,
-                            filter_settings=conditioning_filter_settings,
-                            remove_mean=False,
-                            mean_window_seconds=1.0,
-                        )
-                    else:
-                        conditioned_signal_full_slice = signal_full_slice
                     time_data, signal_data = _decimate_time_series(time_full_slice, conditioned_signal_full_slice)
+                elif _needs_time_data:
+                    # Fallback: re-load and re-condition (legacy results without cache)
+                    if time_history_cache is None:
+                        time_history_cache = _load_time_history_cache(results, config, events)
+                    if (flight_key, channel_key) in time_history_cache:
+                        time_full, signal_full, units_loaded, sample_rate_loaded = time_history_cache[(flight_key, channel_key)]
+                        if not units:
+                            units = units_loaded
+                        if sample_rate is None:
+                            sample_rate = sample_rate_loaded
+                        time_full_slice, signal_full_slice = _slice_event_signal(
+                            time_full, signal_full, start_time, end_time
+                        )
+                        if sample_rate is None and time_full_slice is not None and len(time_full_slice) > 1:
+                            sample_rate = float(1.0 / np.median(np.diff(time_full_slice)))
+                        if signal_full_slice is not None and sample_rate and len(signal_full_slice) > 0:
+                            conditioned_signal_full_slice = apply_processing_pipeline(
+                                signal_full_slice,
+                                sample_rate,
+                                filter_settings=conditioning_filter_settings,
+                                remove_mean=False,
+                                mean_window_seconds=1.0,
+                            )
+                        else:
+                            conditioned_signal_full_slice = signal_full_slice
+                        time_data, signal_data = _decimate_time_series(time_full_slice, conditioned_signal_full_slice)
 
                 if sample_rate is None and time_full_slice is not None and len(time_full_slice) > 1:
                     sample_rate = float(1.0 / np.median(np.diff(time_full_slice)))

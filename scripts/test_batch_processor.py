@@ -122,8 +122,6 @@ def main():
         filter_config=FilterConfig(
             enabled=True,
             filter_type="bandpass",
-            filter_design="butterworth",
-            filter_order=4,
             cutoff_low=10.0,
             cutoff_high=5000.0
         ),
@@ -135,8 +133,6 @@ def main():
             desired_df=1.0,
             freq_min=10.0,
             freq_max=5000.0,
-            remove_running_mean=True,
-            running_mean_window=1.0,
             frequency_spacing="linear"
         ),
         spectrogram_config=SpectrogramConfig(

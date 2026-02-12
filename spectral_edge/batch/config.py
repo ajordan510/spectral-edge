@@ -18,21 +18,25 @@ from datetime import datetime
 
 @dataclass
 class FilterConfig:
-    """Configuration for signal filtering."""
-    
+    """Configuration for signal filtering.
+
+    The filter implementation always uses a Butterworth design with order 4
+    applied via zero-phase ``sosfiltfilt`` (effective 8th-order response).
+    User-specified highpass and lowpass cutoffs are clamped to the baseline
+    range (HP >= 1.0 Hz, LP <= 0.45 * fs) by ``apply_robust_filtering``.
+    """
+
     enabled: bool = False
     user_highpass_hz: Optional[float] = None
     user_lowpass_hz: Optional[float] = None
     filter_type: str = "lowpass"  # lowpass, highpass, bandpass
-    filter_design: str = "butterworth"  # butterworth, chebyshev, bessel
-    filter_order: int = 4
     cutoff_low: Optional[float] = None
     cutoff_high: Optional[float] = None
-    
+
     def validate(self):
         """
         Validate filter configuration parameters.
-        
+
         Raises:
         -------
         ValueError
@@ -40,15 +44,9 @@ class FilterConfig:
         """
         if not self.enabled:
             return
-            
+
         if self.filter_type not in ["lowpass", "highpass", "bandpass"]:
             raise ValueError(f"Invalid filter_type: {self.filter_type}")
-            
-        if self.filter_design not in ["butterworth", "chebyshev", "bessel"]:
-            raise ValueError(f"Invalid filter_design: {self.filter_design}")
-            
-        if self.filter_order < 1 or self.filter_order > 10:
-            raise ValueError(f"Invalid filter_order: {self.filter_order}")
 
 
 @dataclass
@@ -62,8 +60,6 @@ class PSDConfig:
     desired_df: float = 5.0
     freq_min: float = 20.0
     freq_max: float = 2000.0
-    remove_running_mean: bool = False
-    running_mean_window: float = 1.0  # Window size in seconds for running mean removal
     frequency_spacing: str = "constant_bandwidth"  # constant_bandwidth or fractional octaves
 
     def __post_init__(self):
@@ -99,7 +95,7 @@ class PSDConfig:
         if self.method not in ["welch", "maximax"]:
             raise ValueError(f"Invalid method: {self.method}")
             
-        if self.window not in ["hann", "hamming", "blackman", "bartlett"]:
+        if self.window not in ["hann", "hamming", "blackman", "bartlett", "flattop", "boxcar"]:
             raise ValueError(f"Invalid window: {self.window}")
             
         if not 0 <= self.overlap_percent < 100:
@@ -426,6 +422,9 @@ class BatchConfig:
                 filter_type = str(filter_cfg.get('filter_type', 'bandpass')).strip().lower()
                 if filter_type in ['lowpass', 'bandpass']:
                     filter_cfg['user_lowpass_hz'] = filter_cfg.get('cutoff_high')
+            # Strip removed legacy fields (always Butterworth order 4)
+            filter_cfg.pop('filter_design', None)
+            filter_cfg.pop('filter_order', None)
             data['filter_config'] = FilterConfig(**data['filter_config'])
             
         if 'psd_config' in data and isinstance(data['psd_config'], dict):
@@ -435,6 +434,9 @@ class BatchConfig:
                 data['psd_config']['frequency_spacing'] = "constant_bandwidth"
             elif spacing == "octave":
                 data['psd_config']['frequency_spacing'] = "1/3"
+            # Strip removed legacy fields (running mean is not used in batch path)
+            data['psd_config'].pop('remove_running_mean', None)
+            data['psd_config'].pop('running_mean_window', None)
             data['psd_config'] = PSDConfig(**data['psd_config'])
             
         if 'spectrogram_config' in data and isinstance(data['spectrogram_config'], dict):

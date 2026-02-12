@@ -120,9 +120,16 @@ def _load_single_csv(file_path: str) -> Dict[str, Tuple[np.ndarray, np.ndarray, 
     # Extract time column (first column)
     time_array = df.iloc[:, 0].values
     
-    # Validate time array
-    if not np.all(np.diff(time_array) > 0):
-        raise ValueError(f"Time column must be monotonically increasing: {file_path}")
+    # Validate time array — reject backwards timestamps, warn on duplicates
+    time_diffs = np.diff(time_array)
+    if np.any(time_diffs < 0):
+        raise ValueError(f"Time column contains backwards timestamps: {file_path}")
+    if np.any(time_diffs == 0):
+        dup_count = int(np.sum(time_diffs == 0))
+        logger.warning(
+            f"{file_path}: {dup_count} duplicate timestamp(s) detected, "
+            f"likely due to DAQ timestamp resolution. Using median dt for sample rate."
+        )
     
     # Calculate sample rate from median time difference
     dt = np.median(np.diff(time_array))
@@ -152,10 +159,18 @@ def _load_single_csv(file_path: str) -> Dict[str, Tuple[np.ndarray, np.ndarray, 
         if len(signal_array) != len(time_array):
             raise ValueError(f"Signal length mismatch for {channel_name}")
         
-        # Check for NaN values
+        # Check for NaN values — reject channels exceeding 30% NaN
         if np.any(np.isnan(signal_array)):
-            nan_count = np.sum(np.isnan(signal_array))
-            logger.warning(f"{channel_name}: Found {nan_count} NaN values, interpolating...")
+            nan_count = int(np.sum(np.isnan(signal_array)))
+            nan_pct = 100.0 * nan_count / len(signal_array)
+            if nan_pct > 30.0:
+                raise ValueError(
+                    f"{channel_name}: {nan_pct:.1f}% NaN values ({nan_count}/{len(signal_array)}) "
+                    f"exceeds 30% threshold. Data quality is insufficient for PSD analysis."
+                )
+            logger.warning(
+                f"{channel_name}: {nan_count} NaN values ({nan_pct:.1f}%), interpolating..."
+            )
             signal_array = _interpolate_nans(signal_array)
         
         channels[channel_name] = (time_array, signal_array, sample_rate, units)
@@ -296,9 +311,9 @@ def detect_csv_format(file_path: str) -> Dict[str, any]:
 
     num_columns = df_sample.shape[1]
 
-    # Count rows efficiently without loading full file
-    with open(file_path, 'r') as f:
-        num_rows = sum(1 for _ in f)
+    # Count rows efficiently using binary-block newline counting
+    with open(file_path, 'rb') as f:
+        num_rows = sum(chunk.count(b'\n') for chunk in iter(lambda: f.read(1 << 16), b''))
     if has_header:
         num_rows -= 1  # Subtract header row
 

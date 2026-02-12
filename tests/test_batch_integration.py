@@ -142,8 +142,7 @@ class TestBatchProcessorIntegration:
                 use_efficient_fft=True,
                 freq_min=20.0,
                 freq_max=500.0,
-                frequency_spacing="linear",
-                remove_running_mean=False
+                frequency_spacing="linear"
             ),
             filter_config=FilterConfig(enabled=False),
             spectrogram_config=SpectrogramConfig(enabled=False),
@@ -258,8 +257,7 @@ class TestBatchProcessorIntegration:
                 use_efficient_fft=True,
                 freq_min=20.0,
                 freq_max=500.0,
-                frequency_spacing="linear",
-                remove_running_mean=False
+                frequency_spacing="linear"
             ),
             filter_config=FilterConfig(enabled=False),
             spectrogram_config=SpectrogramConfig(enabled=False),
@@ -302,8 +300,6 @@ class TestBatchProcessorIntegration:
             filter_config=FilterConfig(
                 enabled=True,
                 filter_type="lowpass",
-                filter_design="butterworth",
-                filter_order=4,
                 cutoff_low=10.0,
                 cutoff_high=200.0
             ),

@@ -14,16 +14,9 @@ from pathlib import Path
 from typing import List, Optional
 import logging
 
+from spectral_edge.batch.output_utils import sanitize_filename_component as _sanitize_filename_component
+
 logger = logging.getLogger(__name__)
-
-
-def _sanitize_filename_component(value: Optional[str]) -> str:
-    """Return a filesystem-safe filename component."""
-    text = (value or "").strip()
-    if not text:
-        return ""
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in text)
-    return safe.strip("_")
 
 
 def export_to_csv(

@@ -445,7 +445,7 @@ def test_psd_maximax_contract(validator: ContractValidator):
     
     # Test basic call
     try:
-        frequencies, psd_maximax = calculate_psd_maximax(test_signal, sample_rate)
+        frequencies, psd_maximax = calculate_psd_maximax(test_signal, sample_rate, df=5.0)
         validator.test("calculate_psd_maximax can be called", True)
         
         # Test output contract

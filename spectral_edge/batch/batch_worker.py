@@ -93,12 +93,21 @@ class BatchWorker(QThread):
                 self.processing_failed.emit("Processing cancelled by user")
                 return
 
-            # Check for fatal errors
-            if result.errors:
-                error_summary = f"{len(result.errors)} error(s) occurred during processing"
+            # Check for fatal errors (no channels processed at all)
+            if not result.channel_results:
+                error_summary = f"Processing failed: {len(result.errors)} error(s), no channels processed successfully"
                 self.log_message.emit(error_summary)
                 self.processing_failed.emit(error_summary)
                 return
+
+            # Log partial failures as warnings but continue to output generation
+            if result.errors:
+                self.log_message.emit(
+                    f"WARNING: {len(result.errors)} error(s) occurred, "
+                    f"but {len(result.channel_results)} channel(s) processed successfully"
+                )
+                for err in result.errors:
+                    self.log_message.emit(f"  Error: {err}")
 
             self.progress_updated.emit(50, "Generating outputs...")
             self.log_message.emit(f"Processing complete in {processing_time:.2f}s, generating outputs...")
@@ -226,12 +235,19 @@ class BatchWorker(QThread):
                 return
             
             self.progress_updated.emit(100, "Complete!")
-            self.log_message.emit("Batch processing completed successfully")
-            
+            if result.errors:
+                self.log_message.emit(
+                    f"Batch processing completed with {len(result.errors)} error(s) "
+                    f"and {len(result.channel_results)} successful channel(s)"
+                )
+            else:
+                self.log_message.emit("Batch processing completed successfully")
+
             # Convert result to dict for signal emission
             results_dict = {
                 'channel_count': len(result.channel_results),
                 'event_count': len(self.config.events) + (1 if self.config.process_full_duration else 0),
+                'errors': len(result.errors),
                 'warnings': len(result.warnings),
                 'output_directory': output_config.output_directory
             }

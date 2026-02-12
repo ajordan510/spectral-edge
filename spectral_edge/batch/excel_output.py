@@ -11,22 +11,15 @@ Date: 2026-02-02
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 import logging
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils.dataframe import dataframe_to_rows
 
+from spectral_edge.batch.output_utils import sanitize_filename_component as _sanitize_filename_component
+
 logger = logging.getLogger(__name__)
-
-
-def _sanitize_filename_component(value: Optional[str]) -> str:
-    """Return a filesystem-safe filename component."""
-    text = (value or "").strip()
-    if not text:
-        return ""
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in text)
-    return safe.strip("_")
 
 
 def _build_event_dataframe(event_results: Dict) -> Optional[pd.DataFrame]:
@@ -340,60 +333,3 @@ def _create_event_sheet(wb: Workbook, event_name: str, event_results: Dict) -> N
         ws.column_dimensions[column_letter].width = adjusted_width
 
 
-def export_psd_to_csv(
-    results: Dict[str, Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]]],
-    output_directory: str
-) -> List[str]:
-    """
-    Export each event's PSD data to separate CSV files.
-    
-    Parameters:
-    -----------
-    results : Dict
-        Batch processing results
-    output_directory : str
-        Directory to save CSV files
-        
-    Returns:
-    --------
-    List[str]
-        List of created file paths
-        
-    Notes:
-    ------
-    - One CSV file per event
-    - File naming: {event_name}_psd.csv
-    - Format: Frequency (Hz), Channel1 PSD, Channel2 PSD, ...
-    """
-    output_dir = Path(output_directory)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    created_files = []
-    
-    for event_name, event_results in results.items():
-        # Collect all PSD data
-        all_frequencies = None
-        psd_data = {}
-        
-        for source_id, channels in event_results.items():
-            for channel_name, (frequencies, psd_values) in channels.items():
-                if all_frequencies is None:
-                    all_frequencies = frequencies
-                
-                col_name = f"{source_id}_{channel_name}"
-                psd_data[col_name] = psd_values
-        
-        if all_frequencies is None:
-            continue
-        
-        # Create DataFrame
-        df = pd.DataFrame(psd_data)
-        df.insert(0, 'Frequency (Hz)', all_frequencies)
-        
-        # Save to CSV
-        csv_path = output_dir / f"{event_name}_psd.csv"
-        df.to_csv(csv_path, index=False)
-        created_files.append(str(csv_path))
-        logger.info(f"CSV file saved: {csv_path}")
-    
-    return created_files

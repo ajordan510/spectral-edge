@@ -101,23 +101,50 @@ class ProgressTracker:
     def finish_channel(self):
         """
         Mark the current channel as finished.
-        
+
         This method emits a final progress update for the completed channel.
         """
         self._emit_progress()
-    
+
+    def finish_all(self):
+        """Emit a final 100% progress update after all processing is done."""
+        if self.progress_callback is None:
+            return
+        elapsed_time = time.time() - self.start_time
+        progress_info = ProgressInfo(
+            current_channel=self.total_channels,
+            total_channels=self.total_channels,
+            current_event=self.current_event,
+            flight_key=self.current_flight,
+            channel_key=self.current_channel_key,
+            percent_complete=100.0,
+            elapsed_time=elapsed_time,
+            estimated_time_remaining=0.0,
+            channels_per_second=(
+                self.total_channels / elapsed_time if elapsed_time > 0 else 0.0
+            ),
+        )
+        self.progress_callback(progress_info)
+
     def _emit_progress(self):
         """Calculate and emit progress information."""
         if self.progress_callback is None:
             return
         
         elapsed_time = time.time() - self.start_time
-        percent_complete = (self.current_channel / self.total_channels) * 100
-        
+        # current_channel is 1-based (incremented on start_channel),
+        # so subtract 1 for in-progress percentage; 100% only when
+        # finish_all() is called after all channels complete.
+        if self.total_channels > 0:
+            percent_complete = ((self.current_channel - 1) / self.total_channels) * 100
+        else:
+            percent_complete = 0.0
+
         # Calculate estimated time remaining
         if self.current_channel > 0 and elapsed_time > 0:
-            avg_time_per_channel = elapsed_time / self.current_channel
-            remaining_channels = self.total_channels - self.current_channel
+            channels_completed = self.current_channel - 1
+            avg_time_per_channel = elapsed_time / max(channels_completed, 1)
+            remaining_channels = self.total_channels - channels_completed
             estimated_time_remaining = avg_time_per_channel * remaining_channels
             channels_per_second = self.current_channel / elapsed_time
         else:

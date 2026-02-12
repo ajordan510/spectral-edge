@@ -12,7 +12,7 @@ Date: 2026-02-02
 import numpy as np
 import logging
 import time
-from typing import Dict, List, Tuple, Optional, Any, Callable
+from typing import Dict, List, Tuple, Optional, Any, Callable, TypedDict, NotRequired
 from pathlib import Path
 from datetime import datetime
 from spectral_edge.core.psd import (
@@ -31,24 +31,81 @@ from .error_handler import ErrorHandler, BatchError, log_error_with_recovery
 logger = logging.getLogger(__name__)
 
 
+class SpectrogramResult(TypedDict):
+    """Spectrogram arrays produced by generate_spectrogram."""
+
+    frequencies: np.ndarray  # 1-D, frequency bins in Hz
+    times: np.ndarray        # 1-D, time bins in seconds
+    Sxx: np.ndarray          # 2-D (frequencies x times), spectral power
+
+
+class PSDResultMetadata(TypedDict, total=False):
+    """Metadata recorded alongside each PSD result.
+
+    All keys are written by ``_process_event``; consumers may read any
+    subset via ``.get()``.
+    """
+
+    sample_rate: float
+    units: str
+    rms: float
+    method: str                      # "welch" or "maximax"
+    window: str                      # e.g. "hann"
+    overlap_percent: float
+    frequency_spacing: str           # "constant_bandwidth" or "1/N"
+    requested_df_hz: float
+    actual_df_hz: Optional[float]
+    filter_applied: bool
+    user_filter_enabled: bool
+    user_highpass_hz: Optional[float]
+    user_lowpass_hz: Optional[float]
+    applied_highpass_hz: float
+    applied_lowpass_hz: float
+    filter_messages: List[str]
+    event_start_time: Optional[float]
+    event_end_time: Optional[float]
+    timestamp: str                   # ISO-8601
+    spectrogram_generated: bool
+
+
+class PSDEventResult(TypedDict, total=False):
+    """Single event result stored in ``channel_results``."""
+
+    frequencies: np.ndarray
+    psd: np.ndarray
+    metadata: PSDResultMetadata
+    spectrogram: Optional[SpectrogramResult]
+    conditioned_time: np.ndarray     # present when processor caches time data
+    conditioned_signal: np.ndarray   # present when processor caches signal data
+
+
 class BatchProcessingResult:
     """Container for batch processing results."""
     
     def __init__(self):
         """Initialize empty result container."""
-        self.channel_results = {}  # {(flight_key, channel_key): {event_name: PSDResult}}
-        self.errors = []  # List of error messages
-        self.warnings = []  # List of warning messages
+        self.channel_results: Dict[Tuple[str, str], Dict[str, PSDEventResult]] = {}
+        self.errors: List[str] = []
+        self.warnings: List[str] = []
         self.processing_log = []  # Detailed processing log
         self.start_time = None
         self.end_time = None
         
-    def add_psd_result(self, flight_key: str, channel_key: str, event_name: str, 
-                       frequencies: np.ndarray, psd: np.ndarray, 
-                       metadata: Dict[str, Any], spectrogram_data: Optional[Dict[str, Any]] = None):
+    def add_psd_result(
+        self,
+        flight_key: str,
+        channel_key: str,
+        event_name: str,
+        frequencies: np.ndarray,
+        psd: np.ndarray,
+        metadata: PSDResultMetadata,
+        spectrogram_data: Optional[SpectrogramResult] = None,
+        conditioned_time: Optional[np.ndarray] = None,
+        conditioned_signal: Optional[np.ndarray] = None,
+    ):
         """
         Add a PSD result to the container.
-        
+
         Parameters:
         -----------
         flight_key : str
@@ -61,22 +118,30 @@ class BatchProcessingResult:
             Frequency array in Hz
         psd : np.ndarray
             PSD values
-        metadata : dict
-            Additional metadata (sample_rate, units, processing params, etc.)
-        spectrogram_data : dict, optional
-            Spectrogram data containing 'frequencies', 'times', and 'Sxx' arrays
+        metadata : PSDResultMetadata
+            Processing metadata (sample_rate, units, filter params, etc.)
+        spectrogram_data : SpectrogramResult, optional
+            Spectrogram arrays (frequencies, times, Sxx)
+        conditioned_time : np.ndarray, optional
+            Time array for the conditioned event signal (avoids re-loading for reports)
+        conditioned_signal : np.ndarray, optional
+            Conditioned (filtered) event signal (avoids re-conditioning for reports)
         """
         channel_id = (flight_key, channel_key)
-        
+
         if channel_id not in self.channel_results:
             self.channel_results[channel_id] = {}
-        
-        self.channel_results[channel_id][event_name] = {
+
+        result_entry: PSDEventResult = {
             'frequencies': frequencies,
             'psd': psd,
             'metadata': metadata,
-            'spectrogram': spectrogram_data
+            'spectrogram': spectrogram_data,
         }
+        if conditioned_time is not None and conditioned_signal is not None:
+            result_entry['conditioned_time'] = conditioned_time
+            result_entry['conditioned_signal'] = conditioned_signal
+        self.channel_results[channel_id][event_name] = result_entry
     
     def add_error(self, message: str):
         """Add an error message to the log."""
@@ -203,6 +268,9 @@ class BatchProcessor:
             self.result.add_error(f"Fatal error during batch processing: {str(e)}")
             logger.exception("Fatal error during batch processing")
         
+        if self.progress_tracker:
+            self.progress_tracker.finish_all()
+
         self.result.end_time = datetime.now()
         duration = (self.result.end_time - self.result.start_time).total_seconds()
         self.result.add_log_entry(f"=== Batch Processing Completed in {duration:.2f}s ===")
@@ -572,8 +640,10 @@ class BatchProcessor:
 
         # Extract event data
         if start_time is not None and end_time is not None:
-            # Validate time range
-            if start_time < time_array[0] or end_time > time_array[-1]:
+            # Validate time range (allow tolerance of one sample period to
+            # accommodate sample-alignment offsets from optimized loading)
+            sample_period = 1.0 / sample_rate if sample_rate > 0 else 0.0
+            if start_time < time_array[0] - sample_period or end_time > time_array[-1] + sample_period:
                 raise ValueError(
                     f"Event time range [{start_time}, {end_time}] outside data range "
                     f"[{time_array[0]:.2f}, {time_array[-1]:.2f}]"
@@ -581,12 +651,14 @@ class BatchProcessor:
             
             # Extract event segment
             mask = (time_array >= start_time) & (time_array <= end_time)
+            event_time = time_array[mask]
             event_signal = signal_array[mask]
-            
+
             if len(event_signal) == 0:
                 raise ValueError(f"No data points in event time range")
         else:
             # Use full signal
+            event_time = time_array
             event_signal = signal_array
         
         # Check for cancellation
@@ -628,7 +700,7 @@ class BatchProcessor:
             raise InterruptedError("Processing cancelled by user")
 
         # Generate spectrogram if enabled
-        spectrogram_data = None
+        spectrogram_data: Optional[SpectrogramResult] = None
         if self.config.spectrogram_config.enabled:
             try:
                 spec_start = time.perf_counter()
@@ -642,18 +714,18 @@ class BatchProcessor:
                 )
                 spec_time = time.perf_counter() - spec_start
                 logger.debug(f"    Spectrogram generated in {spec_time:.3f}s")
-                spectrogram_data = {
-                    'frequencies': spec_frequencies,
-                    'times': spec_times,
-                    'Sxx': Sxx
-                }
+                spectrogram_data = SpectrogramResult(
+                    frequencies=spec_frequencies,
+                    times=spec_times,
+                    Sxx=Sxx,
+                )
             except Exception as e:
                 self.result.add_warning(
                     f"Failed to generate spectrogram for {flight_key}/{channel_key}/{event_name}: {str(e)}"
                 )
         
         # Store result
-        metadata = {
+        metadata: PSDResultMetadata = {
             'sample_rate': sample_rate,
             'units': units,
             'rms': rms,
@@ -670,7 +742,6 @@ class BatchProcessor:
             'applied_highpass_hz': applied_highpass,
             'applied_lowpass_hz': applied_lowpass,
             'filter_messages': list(filter_messages),
-            'mean_removed': False,
             'event_start_time': start_time,
             'event_end_time': end_time,
             'timestamp': datetime.now().isoformat(),
@@ -679,7 +750,9 @@ class BatchProcessor:
         
         self.result.add_psd_result(
             flight_key, channel_key, event_name,
-            frequencies, psd, metadata, spectrogram_data
+            frequencies, psd, metadata, spectrogram_data,
+            conditioned_time=event_time,
+            conditioned_signal=event_signal,
         )
         
         event_total_time = time.perf_counter() - event_start_time_perf

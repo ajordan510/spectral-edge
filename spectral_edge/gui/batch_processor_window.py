@@ -1853,15 +1853,9 @@ class BatchProcessorWindow(QMainWindow):
         self.config.psd_config.freq_min = self.freq_min_spin.value()
         self.config.psd_config.freq_max = self.freq_max_spin.value()
         self.config.psd_config.frequency_spacing = self.freq_spacing_combo.currentData()
-        # Running mean removal is deprecated; keep legacy fields deterministic.
-        self.config.psd_config.remove_running_mean = False
-        self.config.psd_config.running_mean_window = 1.0
-        
         # Filter config
         self.config.filter_config.enabled = self.filter_enabled_checkbox.isChecked()
         self.config.filter_config.filter_type = "bandpass"
-        self.config.filter_config.filter_design = self.filter_design_combo.currentText()
-        self.config.filter_config.filter_order = self.filter_order_spin.value()
         self.config.filter_config.cutoff_low = self.cutoff_low_spin.value()
         self.config.filter_config.cutoff_high = self.cutoff_high_spin.value()
         self.config.filter_config.user_highpass_hz = (
@@ -2001,7 +1995,7 @@ class BatchProcessorWindow(QMainWindow):
         self.filter_enabled_checkbox.setChecked(self.config.filter_config.enabled)
         self._update_filter_cutoff_visibility()
 
-        self.filter_order_spin.setValue(self.config.filter_config.filter_order)
+        self.filter_order_spin.setValue(4)  # Always Butterworth order 4
         user_hp = getattr(self.config.filter_config, "user_highpass_hz", None)
         user_lp = getattr(self.config.filter_config, "user_lowpass_hz", None)
         if user_hp is None:

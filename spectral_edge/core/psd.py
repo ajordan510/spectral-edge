@@ -276,10 +276,10 @@ def calculate_psd_maximax(
         Type: str
         Options: 'hann', 'hamming', 'blackman', 'bartlett', 'flattop', etc.
         
-    df : float, optional
+    df : float
         Desired frequency resolution in Hz for the PSD within each maximax window.
-        If None, uses default Welch parameters.
-        Type: float or None
+        Required — must be specified to ensure explicit control of resolution.
+        Type: float
         Units: Hz
         Controls nperseg for Welch's method: nperseg = sample_rate / df
         Must result in nperseg < maximax_window * sample_rate
@@ -373,10 +373,8 @@ def calculate_psd_maximax(
     if not (0 <= overlap_percent < 100):
         raise ValueError("overlap_percent must be between 0 and 100 (exclusive)")
     
-    # Calculate signal duration from actual time span
-    # This works correctly even if data is decimated, as long as sample_rate
-    # represents the actual rate of the provided data
-    signal_duration = (len(time_data) - 1) / sample_rate
+    # Total data coverage: N samples at rate fs covers N/fs seconds
+    signal_duration = len(time_data) / sample_rate
     
     if maximax_window > signal_duration:
         raise ValueError(
@@ -395,33 +393,33 @@ def calculate_psd_maximax(
             f"Must be less than 100% to allow window progression."
         )
     
-    # Calculate nperseg for Welch's method within each maximax window
-    # This is the segment length for the PSD calculation of each 1-second window
-    if df is not None:
-        if df <= 0:
-            raise ValueError("df (frequency resolution) must be positive")
-        
-        # Calculate nperseg from desired frequency resolution
-        nperseg_calc = int(sample_rate / df)
-        
-        if use_efficient_fft:
-            # Round to nearest power of 2
-            nperseg_calc = 2 ** int(np.ceil(np.log2(nperseg_calc)))
-        
-        nperseg = nperseg_calc
-        
-        # Validate that nperseg fits within maximax window
-        if nperseg > window_samples:
-            raise ValueError(
-                f"Requested df ({df} Hz) requires nperseg ({nperseg} samples) "
-                f"which is larger than maximax_window ({maximax_window}s = {window_samples} samples). "
-                f"Use larger df (coarser resolution) or longer maximax_window."
-            )
-    else:
-        # Default: use reasonable nperseg for the window size
-        # Aim for ~8-16 segments within the maximax window for good statistics
-        nperseg = min(window_samples // 8, 1024)
-        nperseg = max(nperseg, 64)  # Minimum reasonable segment length
+    # Calculate nperseg for Welch's method within each maximax window.
+    # df is required so the caller explicitly controls frequency resolution.
+    if df is None:
+        raise ValueError(
+            "df (frequency resolution in Hz) is required for maximax PSD. "
+            "Specify the desired frequency spacing, e.g. df=5.0 for 5 Hz resolution."
+        )
+
+    if df <= 0:
+        raise ValueError("df (frequency resolution) must be positive")
+
+    # Calculate nperseg from desired frequency resolution
+    nperseg_calc = int(sample_rate / df)
+
+    if use_efficient_fft:
+        # Round to nearest power of 2
+        nperseg_calc = 2 ** int(np.ceil(np.log2(nperseg_calc)))
+
+    nperseg = nperseg_calc
+
+    # Validate that nperseg fits within maximax window
+    if nperseg > window_samples:
+        raise ValueError(
+            f"Requested df ({df} Hz) requires nperseg ({nperseg} samples) "
+            f"which is larger than maximax_window ({maximax_window}s = {window_samples} samples). "
+            f"Use larger df (coarser resolution) or longer maximax_window."
+        )
     
     # Calculate noverlap for Welch's method (50% of nperseg is standard)
     noverlap = nperseg // 2
@@ -982,7 +980,7 @@ def convert_psd_to_octave_bands(
             for ch in range(n_channels):
                 try:
                     cumulative_energy[:, ch] = np.cumsum(
-                        np.diff(dense_freqs, prepend=dense_freqs[0])
+                        np.diff(dense_freqs, prepend=0.0)
                         * interpolated_psd[:, ch]
                     )
                 except Exception:
@@ -990,7 +988,7 @@ def convert_psd_to_octave_bands(
                     break
         else:
             cumulative_energy = np.cumsum(
-                np.diff(dense_freqs, prepend=dense_freqs[0]) * interpolated_psd
+                np.diff(dense_freqs, prepend=0.0) * interpolated_psd
             )
     else:
         cumulative_energy = None

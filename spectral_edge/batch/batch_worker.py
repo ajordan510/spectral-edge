@@ -231,7 +231,7 @@ class BatchWorker(QThread):
             # Convert result to dict for signal emission
             results_dict = {
                 'channel_count': len(result.channel_results),
-                'event_count': len(self.config.events) if not self.config.process_full_duration else 1,
+                'event_count': len(self.config.events) + (1 if self.config.process_full_duration else 0),
                 'warnings': len(result.warnings),
                 'output_directory': output_config.output_directory
             }

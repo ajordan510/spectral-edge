@@ -38,16 +38,29 @@ from spectral_edge.utils.reference_curves import prepare_reference_curves_for_pl
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_filename_component(value: Optional[str]) -> str:
+    """Return a filesystem-safe filename component."""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in text)
+    return safe.strip("_")
+
+
 def _build_batch_filter_settings(config: "BatchConfig") -> Dict[str, object]:
     """Convert batch filter config into shared conditioning settings."""
     fc = config.filter_config
+    user_highpass = getattr(fc, "user_highpass_hz", None)
+    user_lowpass = getattr(fc, "user_lowpass_hz", None)
+    filter_type = str(getattr(fc, "filter_type", "bandpass")).strip().lower()
+    if user_highpass is None and filter_type in {"highpass", "bandpass"}:
+        user_highpass = getattr(fc, "cutoff_low", None)
+    if user_lowpass is None and filter_type in {"lowpass", "bandpass"}:
+        user_lowpass = getattr(fc, "cutoff_high", None)
     return {
         "enabled": bool(getattr(fc, "enabled", False)),
-        "filter_type": str(getattr(fc, "filter_type", "lowpass")).strip().lower(),
-        "filter_design": str(getattr(fc, "filter_design", "butterworth")).strip().lower(),
-        "filter_order": int(getattr(fc, "filter_order", 4)),
-        "cutoff_low": getattr(fc, "cutoff_low", None),
-        "cutoff_high": getattr(fc, "cutoff_high", None),
+        "user_highpass_hz": user_highpass,
+        "user_lowpass_hz": user_lowpass,
     }
 
 
@@ -81,8 +94,8 @@ def generate_powerpoint_report(
         conditioning_filter_settings = _build_batch_filter_settings(config)
         conditioning_note = build_processing_note(
             conditioning_filter_settings,
-            remove_mean=config.psd_config.remove_running_mean,
-            mean_window_seconds=config.psd_config.running_mean_window,
+            remove_mean=False,
+            mean_window_seconds=1.0,
         )
 
         events = _get_event_definitions(config)
@@ -125,8 +138,8 @@ def generate_powerpoint_report(
                             signal_full_slice,
                             sample_rate,
                             filter_settings=conditioning_filter_settings,
-                            remove_mean=config.psd_config.remove_running_mean,
-                            mean_window_seconds=config.psd_config.running_mean_window,
+                            remove_mean=False,
+                            mean_window_seconds=1.0,
                         )
                     else:
                         conditioned_signal_full_slice = signal_full_slice
@@ -203,7 +216,8 @@ def generate_powerpoint_report(
                             start_time,
                             end_time,
                             sample_rate,
-                            units
+                            units,
+                            event_result=event_result,
                         )
                         report_gen.add_three_plot_slide(
                             slide_title,
@@ -266,7 +280,9 @@ def generate_powerpoint_report(
 
         output_dir = Path(output_path)
         output_dir.mkdir(parents=True, exist_ok=True)
-        ppt_file = output_dir / "batch_psd_report.pptx"
+        prefix = _sanitize_filename_component(getattr(config.output_config, "filename_prefix", ""))
+        report_name = "batch_psd_report.pptx" if not prefix else f"{prefix}_batch_psd_report.pptx"
+        ppt_file = output_dir / report_name
         report_gen.save(str(ppt_file))
         logger.info(f"PowerPoint report saved: {ppt_file}")
         return str(ppt_file)
@@ -291,12 +307,13 @@ def _add_config_slide(report_gen: ReportGenerator, config: 'BatchConfig', result
     else:
         events_desc = "None"
 
-    filter_desc = "None"
     if config.filter_config.enabled:
         filter_desc = (
-            f"{config.filter_config.filter_type} "
-            f"({config.filter_config.filter_design}, order {config.filter_config.filter_order})"
+            f"User overrides (HP={getattr(config.filter_config, 'user_highpass_hz', None)}, "
+            f"LP={getattr(config.filter_config, 'user_lowpass_hz', None)})"
         )
+    else:
+        filter_desc = "Baseline only (HP 1.0 Hz, LP 0.45xFs)"
 
     sections = [
         (
@@ -305,7 +322,7 @@ def _add_config_slide(report_gen: ReportGenerator, config: 'BatchConfig', result
                 f"PSD method: {config.psd_config.method} with {config.psd_config.window} window",
                 f"Overlap: {config.psd_config.overlap_percent}% and df {config.psd_config.desired_df} Hz",
                 f"Frequency spacing displayed as {config.psd_config.frequency_spacing}",
-                f"Running mean removal: {'On' if config.psd_config.remove_running_mean else 'Off'}",
+                "Running mean removal: Disabled (baseline HP 1.0 Hz applied)",
                 f"Filtering: {filter_desc}",
             ],
         ),
@@ -397,7 +414,8 @@ def _build_plot_parameter_boxes(
     start_time: Optional[float],
     end_time: Optional[float],
     sample_rate: Optional[float],
-    units: str
+    units: str,
+    event_result: Optional[Dict] = None,
 ) -> Tuple[str, str]:
     """Build PSD and spectrogram parameter strings (max 3 lines each)."""
     spacing = config.psd_config.frequency_spacing
@@ -411,22 +429,38 @@ def _build_plot_parameter_boxes(
         event_text = event_name
         time_range = f"{start_time:.2f}-{end_time:.2f}s"
 
-    if config.filter_config.enabled:
-        filt = config.filter_config
-        if filt.filter_type == "lowpass":
-            filt_desc = f"LP {filt.cutoff_high} Hz"
-        elif filt.filter_type == "highpass":
-            filt_desc = f"HP {filt.cutoff_low} Hz"
-        else:
-            filt_desc = f"BP {filt.cutoff_low}-{filt.cutoff_high} Hz"
+    metadata = (event_result or {}).get("metadata", {}) if event_result else {}
+    applied_hp = metadata.get("applied_highpass_hz")
+    applied_lp = metadata.get("applied_lowpass_hz")
+    if applied_hp is not None and applied_lp is not None:
+        filt_desc = f"Baseline+user (HP {float(applied_hp):g} Hz, LP {float(applied_lp):g} Hz)"
+    elif config.filter_config.enabled:
+        hp = getattr(config.filter_config, "user_highpass_hz", None)
+        lp = getattr(config.filter_config, "user_lowpass_hz", None)
+        if hp is None:
+            hp = getattr(config.filter_config, "cutoff_low", None)
+        if lp is None:
+            lp = getattr(config.filter_config, "cutoff_high", None)
+        hp_text = "baseline" if hp is None else f"{float(hp):g}"
+        lp_text = "baseline" if lp is None else f"{float(lp):g}"
+        filt_desc = f"Baseline+user (HP {hp_text} Hz, LP {lp_text} Hz)"
     else:
-        filt_desc = "None"
+        filt_desc = "Baseline (HP 1.0 Hz, LP 0.45xFs)"
 
     method = config.psd_config.method
-    method_desc = f"{method.capitalize()} | window={config.psd_config.window} | overlap={config.psd_config.overlap_percent}%"
+    actual_df = metadata.get("actual_df_hz")
+    method_desc = (
+        f"{method.capitalize()} | window={config.psd_config.window} | "
+        f"overlap={config.psd_config.overlap_percent}%"
+    )
+    df_text = (
+        f"df={df} Hz (actual {float(actual_df):.3f} Hz)"
+        if actual_df is not None else
+        f"df={df} Hz"
+    )
 
     psd_lines = [
-        f"df={df} Hz | spacing={spacing} | {fs_text}",
+        f"{df_text} | spacing={spacing} | {fs_text}",
         f"Event={event_text} ({time_range}) | Filter={filt_desc}",
         f"Method={method_desc}",
     ]
@@ -442,7 +476,7 @@ def _build_plot_parameter_boxes(
 
 def _get_event_definitions(config: 'BatchConfig') -> List[Tuple[str, Optional[float], Optional[float]]]:
     events = [(evt.name, evt.start_time, evt.end_time) for evt in config.events]
-    if config.process_full_duration or events:
+    if config.process_full_duration:
         return [("full_duration", None, None)] + events
     return events
 
@@ -583,14 +617,9 @@ def _create_psd_plot(
     frequencies = event_result['frequencies']
     psd_values = event_result['psd']
     frequencies, psd_values = apply_frequency_spacing(frequencies, psd_values, config.psd_config)
-
-    if config.psd_config.frequency_spacing == "constant_bandwidth":
-        freq_min = config.psd_config.freq_min
-        freq_max = config.psd_config.freq_max
-        mask = (frequencies >= freq_min) & (frequencies <= freq_max)
-        if np.any(mask):
-            frequencies = frequencies[mask]
-            psd_values = psd_values[mask]
+    if len(frequencies) == 0 or len(psd_values) == 0:
+        frequencies = np.array([max(0.1, float(config.psd_config.freq_min))], dtype=float)
+        psd_values = np.array([1e-12], dtype=float)
 
     apply_light_matplotlib_theme()
     fig, ax = plt.subplots(figsize=_get_plot_figsize(layout, "psd", slot_role))
@@ -724,17 +753,19 @@ def _add_rms_summary_slides(report_gen: ReportGenerator, results, config: 'Batch
         return
 
     include_3sigma = config.powerpoint_config.include_3sigma_columns
-    headers = ["Flight", "Channel", "Event", "RMS"]
+    headers = ["Flight", "Channel", "Units", "Event", "RMS"]
     if include_3sigma:
         headers.append("3-Sigma RMS")
 
     rows = []
     for (flight_key, channel_key), event_dict in results.channel_results.items():
         for event_name, event_result in event_dict.items():
+            metadata = event_result.get('metadata', {})
             rms_value = event_result.get('metadata', {}).get('rms')
             row = [
                 flight_key,
                 channel_key,
+                metadata.get("units", ""),
                 event_name,
                 "" if rms_value is None else f"{rms_value:.4f}",
             ]
@@ -742,5 +773,12 @@ def _add_rms_summary_slides(report_gen: ReportGenerator, results, config: 'Batch
                 row.append("" if rms_value is None else f"{3.0 * rms_value:.4f}")
             rows.append(row)
 
-    rows.sort(key=lambda r: (r[0], r[1], r[2]))
-    report_gen.add_rms_table_slide("RMS Summary", headers, rows)
+    rows.sort(key=lambda r: (r[0], r[1], r[3]))
+    chunk_size = 20
+    total_pages = max(1, int(np.ceil(len(rows) / chunk_size)))
+    for page_idx in range(total_pages):
+        start = page_idx * chunk_size
+        end = start + chunk_size
+        page_rows = rows[start:end]
+        title = "RMS Summary" if total_pages == 1 else f"RMS Summary ({page_idx + 1}/{total_pages})"
+        report_gen.add_rms_table_slide(title, headers, page_rows)

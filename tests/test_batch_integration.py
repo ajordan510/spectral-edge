@@ -143,7 +143,7 @@ class TestBatchProcessorIntegration:
                 freq_min=20.0,
                 freq_max=500.0,
                 frequency_spacing="linear",
-                remove_running_mean=True
+                remove_running_mean=False
             ),
             filter_config=FilterConfig(enabled=False),
             spectrogram_config=SpectrogramConfig(enabled=False),
@@ -174,11 +174,11 @@ class TestBatchProcessorIntegration:
             assert event_result['metadata']['rms'] > 0
 
         # Generate outputs
-        excel_path = export_to_excel(result, temp_dir)
+        excel_path = export_to_excel(result, temp_dir, config)
         assert os.path.exists(excel_path), "Excel file not created"
 
         # Verify HDF5 write-back
-        write_psds_to_hdf5(result, sample_hdf5_file)
+        write_psds_to_hdf5(result, sample_hdf5_file, config)
 
         # Check that processed_psds group was created
         with h5py.File(sample_hdf5_file, 'r') as f:
@@ -228,11 +228,12 @@ class TestBatchProcessorIntegration:
         
         # Check that both events were processed
         channel_result = result.channel_results[("flight_0001", "accel_x")]
+        assert "full_duration" not in channel_result, "full_duration should not be present when disabled"
         assert "Event1" in channel_result, "Event1 not processed"
         assert "Event2" in channel_result, "Event2 not processed"
         
         # Generate Excel output
-        excel_path = export_to_excel(result, temp_dir)
+        excel_path = export_to_excel(result, temp_dir, config)
         assert os.path.exists(excel_path), "Excel file not created"
 
         print(f"✅ HDF5 event-based workflow test passed")
@@ -258,7 +259,7 @@ class TestBatchProcessorIntegration:
                 freq_min=20.0,
                 freq_max=500.0,
                 frequency_spacing="linear",
-                remove_running_mean=True
+                remove_running_mean=False
             ),
             filter_config=FilterConfig(enabled=False),
             spectrogram_config=SpectrogramConfig(enabled=False),
@@ -281,7 +282,7 @@ class TestBatchProcessorIntegration:
         assert len(result.channel_results) == 2, "Should process 2 CSV files"
         
         # Generate outputs
-        excel_path = export_to_excel(result, temp_dir)
+        excel_path = export_to_excel(result, temp_dir, config)
         assert os.path.exists(excel_path), "Excel file not created"
 
         print(f"✅ CSV workflow test passed")

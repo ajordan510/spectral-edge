@@ -20,6 +20,12 @@ def app():
     return application
 
 
+@pytest.fixture(autouse=True)
+def _disable_context_menu_styling(monkeypatch):
+    monkeypatch.setattr("spectral_edge.gui.spectrogram_window.apply_context_menu_style", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(psd_module, "apply_context_menu_style", lambda *_args, **_kwargs: None)
+
+
 def test_spectrogram_window_conditioning_defaults_and_note(app):
     time_data = np.linspace(0.0, 10.0, 2000, endpoint=False)
     signal = 2.0 + np.sin(2.0 * np.pi * 12.0 * time_data)
@@ -48,7 +54,7 @@ def test_spectrogram_window_conditioning_defaults_and_note(app):
     note_text = window.conditioning_note_label.text()
     assert "Signal Conditioning:" in note_text
     assert "Running Mean Removed (1.0s)" in note_text
-    assert "Filter: highpass (5.0 Hz)" in note_text
+    assert "Filter: baseline+user" in note_text
 
     window.close()
 
@@ -88,18 +94,17 @@ def test_psd_open_spectrogram_passes_conditioning(monkeypatch, app):
     window.sample_rate = 200.0
 
     window.enable_filter_checkbox.setChecked(True)
-    window.filter_type_combo.setCurrentText("Bandpass")
     window.low_cutoff_spin.setValue(8.0)
     window.high_cutoff_spin.setValue(60.0)
-    window.remove_mean_checkbox.setChecked(True)
-
     window._open_spectrogram()
     app.processEvents()
 
     kwargs = captured["kwargs"]
-    assert kwargs["remove_mean"] is True
+    assert kwargs["remove_mean"] is False
     assert kwargs["mean_window_seconds"] == 1.0
     assert kwargs["filter_settings"]["enabled"] is True
+    assert kwargs["filter_settings"]["user_highpass_hz"] == pytest.approx(8.0)
+    assert kwargs["filter_settings"]["user_lowpass_hz"] == pytest.approx(60.0)
     assert kwargs["filter_settings"]["filter_type"] == "bandpass"
     assert kwargs["filter_settings"]["cutoff_low"] == pytest.approx(8.0)
     assert kwargs["filter_settings"]["cutoff_high"] == pytest.approx(60.0)
@@ -151,14 +156,12 @@ def test_psd_open_spectrogram_reused_window_syncs_conditioning_defaults(monkeypa
     window.sample_rate = 200.0
 
     window.enable_filter_checkbox.setChecked(False)
-    window.remove_mean_checkbox.setChecked(False)
     window._open_spectrogram()
     app.processEvents()
 
     window.enable_filter_checkbox.setChecked(True)
-    window.filter_type_combo.setCurrentText("Lowpass")
+    window.low_cutoff_spin.setValue(5.0)
     window.high_cutoff_spin.setValue(90.0)
-    window.remove_mean_checkbox.setChecked(True)
     window._open_spectrogram()
     app.processEvents()
 
@@ -166,9 +169,11 @@ def test_psd_open_spectrogram_reused_window_syncs_conditioning_defaults(monkeypa
     assert len(captured["update_calls"]) == 1
     update_call = captured["update_calls"][0]
     assert update_call["filter_settings"]["enabled"] is True
-    assert update_call["filter_settings"]["filter_type"] == "lowpass"
+    assert update_call["filter_settings"]["user_highpass_hz"] == pytest.approx(5.0)
+    assert update_call["filter_settings"]["user_lowpass_hz"] == pytest.approx(90.0)
+    assert update_call["filter_settings"]["filter_type"] == "bandpass"
     assert update_call["filter_settings"]["cutoff_high"] == pytest.approx(90.0)
-    assert update_call["remove_mean"] is True
+    assert update_call["remove_mean"] is False
     assert update_call["mean_window_seconds"] == 1.0
     assert update_call["recalculate"] is True
 

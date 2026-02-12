@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QFileDialog,
     QGroupBox, QGridLayout, QMessageBox, QCheckBox, QScrollArea, QTabWidget, QLineEdit,
-    QDialog, QProgressDialog, QApplication, QSizePolicy
+    QDialog, QProgressDialog, QApplication, QSizePolicy, QRadioButton, QButtonGroup, QStyle
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -22,6 +22,7 @@ import io
 import pyqtgraph as pg
 import numpy as np
 from pathlib import Path
+from typing import Optional
 
 # Import our custom modules
 from spectral_edge.utils.data_loader import load_csv_data, DataLoadError
@@ -40,7 +41,12 @@ from spectral_edge.utils.report_generator import ReportGenerator, export_plot_to
 from spectral_edge.gui.cross_spectrum_window import CrossSpectrumWindow
 from spectral_edge.gui.statistics_window import create_statistics_window
 from spectral_edge.utils.theme import apply_context_menu_style, apply_dark_dialog_theme
-from spectral_edge.utils.signal_conditioning import apply_processing_pipeline, build_processing_note
+from spectral_edge.utils.signal_conditioning import (
+    apply_processing_pipeline,
+    apply_robust_filtering,
+    build_processing_note,
+    calculate_baseline_filters,
+)
 from spectral_edge.utils.reference_curves import (
     REFERENCE_CURVE_COLOR_PALETTE,
     build_builtin_reference_curve,
@@ -350,11 +356,19 @@ class PSDAnalysisWindow(QMainWindow):
         self.preset_manager = PresetManager()
         self.applying_preset = False  # Flag to prevent recursive preset changes
 
+        # Time-history visualization state
+        self.time_resolution_mode = "decimated"  # decimated | full
+        self.time_filtering_mode = "filtered"  # filtered | raw
+        self.time_history_cache = {}
+        self._cached_filter_messages = []
+        self._full_resolution_warning_shown = False
+
         # Apply styling
         self._apply_styling()
         
         # Create UI
         self._create_ui()
+        self._update_filter_info_display()
         
         # Apply comprehensive tooltips
         apply_tooltips_to_window(self)
@@ -423,6 +437,303 @@ class PSDAnalysisWindow(QMainWindow):
             sample_rate = self.sample_rate
 
         return time_data, signal, sample_rate
+
+    def _compute_display_indices(self, time_full, time_display) -> np.ndarray:
+        """Map display timestamps to deterministic indices in the full-resolution array."""
+        full = np.asarray(time_full, dtype=np.float64)
+        display = np.asarray(time_display, dtype=np.float64)
+        if full.size == 0 or display.size == 0:
+            return np.array([], dtype=np.int64)
+        if full.size == display.size and np.array_equal(full, display):
+            return np.arange(full.size, dtype=np.int64)
+
+        try:
+            indices = np.searchsorted(full, display, side="left")
+            indices = np.clip(indices, 0, full.size - 1)
+
+            prev_indices = np.clip(indices - 1, 0, full.size - 1)
+            left_delta = np.abs(display - full[prev_indices])
+            right_delta = np.abs(full[indices] - display)
+            use_prev = left_delta <= right_delta
+            indices = np.where(use_prev, prev_indices, indices).astype(np.int64)
+
+            if indices.size > 1:
+                indices = np.maximum.accumulate(indices)
+            return indices
+        except Exception:
+            if display.size == 1:
+                return np.array([0], dtype=np.int64)
+            return np.linspace(0, full.size - 1, num=display.size, dtype=np.int64)
+
+    def _predict_applied_filter_bounds(
+        self,
+        sample_rate: float,
+        user_highpass: Optional[float],
+        user_lowpass: Optional[float],
+    ) -> tuple[float, float]:
+        """Predict applied filter cutoffs without filtering data."""
+        baseline = calculate_baseline_filters(sample_rate)
+        applied_highpass = float(baseline["highpass"])
+        applied_lowpass = float(baseline["lowpass"])
+
+        def _parse(value):
+            if value is None:
+                return None
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return None
+            return numeric if np.isfinite(numeric) else None
+
+        parsed_highpass = _parse(user_highpass)
+        parsed_lowpass = _parse(user_lowpass)
+
+        if parsed_highpass is not None:
+            applied_highpass = max(parsed_highpass, applied_highpass)
+        if parsed_lowpass is not None:
+            applied_lowpass = min(parsed_lowpass, applied_lowpass)
+
+        if applied_highpass >= applied_lowpass:
+            applied_highpass = max(0.01, applied_lowpass * 0.5)
+
+        return float(applied_highpass), float(applied_lowpass)
+
+    def _show_info_banner(self, message: str):
+        """Show a non-blocking inline info banner message."""
+        if not hasattr(self, "info_banner_label"):
+            return
+        msg = (message or "").strip()
+        if not msg:
+            self.info_banner_label.clear()
+            self.info_banner_label.setVisible(False)
+            return
+        self.info_banner_label.setText(msg)
+        self.info_banner_label.setVisible(True)
+
+    def _set_info_messages(self, messages):
+        """Render one or more informational messages in the inline banner."""
+        if not messages:
+            self._show_info_banner("")
+            return
+        unique_messages = []
+        for message in messages:
+            text = str(message).strip()
+            if text and text not in unique_messages:
+                unique_messages.append(text)
+        if not unique_messages:
+            self._show_info_banner("")
+            return
+        preview = unique_messages[:3]
+        if len(unique_messages) > 3:
+            preview.append(f"... and {len(unique_messages) - 3} more")
+        self._show_info_banner("\n".join(preview))
+
+    def _get_user_filter_inputs(self):
+        """Return optional user cutoff overrides from UI."""
+        if not hasattr(self, "enable_filter_checkbox") or not self.enable_filter_checkbox.isChecked():
+            return None, None
+        highpass = float(self.low_cutoff_spin.value()) if hasattr(self, "low_cutoff_spin") else None
+        lowpass = float(self.high_cutoff_spin.value()) if hasattr(self, "high_cutoff_spin") else None
+        return highpass, lowpass
+
+    def _reset_time_history_defaults(self):
+        """Reset time-history controls to default decimated+filtered view."""
+        self.time_resolution_mode = "decimated"
+        self.time_filtering_mode = "filtered"
+        self._full_resolution_warning_shown = False
+        if hasattr(self, "decimated_radio"):
+            self.decimated_radio.blockSignals(True)
+            self.decimated_radio.setChecked(True)
+            self.decimated_radio.blockSignals(False)
+        if hasattr(self, "filtered_radio"):
+            self.filtered_radio.blockSignals(True)
+            self.filtered_radio.setChecked(True)
+            self.filtered_radio.blockSignals(False)
+
+    def _update_filter_info_display(self, sample_rate_override: Optional[float] = None):
+        """Refresh baseline/actual filter informational labels."""
+        sample_rate = float(sample_rate_override) if sample_rate_override else (
+            float(self.sample_rate) if self.sample_rate else 0.0
+        )
+        baseline = calculate_baseline_filters(sample_rate) if sample_rate > 0 else None
+        if hasattr(self, "baseline_highpass_label"):
+            self.baseline_highpass_label.setText("Baseline Highpass: 1.00 Hz (DC/drift removal)")
+        if hasattr(self, "baseline_lowpass_label"):
+            if baseline is None:
+                self.baseline_lowpass_label.setText("Baseline Lowpass: N/A")
+            else:
+                self.baseline_lowpass_label.setText(
+                    f"Baseline Lowpass: {baseline['lowpass']:.2f} Hz (0.45xfs anti-aliasing)"
+                )
+        if hasattr(self, "baseline_rate_label"):
+            if baseline is None:
+                self.baseline_rate_label.setText("Sample Rate: N/A -> Nyquist: N/A")
+            else:
+                self.baseline_rate_label.setText(
+                    f"Sample Rate: {sample_rate:.2f} Hz -> Nyquist: {baseline['nyquist']:.2f} Hz"
+                )
+        if hasattr(self, "soft_filter_guidance_label"):
+            if baseline is None:
+                self.soft_filter_guidance_label.setText("Valid range: Highpass >= 1.0 Hz, Lowpass <= 0.45xfs")
+            else:
+                self.soft_filter_guidance_label.setText(
+                    f"Valid range: Highpass >= 1.0 Hz, Lowpass <= {baseline['lowpass']:.2f} Hz"
+                )
+
+    def _build_time_history_cache(self):
+        """Pre-compute raw/filtered decimated/full cache variants for quick toggles."""
+        self.time_history_cache = {}
+        all_messages = []
+        user_highpass, user_lowpass = self._get_user_filter_inputs()
+        large_data_threshold = 10_000_000
+
+        for channel_idx, channel_name in enumerate(self.channel_names or []):
+            time_display, signal_display, sample_rate = self._get_channel_display(channel_idx)
+            time_full, signal_full, _ = self._get_channel_full(channel_idx)
+            if signal_display is None or time_display is None or sample_rate is None:
+                continue
+            if signal_full is None or time_full is None:
+                signal_full = signal_display
+                time_full = time_display
+
+            decimated_raw = np.asarray(signal_display, dtype=np.float64).copy()
+            full_raw = np.asarray(signal_full, dtype=np.float64).copy()
+            display_indices = self._compute_display_indices(time_full, time_display)
+            if display_indices.size != decimated_raw.size:
+                if decimated_raw.size == 0:
+                    display_indices = np.array([], dtype=np.int64)
+                else:
+                    display_indices = np.linspace(
+                        0,
+                        max(0, full_raw.size - 1),
+                        num=decimated_raw.size,
+                        dtype=np.int64,
+                    )
+
+            decimated_filtered = None
+            applied_highpass, applied_lowpass = self._predict_applied_filter_bounds(
+                float(sample_rate),
+                user_highpass,
+                user_lowpass,
+            )
+            filter_messages = []
+            full_filtered = None
+            full_filter_deferred = len(full_raw) > large_data_threshold
+            if not full_filter_deferred:
+                full_filtered, applied_highpass, applied_lowpass, full_messages = apply_robust_filtering(
+                    full_raw,
+                    float(sample_rate),
+                    user_highpass=user_highpass,
+                    user_lowpass=user_lowpass,
+                )
+                decimated_filtered = full_filtered[display_indices] if display_indices.size > 0 else np.array([], dtype=np.float64)
+                filter_messages.extend(full_messages)
+
+            prefixed = [f"{channel_name}: {msg}" for msg in filter_messages]
+            all_messages.extend(prefixed)
+            self.time_history_cache[channel_idx] = {
+                "time_decimated": time_display,
+                "signal_decimated_raw": decimated_raw,
+                "signal_decimated_filtered": decimated_filtered,
+                "display_indices": display_indices,
+                "time_full": time_full,
+                "signal_full_raw": full_raw,
+                "signal_full_filtered": full_filtered,
+                "full_filter_deferred": full_filter_deferred,
+                "sample_rate": float(sample_rate),
+                "applied_highpass_hz": float(applied_highpass),
+                "applied_lowpass_hz": float(applied_lowpass),
+                "filter_messages": prefixed,
+            }
+
+        self._cached_filter_messages = all_messages
+        if hasattr(self, "applied_filters_label"):
+            if self.time_history_cache:
+                first = self.time_history_cache[next(iter(self.time_history_cache))]
+                self.applied_filters_label.setText(
+                    "Applied filters: "
+                    f"HP {first['applied_highpass_hz']:.2f} Hz, "
+                    f"LP {first['applied_lowpass_hz']:.2f} Hz"
+                )
+            else:
+                self.applied_filters_label.setText("Applied filters: N/A")
+
+        self._set_info_messages(all_messages)
+
+    def _resolve_time_history_signal(self, channel_idx: int):
+        """Resolve current time-history data vector from selected mode and cache."""
+        cache = self.time_history_cache.get(channel_idx)
+        if cache is None:
+            return None, None, None, 0, 0, []
+
+        use_full = self.time_resolution_mode == "full"
+        use_filtered = self.time_filtering_mode == "filtered"
+        info_messages = []
+        display_indices = cache.get("display_indices")
+        if display_indices is None or len(display_indices) != len(cache.get("signal_decimated_raw", [])):
+            full_raw = cache.get("signal_full_raw")
+            if full_raw is None:
+                display_indices = np.array([], dtype=np.int64)
+            else:
+                display_indices = np.linspace(
+                    0,
+                    max(0, len(full_raw) - 1),
+                    num=len(cache.get("signal_decimated_raw", [])),
+                    dtype=np.int64,
+                )
+            cache["display_indices"] = display_indices
+
+        if use_filtered and cache["signal_full_filtered"] is None:
+            user_highpass = self.low_cutoff_spin.value() if self.enable_filter_checkbox.isChecked() else None
+            user_lowpass = self.high_cutoff_spin.value() if self.enable_filter_checkbox.isChecked() else None
+            (
+                cache["signal_full_filtered"],
+                cache["applied_highpass_hz"],
+                cache["applied_lowpass_hz"],
+                msgs,
+            ) = apply_robust_filtering(
+                cache["signal_full_raw"],
+                cache["sample_rate"],
+                user_highpass=user_highpass,
+                user_lowpass=user_lowpass,
+            )
+            cache["signal_decimated_filtered"] = (
+                cache["signal_full_filtered"][display_indices]
+                if len(display_indices) > 0
+                else np.array([], dtype=np.float64)
+            )
+            if hasattr(self, "applied_filters_label"):
+                self.applied_filters_label.setText(
+                    "Applied filters: "
+                    f"HP {cache['applied_highpass_hz']:.2f} Hz, "
+                    f"LP {cache['applied_lowpass_hz']:.2f} Hz"
+                )
+            if msgs:
+                new_msgs = [f"{self.channel_names[channel_idx]}: {msg}" for msg in msgs]
+                for msg in new_msgs:
+                    if msg not in self._cached_filter_messages:
+                        self._cached_filter_messages.append(msg)
+                info_messages.extend(new_msgs)
+            if not self._full_resolution_warning_shown and len(cache["signal_full_raw"]) > 1_000_000:
+                self._full_resolution_warning_shown = True
+                info_messages.append(
+                    "Full-resolution display contains >1,000,000 points and may render slowly."
+                )
+
+        if use_full:
+            time_data = cache["time_full"]
+            signal_data = cache["signal_full_filtered"] if use_filtered else cache["signal_full_raw"]
+            shown_points = len(signal_data)
+            total_points = len(cache["signal_full_raw"])
+        else:
+            time_data = cache["time_decimated"]
+            signal_data = cache["signal_decimated_filtered"] if use_filtered else cache["signal_decimated_raw"]
+            if signal_data is None:
+                signal_data = cache["signal_decimated_raw"]
+            shown_points = len(signal_data)
+            total_points = len(cache["signal_full_raw"])
+
+        return time_data, signal_data, cache["sample_rate"], shown_points, total_points, info_messages
     
     def _apply_styling(self):
         """Apply aerospace-inspired styling to the window."""
@@ -500,6 +811,17 @@ class PSDAnalysisWindow(QMainWindow):
                 color: #e0e0e0;
                 padding: 5px;
             }
+            QRadioButton {
+                color: #ffffff;
+                padding: 2px 5px;
+            }
+            QRadioButton:disabled {
+                color: #9ca3af;
+            }
+            QRadioButton::indicator {
+                width: 16px;
+                height: 16px;
+            }
             QCheckBox::indicator {
                 width: 18px;
                 height: 18px;
@@ -514,6 +836,52 @@ class PSDAnalysisWindow(QMainWindow):
             QScrollArea {
                 border: none;
                 background-color: #1a1f2e;
+            }
+            QScrollBar:vertical {
+                background: #111827;
+                width: 12px;
+                margin: 0px;
+                border: 1px solid #374151;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical {
+                background: #4b5563;
+                min-height: 24px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #6b7280;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+                background: none;
+                border: none;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+            QScrollBar:horizontal {
+                background: #111827;
+                height: 12px;
+                margin: 0px;
+                border: 1px solid #374151;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #4b5563;
+                min-width: 24px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #6b7280;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+                background: none;
+                border: none;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: transparent;
             }
             QWidget#channelWidget {
                 background-color: #1a1f2e;
@@ -547,6 +915,15 @@ class PSDAnalysisWindow(QMainWindow):
         title.setFont(title_font)
         title.setStyleSheet("color: #60a5fa;")
         layout.addWidget(title)
+
+        self.info_banner_label = QLabel("")
+        self.info_banner_label.setVisible(False)
+        self.info_banner_label.setWordWrap(True)
+        self.info_banner_label.setStyleSheet(
+            "color: #bfdbfe; background-color: #1e3a8a; border: 1px solid #3b82f6; "
+            "border-radius: 4px; padding: 6px;"
+        )
+        layout.addWidget(self.info_banner_label)
         
         # File loading group (always visible at top)
         file_group = self._create_file_group()
@@ -715,6 +1092,7 @@ class PSDAnalysisWindow(QMainWindow):
 
         # Generate Report button
         self.report_button = QPushButton("Generate Report")
+        self.report_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
         self.report_button.setEnabled(False)
         self.report_button.setToolTip("Generate PowerPoint report with current analysis")
         self.report_button.clicked.connect(self._generate_report)
@@ -723,7 +1101,8 @@ class PSDAnalysisWindow(QMainWindow):
         layout.addWidget(self.report_button)
 
         # Statistics button
-        self.statistics_button = QPushButton("📊 Statistics Analysis")
+        self.statistics_button = QPushButton("Statistics Analysis")
+        self.statistics_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogInfoView))
         self.statistics_button.setEnabled(False)
         self.statistics_button.setToolTip("View probability distribution, running statistics, and standard limits")
         self.statistics_button.clicked.connect(self._open_statistics)
@@ -803,7 +1182,7 @@ class PSDAnalysisWindow(QMainWindow):
                 })
 
         return {
-            "config_version": 1,
+            "config_version": 2,
             "parameters": {
                 "preset_key": self.preset_combo.currentData(),
                 "window": self.window_combo.currentText().lower(),
@@ -818,7 +1197,9 @@ class PSDAnalysisWindow(QMainWindow):
             },
             "display": {
                 "show_crosshair": self.show_crosshair_checkbox.isChecked(),
-                "remove_mean": self.remove_mean_checkbox.isChecked(),
+                "remove_mean": False,  # Legacy config key kept for compatibility; feature removed from PSD GUI.
+                "time_resolution_mode": self.time_resolution_mode,
+                "time_filtering_mode": self.time_filtering_mode,
                 "octave_enabled": self.octave_checkbox.isChecked(),
                 "octave_fraction": self.octave_combo.currentData(),
                 "x_min": _safe_float(self.x_min_edit.text()),
@@ -828,12 +1209,14 @@ class PSDAnalysisWindow(QMainWindow):
             },
             "filters": {
                 "enabled": self.enable_filter_checkbox.isChecked(),
-                "filter_type": self.filter_type_combo.currentText().lower(),
-                "filter_design": self.filter_design_combo.currentText().lower(),
-                "filter_order": self.filter_order_spin.value(),
-                "cutoff_freq": self.cutoff_freq_spin.value(),
-                "low_cutoff": self.low_cutoff_spin.value(),
-                "high_cutoff": self.high_cutoff_spin.value(),
+                "user_highpass_hz": self.low_cutoff_spin.value(),
+                "user_lowpass_hz": self.high_cutoff_spin.value(),
+                # Legacy compatibility keys
+                "filter_type": "bandpass",
+                "filter_design": "butterworth",
+                "filter_order": 4,
+                "cutoff_low": self.low_cutoff_spin.value(),
+                "cutoff_high": self.high_cutoff_spin.value(),
             },
             "events": events,
         }
@@ -898,7 +1281,16 @@ class PSDAnalysisWindow(QMainWindow):
 
         display = config.get("display", {})
         _set_checkbox(self.show_crosshair_checkbox, display.get("show_crosshair"), "Show crosshair")
-        _set_checkbox(self.remove_mean_checkbox, display.get("remove_mean"), "Remove mean")
+        time_resolution_mode = str(display.get("time_resolution_mode", "decimated")).strip().lower()
+        if time_resolution_mode == "full":
+            self.full_resolution_radio.setChecked(True)
+        else:
+            self.decimated_radio.setChecked(True)
+        time_filtering_mode = str(display.get("time_filtering_mode", "filtered")).strip().lower()
+        if time_filtering_mode == "raw":
+            self.raw_radio.setChecked(True)
+        else:
+            self.filtered_radio.setChecked(True)
         _set_checkbox(self.octave_checkbox, display.get("octave_enabled"), "Octave display")
         if display.get("octave_fraction") is not None:
             idx = self.octave_combo.findData(display.get("octave_fraction"))
@@ -924,12 +1316,16 @@ class PSDAnalysisWindow(QMainWindow):
 
         filters = config.get("filters", {})
         _set_checkbox(self.enable_filter_checkbox, filters.get("enabled"), "Filter enabled")
-        _set_combo(self.filter_type_combo, filters.get("filter_type"), "Filter type", lambda v: str(v).capitalize())
-        _set_combo(self.filter_design_combo, filters.get("filter_design"), "Filter design", lambda v: str(v).capitalize())
-        _set_spin(self.filter_order_spin, filters.get("filter_order"), "Filter order")
-        _set_spin(self.cutoff_freq_spin, filters.get("cutoff_freq"), "Cutoff frequency")
-        _set_spin(self.low_cutoff_spin, filters.get("low_cutoff"), "Low cutoff")
-        _set_spin(self.high_cutoff_spin, filters.get("high_cutoff"), "High cutoff")
+        _set_spin(
+            self.low_cutoff_spin,
+            filters.get("user_highpass_hz", filters.get("low_cutoff", filters.get("cutoff_low"))),
+            "User highpass",
+        )
+        _set_spin(
+            self.high_cutoff_spin,
+            filters.get("user_lowpass_hz", filters.get("high_cutoff", filters.get("cutoff_high"))),
+            "User lowpass",
+        )
 
         events = config.get("events", [])
         if isinstance(events, list):
@@ -1003,6 +1399,9 @@ class PSDAnalysisWindow(QMainWindow):
                 self._on_events_updated(enabled_events)
 
         if self.signal_data_display is not None:
+            self._update_filter_info_display()
+            self._build_time_history_cache()
+            self._plot_time_history()
             self._apply_axis_limits()
 
         return errors
@@ -1169,11 +1568,11 @@ class PSDAnalysisWindow(QMainWindow):
         row += 1
         
         # Frequency resolution (df)
-        layout.addWidget(QLabel("Δf (Hz):"), row, 0)
+        layout.addWidget(QLabel("\u0394f (Hz):"), row, 0)
         self.df_spin = QDoubleSpinBox()
         self.df_spin.setMinimumHeight(24)
         self.df_spin.setRange(0.01, 100)
-        self.df_spin.setValue(1.0)
+        self.df_spin.setValue(5.0)
         self.df_spin.setDecimals(2)
         self.df_spin.setSingleStep(0.1)
         self.df_spin.valueChanged.connect(self._update_nperseg_from_df)
@@ -1195,7 +1594,7 @@ class PSDAnalysisWindow(QMainWindow):
         fft_layout.addWidget(self.efficient_fft_checkbox)
         
         # Add df display label next to checkbox
-        self.actual_df_label = QLabel("(df = 1.0 Hz)")
+        self.actual_df_label = QLabel("(df = 5.0 Hz)")
         self.actual_df_label.setStyleSheet("color: #9ca3af; font-size: 10pt;")
         self.actual_df_label.setToolTip("Actual frequency resolution after FFT size adjustment")
         fft_layout.addWidget(self.actual_df_label)
@@ -1296,14 +1695,48 @@ class PSDAnalysisWindow(QMainWindow):
         self.show_crosshair_checkbox.setChecked(False)
         self.show_crosshair_checkbox.stateChanged.connect(self._toggle_crosshair)
         layout.addWidget(self.show_crosshair_checkbox)
-        
-        # Remove running mean checkbox
-        self.remove_mean_checkbox = QCheckBox("Remove 1s Running Mean")
-        self.remove_mean_checkbox.setChecked(False)
-        self.remove_mean_checkbox.setToolTip("Remove 1-second running mean from time history to view vibration about mean")
-        self.remove_mean_checkbox.stateChanged.connect(self._on_remove_mean_changed)
-        layout.addWidget(self.remove_mean_checkbox)
-        
+
+        # Data resolution toggle
+        layout.addWidget(QLabel("Data Resolution:"))
+        resolution_row = QHBoxLayout()
+        self.decimated_radio = QRadioButton("Decimated")
+        self.full_resolution_radio = QRadioButton("Full Resolution")
+        self.decimated_radio.setChecked(True)
+        self.time_resolution_group = QButtonGroup(self)
+        self.time_resolution_group.addButton(self.decimated_radio)
+        self.time_resolution_group.addButton(self.full_resolution_radio)
+        self.decimated_radio.toggled.connect(self._on_time_resolution_changed)
+        self.full_resolution_radio.toggled.connect(self._on_time_resolution_changed)
+        resolution_row.addWidget(self.decimated_radio)
+        resolution_row.addWidget(self.full_resolution_radio)
+        resolution_row.addStretch()
+        layout.addLayout(resolution_row)
+
+        # Filtering toggle
+        layout.addWidget(QLabel("Filtering:"))
+        filtering_row = QHBoxLayout()
+        self.filtered_radio = QRadioButton("Filtered")
+        self.raw_radio = QRadioButton("Raw")
+        self.filtered_radio.setChecked(True)
+        self.time_filter_group = QButtonGroup(self)
+        self.time_filter_group.addButton(self.filtered_radio)
+        self.time_filter_group.addButton(self.raw_radio)
+        self.filtered_radio.toggled.connect(self._on_time_filtering_changed)
+        self.raw_radio.toggled.connect(self._on_time_filtering_changed)
+        filtering_row.addWidget(self.filtered_radio)
+        filtering_row.addWidget(self.raw_radio)
+        filtering_row.addStretch()
+        layout.addLayout(filtering_row)
+
+        self.time_points_label = QLabel("Showing: N/A")
+        self.time_points_label.setStyleSheet("color: #9ca3af; font-size: 10pt;")
+        layout.addWidget(self.time_points_label)
+
+        self.time_stats_label = QLabel("Statistics: N/A")
+        self.time_stats_label.setStyleSheet("color: #9ca3af; font-size: 10pt;")
+        self.time_stats_label.setWordWrap(True)
+        layout.addWidget(self.time_stats_label)
+
         # Octave band display
         octave_layout = QHBoxLayout()
         self.octave_checkbox = QCheckBox("Octave Band Display")
@@ -1403,268 +1836,114 @@ class PSDAnalysisWindow(QMainWindow):
         return group
     
     def _create_filter_group(self):
-        """Create the filter configuration group box."""
+        """Create baseline + optional override filter controls."""
         group = QGroupBox("Signal Filtering")
         layout = QVBoxLayout()
         layout.setContentsMargins(6, 4, 6, 4)
         layout.setSpacing(3)
 
-        # Description of default processing
-        desc_label = QLabel(
-            "<b>Default Processing:</b><br>"
-            "• Running mean removal (1 second window)<br>"
-            "• Applied to PSD calculation only<br><br>"
-            "<b>Optional Filtering:</b><br>"
-            "Additional filtering can be applied below."
+        self.default_filter_info_label = QLabel(
+            "Automatically calculated from sample rate. These filters are applied by default."
         )
-        desc_label.setWordWrap(True)
-        desc_label.setStyleSheet("color: #9ca3af; font-size: 10pt; padding: 8px; background-color: #0f172a; border-radius: 4px;")
-        layout.addWidget(desc_label)
-        
-        # Enable filtering checkbox
-        self.enable_filter_checkbox = QCheckBox("Enable Additional Filtering")
+        self.default_filter_info_label.setWordWrap(True)
+        self.default_filter_info_label.setToolTip(
+            "Automatically calculated from sample rate. These filters are applied by default "
+            "based on signal-processing best practices."
+        )
+        self.default_filter_info_label.setStyleSheet(
+            "color: #cbd5e1; font-size: 10pt; padding: 8px; background-color: #1e293b; border-radius: 4px;"
+        )
+        layout.addWidget(self.default_filter_info_label)
+
+        self.baseline_highpass_label = QLabel("Baseline Highpass: 1.00 Hz (DC/drift removal)")
+        self.baseline_lowpass_label = QLabel("Baseline Lowpass: N/A")
+        self.baseline_rate_label = QLabel("Sample Rate: N/A -> Nyquist: N/A")
+        for label in (self.baseline_highpass_label, self.baseline_lowpass_label, self.baseline_rate_label):
+            label.setStyleSheet("color: #cbd5e1;")
+            layout.addWidget(label)
+
+        self.enable_filter_checkbox = QCheckBox("Enable Optional Additional Filtering")
         self.enable_filter_checkbox.setChecked(False)
         self.enable_filter_checkbox.stateChanged.connect(self._on_filter_enabled_changed)
         self.enable_filter_checkbox.stateChanged.connect(self._on_parameter_changed)
         layout.addWidget(self.enable_filter_checkbox)
-        
-        # Filter options group
-        filter_options_group = QGroupBox("Filter Configuration")
+
+        filter_options_group = QGroupBox("Optional Additional Filtering")
         filter_layout = QGridLayout()
         filter_layout.setContentsMargins(6, 4, 6, 4)
         filter_layout.setHorizontalSpacing(8)
         filter_layout.setVerticalSpacing(3)
 
-        row = 0
-        
-        # Filter type
-        filter_layout.addWidget(QLabel("Filter Type:"), row, 0)
-        self.filter_type_combo = QComboBox()
-        self.filter_type_combo.addItems(['Lowpass', 'Highpass', 'Bandpass'])
-        self.filter_type_combo.setCurrentText('Lowpass')
-        self.filter_type_combo.currentTextChanged.connect(self._on_filter_type_changed)
-        self.filter_type_combo.currentTextChanged.connect(self._on_parameter_changed)
-        self.filter_type_combo.setEnabled(False)
-        filter_layout.addWidget(self.filter_type_combo, row, 1)
-        row += 1
-        
-        # Filter design
-        filter_layout.addWidget(QLabel("Filter Design:"), row, 0)
-        self.filter_design_combo = QComboBox()
-        self.filter_design_combo.addItems(['Butterworth', 'Chebyshev', 'Bessel'])
-        self.filter_design_combo.setCurrentText('Butterworth')
-        self.filter_design_combo.currentTextChanged.connect(self._on_parameter_changed)
-        self.filter_design_combo.setEnabled(False)
-        filter_layout.addWidget(self.filter_design_combo, row, 1)
-        row += 1
-        
-        # Filter order
-        filter_layout.addWidget(QLabel("Filter Order:"), row, 0)
-        self.filter_order_spin = QSpinBox()
-        self.filter_order_spin.setRange(1, 10)
-        self.filter_order_spin.setValue(4)
-        self.filter_order_spin.setSingleStep(1)
-        self.filter_order_spin.setToolTip("Higher order = sharper cutoff")
-        self.filter_order_spin.valueChanged.connect(self._on_parameter_changed)
-        self.filter_order_spin.setEnabled(False)
-        filter_layout.addWidget(self.filter_order_spin, row, 1)
-        row += 1
-        
-        # Cutoff frequency (for lowpass/highpass)
-        self.cutoff_label = QLabel("Cutoff Freq (Hz):")
-        filter_layout.addWidget(self.cutoff_label, row, 0)
-        self.cutoff_freq_spin = QDoubleSpinBox()
-        self.cutoff_freq_spin.setRange(0.1, 50000)
-        self.cutoff_freq_spin.setValue(1000.0)
-        self.cutoff_freq_spin.setDecimals(1)
-        self.cutoff_freq_spin.setSingleStep(10.0)
-        self.cutoff_freq_spin.setToolTip("Cutoff frequency for lowpass/highpass filter")
-        self.cutoff_freq_spin.valueChanged.connect(self._on_parameter_changed)
-        self.cutoff_freq_spin.setEnabled(False)
-        filter_layout.addWidget(self.cutoff_freq_spin, row, 1)
-        row += 1
-        
-        # Low cutoff frequency (for bandpass)
-        self.low_cutoff_label = QLabel("Low Cutoff (Hz):")
-        filter_layout.addWidget(self.low_cutoff_label, row, 0)
+        filter_layout.addWidget(QLabel("User Highpass (Hz):"), 0, 0)
         self.low_cutoff_spin = QDoubleSpinBox()
-        self.low_cutoff_spin.setRange(0.1, 50000)
-        self.low_cutoff_spin.setValue(100.0)
-        self.low_cutoff_spin.setDecimals(1)
-        self.low_cutoff_spin.setSingleStep(10.0)
-        self.low_cutoff_spin.setToolTip("Lower cutoff frequency for bandpass filter")
+        self.low_cutoff_spin.setRange(0.0, 50000.0)
+        self.low_cutoff_spin.setValue(1.0)
+        self.low_cutoff_spin.setDecimals(2)
+        self.low_cutoff_spin.setSingleStep(0.5)
         self.low_cutoff_spin.valueChanged.connect(self._on_parameter_changed)
+        self.low_cutoff_spin.valueChanged.connect(self._on_user_filter_controls_changed)
         self.low_cutoff_spin.setEnabled(False)
-        self.low_cutoff_spin.setVisible(False)
-        filter_layout.addWidget(self.low_cutoff_spin, row, 1)
-        self.low_cutoff_label.setVisible(False)
-        row += 1
-        
-        # High cutoff frequency (for bandpass)
-        self.high_cutoff_label = QLabel("High Cutoff (Hz):")
-        filter_layout.addWidget(self.high_cutoff_label, row, 0)
+        filter_layout.addWidget(self.low_cutoff_spin, 0, 1)
+
+        filter_layout.addWidget(QLabel("User Lowpass (Hz):"), 1, 0)
         self.high_cutoff_spin = QDoubleSpinBox()
-        self.high_cutoff_spin.setRange(0.1, 50000)
+        self.high_cutoff_spin.setRange(0.0, 50000.0)
         self.high_cutoff_spin.setValue(2000.0)
-        self.high_cutoff_spin.setDecimals(1)
-        self.high_cutoff_spin.setSingleStep(10.0)
-        self.high_cutoff_spin.setToolTip("Upper cutoff frequency for bandpass filter")
+        self.high_cutoff_spin.setDecimals(2)
+        self.high_cutoff_spin.setSingleStep(1.0)
         self.high_cutoff_spin.valueChanged.connect(self._on_parameter_changed)
+        self.high_cutoff_spin.valueChanged.connect(self._on_user_filter_controls_changed)
         self.high_cutoff_spin.setEnabled(False)
-        self.high_cutoff_spin.setVisible(False)
-        filter_layout.addWidget(self.high_cutoff_spin, row, 1)
-        self.high_cutoff_label.setVisible(False)
-        row += 1
-        
+        filter_layout.addWidget(self.high_cutoff_spin, 1, 1)
+
+        self.soft_filter_guidance_label = QLabel("Valid range: Highpass >= 1.0 Hz, Lowpass <= 0.45xfs")
+        self.soft_filter_guidance_label.setWordWrap(True)
+        self.soft_filter_guidance_label.setStyleSheet("color: #9ca3af;")
+        filter_layout.addWidget(self.soft_filter_guidance_label, 2, 0, 1, 2)
+
+        self.applied_filters_label = QLabel("Applied filters: N/A")
+        self.applied_filters_label.setWordWrap(True)
+        self.applied_filters_label.setStyleSheet("color: #9ca3af;")
+        filter_layout.addWidget(self.applied_filters_label, 3, 0, 1, 2)
+
         filter_options_group.setLayout(filter_layout)
         layout.addWidget(filter_options_group)
-        
+
         layout.addStretch()
-        
         group.setLayout(layout)
         return group
     
     def _on_filter_enabled_changed(self):
-        """Handle filter enable/disable."""
+        """Handle optional user-filter enable/disable."""
         enabled = self.enable_filter_checkbox.isChecked()
-        self.filter_type_combo.setEnabled(enabled)
-        self.filter_design_combo.setEnabled(enabled)
-        self.filter_order_spin.setEnabled(enabled)
-        
-        # Update cutoff frequency controls based on filter type
-        if enabled:
-            self._on_filter_type_changed()
-        else:
-            self.cutoff_freq_spin.setEnabled(False)
-            self.low_cutoff_spin.setEnabled(False)
-            self.high_cutoff_spin.setEnabled(False)
-        
-        # Replot time history to show/hide filtering
-        if self.signal_data_display is not None:
+        self.low_cutoff_spin.setEnabled(enabled)
+        self.high_cutoff_spin.setEnabled(enabled)
+        self._update_filter_info_display()
+        if self.channel_names:
+            self._build_time_history_cache()
+            self._plot_time_history()
+
+    def _on_user_filter_controls_changed(self):
+        """Refresh cached time-history variants when user override cutoffs change."""
+        self._update_filter_info_display()
+        if self.channel_names:
+            self._build_time_history_cache()
             self._plot_time_history()
     
     def _on_filter_type_changed(self):
-        """Handle filter type change to show/hide appropriate cutoff controls."""
-        filter_type = self.filter_type_combo.currentText()
-        enabled = self.enable_filter_checkbox.isChecked()
-        
-        if filter_type == 'Bandpass':
-            # Show bandpass controls
-            self.cutoff_freq_spin.setVisible(False)
-            self.cutoff_label.setVisible(False)
-            self.low_cutoff_spin.setVisible(True)
-            self.high_cutoff_spin.setVisible(True)
-            self.low_cutoff_label.setVisible(True)
-            self.high_cutoff_label.setVisible(True)
-            
-            self.low_cutoff_spin.setEnabled(enabled)
-            self.high_cutoff_spin.setEnabled(enabled)
-        else:
-            # Show single cutoff control
-            self.cutoff_freq_spin.setVisible(True)
-            self.cutoff_label.setVisible(True)
-            self.low_cutoff_spin.setVisible(False)
-            self.high_cutoff_spin.setVisible(False)
-            self.low_cutoff_label.setVisible(False)
-            self.high_cutoff_label.setVisible(False)
-            
-            self.cutoff_freq_spin.setEnabled(enabled)
+        """Legacy no-op retained for backward compatibility."""
+        return
     
     def _apply_filter(self, signal, sample_rate):
-        """
-        Apply the configured filter to the signal.
-        
-        Args:
-            signal: Input signal array
-            sample_rate: Sample rate of the signal in Hz
-            
-        Returns:
-            Filtered signal array
-        """
-        from scipy import signal as scipy_signal
-        
-        filter_type = self.filter_type_combo.currentText().lower()
-        filter_design = self.filter_design_combo.currentText().lower()
-        filter_order = self.filter_order_spin.value()
-        
-        # Get cutoff frequencies
-        nyquist = sample_rate / 2.0
-        
-        try:
-            if filter_type == 'bandpass':
-                low_cutoff = self.low_cutoff_spin.value()
-                high_cutoff = self.high_cutoff_spin.value()
-                
-                # Validate cutoff frequencies
-                if low_cutoff >= high_cutoff:
-                    from spectral_edge.utils.message_box import show_warning
-                    show_warning(self, "Invalid Filter Parameters", 
-                                "Low cutoff must be less than high cutoff. Filter not applied.")
-                    return signal
-                
-                # Ensure cutoffs are safely below Nyquist (leave 5% margin for stability)
-                if high_cutoff >= nyquist * 0.95:
-                    from spectral_edge.utils.message_box import show_warning
-                    max_cutoff = nyquist * 0.95
-                    show_warning(self, "Invalid Filter Parameters", 
-                                f"High cutoff ({high_cutoff} Hz) is too close to Nyquist frequency ({nyquist:.1f} Hz).\nMaximum recommended cutoff: {max_cutoff:.1f} Hz. Filter not applied.")
-                    return signal
-                
-                if low_cutoff <= 0:
-                    from spectral_edge.utils.message_box import show_warning
-                    show_warning(self, "Invalid Filter Parameters", 
-                                "Low cutoff must be greater than 0 Hz. Filter not applied.")
-                    return signal
-                
-                # Normalize to Nyquist frequency
-                Wn = [low_cutoff / nyquist, high_cutoff / nyquist]
-                btype = 'bandpass'
-            else:
-                cutoff = self.cutoff_freq_spin.value()
-                
-                # Validate cutoff frequency (leave 5% margin for stability)
-                if cutoff >= nyquist * 0.95:
-                    from spectral_edge.utils.message_box import show_warning
-                    max_cutoff = nyquist * 0.95
-                    show_warning(self, "Invalid Filter Parameters", 
-                                f"Cutoff frequency ({cutoff} Hz) is too close to Nyquist frequency ({nyquist:.1f} Hz).\nMaximum recommended cutoff: {max_cutoff:.1f} Hz. Filter not applied.")
-                    return signal
-                
-                if cutoff <= 0:
-                    from spectral_edge.utils.message_box import show_warning
-                    show_warning(self, "Invalid Filter Parameters", 
-                                "Cutoff must be greater than 0 Hz. Filter not applied.")
-                    return signal
-                
-                # Normalize to Nyquist frequency
-                Wn = cutoff / nyquist
-                btype = filter_type
-            
-            # Design filter using Second-Order Sections (SOS) for numerical stability
-            # SOS format is much more stable than transfer function (b, a) format,
-            # especially for high-order filters and filters with cutoffs near Nyquist
-            if filter_design == 'butterworth':
-                sos = scipy_signal.butter(filter_order, Wn, btype=btype, output='sos')
-            elif filter_design == 'chebyshev':
-                # Chebyshev Type I with 0.5 dB passband ripple
-                sos = scipy_signal.cheby1(filter_order, 0.5, Wn, btype=btype, output='sos')
-            elif filter_design == 'bessel':
-                sos = scipy_signal.bessel(filter_order, Wn, btype=btype, output='sos')
-            else:
-                # Default to Butterworth
-                sos = scipy_signal.butter(filter_order, Wn, btype=btype, output='sos')
-            
-            # Apply filter using sosfiltfilt for zero-phase filtering with SOS
-            # sosfiltfilt is more numerically stable than filtfilt with (b, a)
-            filtered_signal = scipy_signal.sosfiltfilt(sos, signal)
-            
-            return filtered_signal
-            
-        except Exception as e:
-            from spectral_edge.utils.message_box import show_warning
-            show_warning(self, "Filter Error", 
-                        f"Failed to apply filter: {str(e)}\n\nFilter not applied.")
-            return signal
+        """Legacy helper retained; routes through robust baseline filtering."""
+        user_highpass, user_lowpass = self._get_user_filter_inputs()
+        filtered, _hp, _lp, _messages = apply_robust_filtering(
+            signal,
+            sample_rate,
+            user_highpass=user_highpass,
+            user_lowpass=user_lowpass,
+        )
+        return filtered
 
     def _create_comparison_group(self):
         """Create the comparison curves management group box."""
@@ -2139,7 +2418,7 @@ class PSDAnalysisWindow(QMainWindow):
             return
 
         filter_settings = self._get_statistics_filter_settings()
-        remove_mean = self.remove_mean_checkbox.isChecked()
+        remove_mean = False
         mean_window_seconds = 1.0
         processing_note = build_processing_note(
             filter_settings,
@@ -2148,9 +2427,9 @@ class PSDAnalysisWindow(QMainWindow):
         )
         processing_flags = {
             "filter_enabled": bool(filter_settings.get("enabled", False)),
-            "filter_type": filter_settings.get("filter_type", "lowpass"),
-            "low_cutoff_hz": filter_settings.get("cutoff_low"),
-            "high_cutoff_hz": filter_settings.get("cutoff_high"),
+            "filter_type": "baseline+user",
+            "low_cutoff_hz": filter_settings.get("user_highpass_hz"),
+            "high_cutoff_hz": filter_settings.get("user_lowpass_hz"),
             "running_mean_removed": remove_mean,
             "running_mean_window_s": mean_window_seconds,
         }
@@ -2195,11 +2474,15 @@ class PSDAnalysisWindow(QMainWindow):
 
     def _get_statistics_filter_settings(self):
         """Build filter settings payload for shared signal-conditioning utilities."""
-        if not self.enable_filter_checkbox.isChecked():
+        enabled = bool(self.enable_filter_checkbox.isChecked())
+        if not enabled:
             return {"enabled": False}
         return {
-            "enabled": True,
-            "filter_type": self.filter_type_combo.currentText().strip().lower(),
+            "enabled": enabled,
+            "user_highpass_hz": self.low_cutoff_spin.value(),
+            "user_lowpass_hz": self.high_cutoff_spin.value(),
+            # Legacy compatibility keys still consumed by other callers/tests.
+            "filter_type": "bandpass",
             "filter_design": "butterworth",
             "filter_order": 4,
             "cutoff_low": self.low_cutoff_spin.value(),
@@ -2269,7 +2552,7 @@ class PSDAnalysisWindow(QMainWindow):
             if report_options["include_parameters"]:
                 processing_note = build_processing_note(
                     self._get_statistics_filter_settings(),
-                    remove_mean=self.remove_mean_checkbox.isChecked(),
+                    remove_mean=False,
                     mean_window_seconds=1.0,
                 )
                 report.add_bulleted_sections_slide(
@@ -2406,7 +2689,7 @@ class PSDAnalysisWindow(QMainWindow):
             return None
 
         filter_settings = self._get_statistics_filter_settings()
-        remove_mean = self.remove_mean_checkbox.isChecked()
+        remove_mean = False
         mean_window_seconds = 1.0
         conditioned_signal = apply_processing_pipeline(
             signal,
@@ -2598,7 +2881,7 @@ class PSDAnalysisWindow(QMainWindow):
             # Update coordinate label
             if self.channel_units and self.channel_units[0]:
                 unit = self.channel_units[0]
-                label_text = f"f = {freq:.2f} Hz\nPSD = {psd:.3e} {unit}²/Hz"
+                label_text = f"f = {freq:.2f} Hz\nPSD = {psd:.3e} {unit}^2/Hz"
             else:
                 label_text = f"f = {freq:.2f} Hz\nPSD = {psd:.3e}"
             
@@ -2647,6 +2930,53 @@ class PSDAnalysisWindow(QMainWindow):
 
         # Clear the PSD plot but keep time history
         self._clear_psd_plot()
+
+    def _get_active_events_for_calculation(self):
+        """Resolve active events, preferring Event Manager checkbox state."""
+        if self.event_manager is not None and hasattr(self.event_manager, "get_enabled_events"):
+            enabled_events = list(self.event_manager.get_enabled_events())
+            self.events = enabled_events
+            return enabled_events
+        return list(self.events)
+
+    def _compute_channel_psd(self, signal, channel_sample_rate):
+        """Compute PSD for one channel signal slice using robust baseline filtering."""
+        window = self.window_combo.currentText().lower()
+        df = self.df_spin.value()
+        use_efficient_fft = self.efficient_fft_checkbox.isChecked()
+
+        processed_signal = np.asarray(signal, dtype=np.float64).copy()
+        user_highpass, user_lowpass = self._get_user_filter_inputs()
+        processed_signal, applied_highpass, applied_lowpass, info_messages = apply_robust_filtering(
+            processed_signal,
+            channel_sample_rate,
+            user_highpass=user_highpass,
+            user_lowpass=user_lowpass,
+        )
+
+        if self.maximax_checkbox.isChecked():
+            frequencies, psd = calculate_psd_maximax(
+                processed_signal,
+                channel_sample_rate,
+                df=df,
+                maximax_window=self.maximax_window_spin.value(),
+                overlap_percent=self.maximax_overlap_spin.value(),
+                window=window,
+                use_efficient_fft=use_efficient_fft,
+            )
+        else:
+            nperseg = int(channel_sample_rate / df)
+            noverlap = int(nperseg * self.overlap_spin.value() / 100.0)
+            frequencies, psd = calculate_psd_welch(
+                processed_signal,
+                channel_sample_rate,
+                df=df,
+                noverlap=noverlap,
+                window=window,
+                use_efficient_fft=use_efficient_fft,
+            )
+
+        return frequencies, psd, applied_highpass, applied_lowpass, info_messages
     
     def _validate_overlap(self):
         """Validate overlap percentage in real-time."""
@@ -2836,6 +3166,7 @@ class PSDAnalysisWindow(QMainWindow):
 
             # Keep event manager bounds synchronized with newly loaded data.
             if self.event_manager is not None:
+                time_min, time_max = self._get_time_bounds()
                 self.event_manager.set_time_bounds(min_time=time_min, max_time=time_max)
             
             # Enable calculate buttons
@@ -2851,7 +3182,10 @@ class PSDAnalysisWindow(QMainWindow):
             self.psd_results = {}
             self.rms_values = {}
 
-            # Plot time history
+            # Reset and rebuild adaptive time-history cache.
+            self._reset_time_history_defaults()
+            self._update_filter_info_display()
+            self._build_time_history_cache()
             self._plot_time_history()
             
         except (DataLoadError, FileNotFoundError) as e:
@@ -2908,92 +3242,133 @@ class PSDAnalysisWindow(QMainWindow):
         # Update both time history and PSD plots
         self._plot_time_history()
         self._update_plot()
+
+    def _on_time_resolution_changed(self):
+        """Handle decimated/full-resolution toggle changes."""
+        new_mode = "full" if self.full_resolution_radio.isChecked() else "decimated"
+        if self.time_resolution_mode == new_mode:
+            return
+        self.time_resolution_mode = new_mode
+        if new_mode == "full" and not self._full_resolution_warning_shown:
+            for cache in self.time_history_cache.values():
+                if len(cache.get("signal_full_raw", [])) > 1_000_000:
+                    self._full_resolution_warning_shown = True
+                    self._set_info_messages(
+                        ["Full-resolution display contains >1,000,000 points and may render slowly."]
+                    )
+                    break
+        self._plot_time_history()
+
+    def _on_time_filtering_changed(self):
+        """Handle filtered/raw time-history toggle changes."""
+        new_mode = "raw" if self.raw_radio.isChecked() else "filtered"
+        if self.time_filtering_mode == new_mode:
+            return
+        self.time_filtering_mode = new_mode
+        self._plot_time_history()
     
     def _plot_time_history(self):
-        """Plot time history of selected channels using decimated display data."""
+        """Plot time history from the 4-state cache (decimated/full x filtered/raw)."""
         if not self.channel_signal_display and self.signal_data_display is None:
             return
-        
-        # Clear previous plot
+
+        if not self.time_history_cache and self.channel_names:
+            self._build_time_history_cache()
+
+        # Preserve current zoom/pan when toggling display modes.
+        view_box = self.time_plot_widget.getPlotItem().vb
+        previous_x, previous_y = view_box.viewRange()
+        had_previous_data = bool(self.time_plot_widget.listDataItems())
+
         self.time_plot_widget.clear()
         self.time_legend.clear()
-        
-        # Re-add legend with styling and make it visible (data is loaded)
         self.time_legend = self.time_plot_widget.addLegend(offset=(10, 10))
-        self.time_legend.setBrush(pg.mkBrush(26, 31, 46, 255))  # Solid GUI background
+        self.time_legend.setBrush(pg.mkBrush(26, 31, 46, 255))
         self.time_legend.setPen(pg.mkPen(74, 85, 104, 255))
-        self.time_legend.setVisible(True)  # Show legend when data is present
-        
-        # Enable autorange for time history after data is loaded
-        self.time_plot_widget.enableAutoRange()
-        
-        # Define colors for different channels
-        colors = ['#60a5fa', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
-        
-        # Plot each selected channel
-        plot_count = 0
-        for i, checkbox in enumerate(self.channel_checkboxes):
-            if checkbox.isChecked():
-                channel_name = self.channel_names[i]
-                # Get individual flight name for this channel
-                flight_name = self.channel_flight_names[i] if i < len(self.channel_flight_names) else None
+        self.time_legend.setVisible(True)
 
-                # Use per-channel DISPLAY data (decimated) for plotting performance
-                time_display, signal_display, channel_sample_rate = self._get_channel_display(i)
-                if signal_display is None or time_display is None or len(signal_display) == 0:
-                    continue
-                signal = signal_display.copy()
-                
-                # Apply optional filtering if enabled
-                if self.enable_filter_checkbox.isChecked():
-                    signal = self._apply_filter(signal, channel_sample_rate)
-                
-                # Apply running mean removal if checkbox is checked
-                if self.remove_mean_checkbox.isChecked():
-                    signal = self._remove_running_mean(
-                        signal,
-                        window_seconds=1.0,
-                        sample_rate=channel_sample_rate,
-                        time_data=time_display
-                    )
-                
-                # Plot the time history
-                color = colors[plot_count % len(colors)]
-                pen = pg.mkPen(color=color, width=1.5)
-                # Create legend label with individual flight name if available
-                if flight_name:
-                    # Remove 'flight_' prefix for cleaner display
-                    clean_flight_name = flight_name.replace('flight_', '')
-                    legend_label = f"{clean_flight_name} - {channel_name}"
-                else:
-                    legend_label = channel_name
-                
-                # Add suffix to legend for processing applied
-                processing_tags = []
-                if self.enable_filter_checkbox.isChecked():
-                    filter_type = self.filter_type_combo.currentText().lower()
-                    processing_tags.append(f"{filter_type} filtered")
-                if self.remove_mean_checkbox.isChecked():
-                    processing_tags.append("mean removed")
-                
-                if processing_tags:
-                    legend_label += f" ({', '.join(processing_tags)})"
-                
-                self.time_plot_widget.plot(
-                    time_display,
-                    signal,
-                    pen=pen,
-                    name=legend_label
-                )
-                
-                plot_count += 1
-        
-        # Update Y-axis label with units
+        colors = ['#60a5fa', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
+        plot_count = 0
+        shown_points = 0
+        total_points = 0
+        info_messages = list(self._cached_filter_messages)
+        primary_signal = None
+        primary_channel_name = None
+
+        for i, checkbox in enumerate(self.channel_checkboxes):
+            if not checkbox.isChecked():
+                continue
+
+            channel_name = self.channel_names[i]
+            flight_name = self.channel_flight_names[i] if i < len(self.channel_flight_names) else None
+            time_data, signal_data, _sample_rate, shown, total, messages = self._resolve_time_history_signal(i)
+            if signal_data is None or time_data is None or len(signal_data) == 0:
+                continue
+
+            shown_points = max(shown_points, int(shown))
+            total_points = max(total_points, int(total))
+            info_messages.extend(messages)
+
+            if primary_signal is None:
+                primary_signal = np.asarray(signal_data, dtype=np.float64)
+                primary_channel_name = channel_name
+
+            color = colors[plot_count % len(colors)]
+            pen = pg.mkPen(color=color, width=1.5)
+            if flight_name:
+                clean_flight_name = flight_name.replace('flight_', '')
+                legend_label = f"{clean_flight_name} - {channel_name}"
+            else:
+                legend_label = channel_name
+
+            view_suffix = "Filtered" if self.time_filtering_mode == "filtered" else "Raw"
+            legend_label = f"{legend_label} ({view_suffix})"
+
+            self.time_plot_widget.plot(time_data, signal_data, pen=pen, name=legend_label)
+            plot_count += 1
+
+        resolution_label = "Full Resolution" if self.time_resolution_mode == "full" else "Decimated"
+        filtering_label = "Filtered" if self.time_filtering_mode == "filtered" else "Raw"
+        self.time_plot_widget.setTitle(
+            f"Time History ({resolution_label}, {filtering_label})",
+            color='#60a5fa',
+            size='12pt',
+        )
+
         if self.channel_units and self.channel_units[0]:
             unit = self.channel_units[0]
             self.time_plot_widget.setLabel('left', f'Amplitude ({unit})', color='#e0e0e0', size='11pt')
         else:
             self.time_plot_widget.setLabel('left', 'Amplitude', color='#e0e0e0', size='11pt')
+
+        if plot_count > 0 and primary_signal is not None:
+            rms = float(np.sqrt(np.mean(np.square(primary_signal))))
+            p2p = float(np.ptp(primary_signal))
+            vmin = float(np.min(primary_signal))
+            vmax = float(np.max(primary_signal))
+            self.time_points_label.setText(f"Showing {shown_points:,} of {total_points:,} points")
+            self.time_stats_label.setText(
+                f"Statistics ({primary_channel_name}): RMS={rms:.4g}, P2P={p2p:.4g}, Min={vmin:.4g}, Max={vmax:.4g}"
+            )
+            self.time_legend.setVisible(True)
+        else:
+            self.time_points_label.setText("Showing: N/A")
+            self.time_stats_label.setText("Statistics: N/A")
+            self.time_legend.setVisible(False)
+
+        self._set_info_messages(info_messages)
+
+        if had_previous_data and plot_count > 0:
+            try:
+                self.time_plot_widget.setXRange(previous_x[0], previous_x[1], padding=0)
+                self.time_plot_widget.setYRange(previous_y[0], previous_y[1], padding=0)
+            except Exception:
+                self.time_plot_widget.enableAutoRange()
+        elif plot_count > 0:
+            self.time_plot_widget.enableAutoRange()
+
+        # Re-draw event regions after plot reset.
+        self._update_event_regions()
     
     def _calculate_psd(self):
         """Calculate PSD with current parameters for all channels using FULL RESOLUTION data."""
@@ -3004,13 +3379,11 @@ class PSDAnalysisWindow(QMainWindow):
                 "Please load an HDF5 file and select a channel before calculating PSD."
             )
             return
-        
+
         try:
-            # Get parameters from UI
-            window = self.window_combo.currentText().lower()
             df = self.df_spin.value()
             overlap_percent = self.overlap_spin.value()
-            
+
             # Validate all parameters before calculation
             data_duration = None
             if self.channel_time_full:
@@ -3024,7 +3397,7 @@ class PSDAnalysisWindow(QMainWindow):
                 'maximax_window': self.maximax_window_spin.value() if self.maximax_checkbox.isChecked() else None,
                 'data_duration': data_duration
             }
-            
+
             all_valid, errors = self.validator.validate_all_parameters(params)
             if not all_valid:
                 error_msg = "Cannot calculate PSD due to invalid parameters:\n\n"
@@ -3032,19 +3405,38 @@ class PSDAnalysisWindow(QMainWindow):
                 error_msg += "\n\nPlease correct the highlighted parameters and try again."
                 show_warning(self, "Invalid Parameters", error_msg)
                 return
+
+            active_events = self._get_active_events_for_calculation()
+            if (
+                self.event_manager is not None
+                and len(getattr(self.event_manager, "events", [])) > 0
+                and len(active_events) == 0
+            ):
+                show_warning(
+                    self,
+                    "No Events Enabled",
+                    "Event Manager has no enabled events. Enable at least one event or clear Event Manager events.",
+                )
+                return
+            if active_events:
+                self._update_event_regions()
+                self._calculate_event_psds(events=active_events)
+                return
+
             freq_min = self.freq_min_spin.value()
             freq_max = self.freq_max_spin.value()
-            
-            # Note: Frequency range is for DISPLAY only, not calculation
-            # PSD is calculated for full frequency range up to Nyquist
-            
+
             # Determine number of channels from selected dataset
             num_channels = len(self.channel_names) if self.channel_names else 0
             if num_channels == 0 and self.signal_data_full is not None:
                 num_channels = 1 if self.signal_data_full.ndim == 1 else self.signal_data_full.shape[1]
-            
+
+            self.frequencies = {}
             self.psd_results = {}
             self.rms_values = {}
+            skipped_channels = []
+            filter_info_messages = []
+            first_applied = None
 
             progress = QProgressDialog("Calculating PSDs...", "Cancel", 0, num_channels, self)
             progress.setWindowTitle("PSD Analysis")
@@ -3062,8 +3454,7 @@ class PSDAnalysisWindow(QMainWindow):
                     color: #000000;
                 }
             """)
-            
-            # Calculate PSD for each channel using FULL RESOLUTION data
+
             try:
                 for channel_idx in range(num_channels):
                     if progress.wasCanceled():
@@ -3078,69 +3469,64 @@ class PSDAnalysisWindow(QMainWindow):
                     progress.setLabelText(f"Calculating: {channel_name} ({channel_idx + 1}/{num_channels})")
                     progress.setValue(channel_idx)
                     QApplication.processEvents()
-                    
+
                     _, signal_full, channel_sample_rate = self._get_channel_full(channel_idx)
                     if signal_full is None or channel_sample_rate is None or len(signal_full) == 0:
                         continue
-                    signal = signal_full.copy()
-                    
-                    # Apply optional filtering if enabled
-                    if self.enable_filter_checkbox.isChecked():
-                        signal = self._apply_filter(signal, channel_sample_rate)
-                    
-                    # Calculate PSD (maximax or traditional)
-                    if self.maximax_checkbox.isChecked():
-                        # Use maximax PSD calculation
-                        maximax_window = self.maximax_window_spin.value()
-                        maximax_overlap = self.maximax_overlap_spin.value()
-                        
-                        frequencies, psd = calculate_psd_maximax(
-                            signal,
-                            channel_sample_rate,  # Use channel-specific sample rate
-                            df=df,
-                            maximax_window=maximax_window,
-                            overlap_percent=maximax_overlap,
-                            window=window
+
+                    try:
+                        frequencies, psd, applied_hp, applied_lp, info_messages = self._compute_channel_psd(
+                            signal_full,
+                            channel_sample_rate,
                         )
-                    else:
-                        # Use traditional averaged PSD
-                        # Calculate nperseg from df for overlap calculation
-                        nperseg = int(channel_sample_rate / df)  # Use channel-specific sample rate
-                        noverlap = int(nperseg * overlap_percent / 100.0)
-                        
-                        frequencies, psd = calculate_psd_welch(
-                            signal,
-                            channel_sample_rate,  # Use channel-specific sample rate
-                            df=df,
-                            noverlap=noverlap,
-                            window=window
-                        )
-                    
-                    # Store frequency array for this channel (may differ with different sample rates)
+                    except Exception as exc:
+                        skipped_channels.append(f"{channel_name}: {exc}")
+                        continue
+
                     self.frequencies[channel_name] = frequencies
-                    
-                    # Store PSD for this channel
                     self.psd_results[channel_name] = psd
-                    
-                    # Calculate RMS over specified frequency range
+                    if first_applied is None:
+                        first_applied = (applied_hp, applied_lp)
+                    filter_info_messages.extend(f"{channel_name}: {msg}" for msg in info_messages)
+
                     rms = calculate_rms_from_psd(
-                        frequencies, 
-                        psd, 
-                        freq_min=freq_min, 
+                        frequencies,
+                        psd,
+                        freq_min=freq_min,
                         freq_max=freq_max
                     )
-                    
                     self.rms_values[channel_name] = rms
             finally:
                 progress.setValue(num_channels)
                 progress.close()
-            
-            # Update plot
+
+            if skipped_channels:
+                skipped_text = "\n".join(f"• {msg}" for msg in skipped_channels[:12])
+                if len(skipped_channels) > 12:
+                    skipped_text += f"\n• ... and {len(skipped_channels) - 12} more"
+                show_warning(
+                    self,
+                    "PSD Calculation Warnings",
+                    "Some channels were skipped during PSD calculation:\n\n"
+                    f"{skipped_text}",
+                )
+
+            if first_applied is not None and hasattr(self, "applied_filters_label"):
+                self.applied_filters_label.setText(
+                    f"Applied filters: HP {first_applied[0]:.2f} Hz, LP {first_applied[1]:.2f} Hz"
+                )
+            self._set_info_messages(filter_info_messages or self._cached_filter_messages)
+
+            if not self.psd_results:
+                self._clear_psd_plot()
+                show_warning(self, "No PSD Results", "No valid PSD results were produced for the selected channels.")
+                return
+
             self._update_plot()
-            
+
         except Exception as e:
             show_critical(self, "Calculation Error", f"Failed to calculate PSD: {e}\n\nPlease try adjusting the frequency resolution or frequency range.")
-    
+
     def _set_initial_frequency_ticks(self):
         """Set initial frequency axis ticks to powers of 10 for the default range (10-3000 Hz)."""
         # Default range: 10 to 3000 Hz
@@ -3373,9 +3759,9 @@ class PSDAnalysisWindow(QMainWindow):
         # Update Y-axis label with units
         if self.channel_units and self.channel_units[0]:
             unit = self.channel_units[0]
-            self.plot_widget.setLabel('left', f'PSD ({unit}²/Hz)', color='#e0e0e0', size='12pt')
+            self.plot_widget.setLabel('left', f'PSD ({unit}^2/Hz)', color='#e0e0e0', size='12pt')
         else:
-            self.plot_widget.setLabel('left', 'PSD (units²/Hz)', color='#e0e0e0', size='12pt')
+            self.plot_widget.setLabel('left', 'PSD (units^2/Hz)', color='#e0e0e0', size='12pt')
         
         # Enable autorange for PSD plot after data is calculated
         if plot_count > 0:
@@ -3439,7 +3825,7 @@ class PSDAnalysisWindow(QMainWindow):
         freq_min = self.freq_min_spin.value()
         freq_max = self.freq_max_spin.value()
         filter_settings = self._get_statistics_filter_settings()
-        remove_mean = self.remove_mean_checkbox.isChecked()
+        remove_mean = False
         mean_window_seconds = 1.0
         
         # Create unique key for this channel combination
@@ -3518,7 +3904,7 @@ class PSDAnalysisWindow(QMainWindow):
         self._update_event_regions()
         
         # Calculate PSDs for all events
-        self._calculate_event_psds()
+        self._calculate_event_psds(events=events)
     
     def _on_interactive_mode_changed(self, enabled):
         """
@@ -3625,34 +4011,35 @@ class PSDAnalysisWindow(QMainWindow):
             self.time_plot_widget.addItem(region)
             self.event_regions.append(region)
     
-    def _calculate_event_psds(self):
-        """Calculate PSDs for all defined events using FULL RESOLUTION data."""
-        if (not self.channel_signal_full and self.signal_data_full is None) or not self.events:
+    def _calculate_event_psds(self, events=None):
+        """Calculate PSDs for active events using full-resolution channel data."""
+        if (not self.channel_signal_full and self.signal_data_full is None):
             return
-        
+
+        active_events = list(events) if events is not None else self._get_active_events_for_calculation()
+        self.events = active_events
+        if not active_events:
+            self.frequencies = {}
+            self.psd_results = {}
+            self.rms_values = {}
+            self._clear_psd_plot()
+            return
+
         try:
-            # Get parameters from UI
-            window = self.window_combo.currentText().lower()
-            df = self.df_spin.value()
-            overlap_percent = self.overlap_spin.value()
             freq_min = self.freq_min_spin.value()
             freq_max = self.freq_max_spin.value()
-            
-            # Note: Frequency range is for DISPLAY only, not calculation
-            # PSD is calculated for full frequency range up to Nyquist
-            
-            # Determine number of channels
+
             num_channels = len(self.channel_names) if self.channel_names else 0
             if num_channels == 0:
                 return
-            
-            # Clear previous results
+
+            self.frequencies = {}
             self.psd_results = {}
             self.rms_values = {}
-            
-            # Calculate PSD for each event and channel
-            for event in self.events:
-                # Calculate PSD for each channel
+            skipped_entries = []
+            filter_info_messages = []
+
+            for event in active_events:
                 for channel_idx in range(num_channels):
                     channel_name = self.channel_names[channel_idx]
                     time_full, signal_full, channel_sample_rate = self._get_channel_full(channel_idx)
@@ -3666,50 +4053,60 @@ class PSDAnalysisWindow(QMainWindow):
                     start_idx = max(0, min(start_idx, len(signal_full)))
                     end_idx = max(start_idx, min(end_idx, len(signal_full)))
                     if end_idx - start_idx < 2:
+                        skipped_entries.append(f"{event.name} / {channel_name}: insufficient samples")
                         continue
-                    
-                    # Extract signal segment from FULL resolution data
+
                     signal_segment = signal_full[start_idx:end_idx]
-                    
-                    # Calculate PSD using updated function signature
-                    # Calculate nperseg from df for overlap calculation
-                    nperseg = int(channel_sample_rate / df)
-                    noverlap = int(nperseg * overlap_percent / 100.0)
-                    
-                    frequencies, psd = calculate_psd_welch(
-                        signal_segment,
-                        channel_sample_rate,
-                        df=df,
-                        noverlap=noverlap,
-                        window=window
-                    )
-                    
-                    # Store frequency array for this channel
-                    if channel_name not in self.frequencies:
-                        self.frequencies[channel_name] = frequencies
-                    
-                    # Create unique key for event + channel
+
+                    try:
+                        frequencies, psd, _hp, _lp, info_messages = self._compute_channel_psd(
+                            signal_segment,
+                            channel_sample_rate,
+                        )
+                    except Exception as exc:
+                        skipped_entries.append(f"{event.name} / {channel_name}: {exc}")
+                        continue
+
+                    self.frequencies[channel_name] = frequencies
                     key = f"{event.name}_{channel_name}"
-                    
-                    # Store PSD for this event and channel
                     self.psd_results[key] = psd
-                    
-                    # Calculate RMS over specified frequency range
-                    rms = calculate_rms_from_psd(
+                    self.rms_values[key] = calculate_rms_from_psd(
                         frequencies,
                         psd,
                         freq_min=freq_min,
-                        freq_max=freq_max
+                        freq_max=freq_max,
                     )
-                    
-                    self.rms_values[key] = rms
-            
-            # Update plot
+                    filter_info_messages.extend(
+                        f"{event.name} / {channel_name}: {msg}" for msg in info_messages
+                    )
+
+            if skipped_entries:
+                skipped_text = "\n".join(f"• {msg}" for msg in skipped_entries[:12])
+                if len(skipped_entries) > 12:
+                    skipped_text += f"\n• ... and {len(skipped_entries) - 12} more"
+                show_warning(
+                    self,
+                    "Event PSD Warnings",
+                    "Some event/channel PSD calculations were skipped:\n\n"
+                    f"{skipped_text}",
+                )
+
+            self._set_info_messages(filter_info_messages or self._cached_filter_messages)
+
+            if not self.psd_results:
+                self._clear_psd_plot()
+                show_warning(
+                    self,
+                    "No Event PSD Results",
+                    "No valid PSD results were produced for the enabled events.",
+                )
+                return
+
             self._update_plot_with_events()
-            
+
         except Exception as e:
             show_critical(self, "Calculation Error", f"Failed to calculate event PSDs: {e}")
-    
+
     def _update_plot_with_events(self):
         """Update the PSD plot with event-based PSDs."""
         if not self.frequencies or not self.psd_results:
@@ -3786,9 +4183,9 @@ class PSDAnalysisWindow(QMainWindow):
         # Update Y-axis label with units
         if self.channel_units and self.channel_units[0]:
             unit = self.channel_units[0]
-            self.plot_widget.setLabel('left', f'PSD ({unit}²/Hz)', color='#e0e0e0', size='12pt')
+            self.plot_widget.setLabel('left', f'PSD ({unit}^2/Hz)', color='#e0e0e0', size='12pt')
         else:
-            self.plot_widget.setLabel('left', 'PSD (units²/Hz)', color='#e0e0e0', size='12pt')
+            self.plot_widget.setLabel('left', 'PSD (units^2/Hz)', color='#e0e0e0', size='12pt')
         
         # Set X-axis range
         self.plot_widget.setXRange(np.log10(freq_min), np.log10(freq_max))
@@ -4153,7 +4550,10 @@ class PSDAnalysisWindow(QMainWindow):
             self.rms_values = {}
             self._clear_psd_plot()
             
-            # Update time history plot
+            # Reset and rebuild adaptive time-history cache.
+            self._reset_time_history_defaults()
+            self._update_filter_info_display()
+            self._build_time_history_cache()
             self._plot_time_history()
             
             # Update nperseg display
@@ -4224,95 +4624,6 @@ class PSDAnalysisWindow(QMainWindow):
         if self.octave_checkbox.isChecked() and self.frequencies and self.psd_results:
             self._update_plot()
 
-    def _remove_running_mean(self, signal, window_seconds=1.0, sample_rate=None, time_data=None):
-        """
-        Remove running mean from signal using a moving average filter.
-        
-        This function computes a running mean over a specified window duration
-        and subtracts it from the signal, making it easier to visualize the
-        vibration content about the mean.
-        
-        Parameters
-        ----------
-        signal : np.ndarray
-            Input signal array (1D).
-            Type: float64 array
-            Units: Same as input signal (e.g., g for acceleration)
-            
-        window_seconds : float, optional
-            Duration of the running mean window in seconds.
-            Type: float
-            Units: seconds
-            Default: 1.0 (1 second window)
-            Typical range: 0.1 to 5.0 seconds
-            
-        Returns
-        -------
-        signal_detrended : np.ndarray
-            Signal with running mean removed.
-            Type: float64 array
-            Shape: Same as input signal
-            Units: Same as input signal
-            
-        Notes
-        -----
-        - Uses uniform (boxcar) filter for running mean calculation
-        - Window size in samples = window_seconds * sample_rate
-        - Edge effects handled using 'same' mode (pads edges)
-        - Does NOT affect PSD calculation (only for visualization)
-        - Running mean is calculated on DISPLAY data (decimated)
-        
-        Examples
-        --------
-        >>> # Remove 1-second running mean from accelerometer data
-        >>> signal_with_mean = np.array([1.0, 1.1, 0.9, 1.0, 1.1])  # 1 g + noise
-        >>> signal_detrended = self._remove_running_mean(signal_with_mean, window_seconds=1.0)
-        >>> # Result: [-0.02, 0.08, -0.12, -0.02, 0.08] (vibration about mean)
-        
-        References
-        ----------
-        - scipy.ndimage.uniform_filter1d: https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.uniform_filter1d.html
-        """
-        from scipy.ndimage import uniform_filter1d
-        
-        # Calculate window size in samples from channel-specific timing when available.
-        display_sample_rate = None
-        if time_data is not None and len(time_data) > 1:
-            dt = float(np.median(np.diff(time_data)))
-            if dt > 0:
-                display_sample_rate = 1.0 / dt
-        if display_sample_rate is None and sample_rate is not None and sample_rate > 0:
-            display_sample_rate = float(sample_rate)
-        if (
-            display_sample_rate is None and
-            self.time_data_display is not None and
-            len(self.time_data_display) > 1 and
-            (self.time_data_display[-1] - self.time_data_display[0]) > 0
-        ):
-            display_sample_rate = len(self.time_data_display) / (self.time_data_display[-1] - self.time_data_display[0])
-        if display_sample_rate is None:
-            return signal
-
-        window_samples = int(window_seconds * display_sample_rate)
-        
-        # Ensure window size is at least 3 samples and odd
-        window_samples = max(3, window_samples)
-        if window_samples % 2 == 0:
-            window_samples += 1
-        
-        # Compute running mean using uniform filter
-        running_mean = uniform_filter1d(signal, size=window_samples, mode='nearest')
-        
-        # Subtract running mean from signal
-        signal_detrended = signal - running_mean
-        
-        return signal_detrended
-    
-    def _on_remove_mean_changed(self):
-        """Handle running mean removal checkbox state change."""
-        # Simply re-plot the time history with or without running mean removal
-        self._plot_time_history()
-
     def _clear_events(self):
         """Clear all events and reset plots to full data."""
         # Clear events list (keep only "Full" event if it exists)
@@ -4347,3 +4658,5 @@ class PSDAnalysisWindow(QMainWindow):
         
         # Show information message
         show_information(self, "Events Cleared", "All events have been removed. Click 'Calculate PSD' to recalculate with full data.")
+
+

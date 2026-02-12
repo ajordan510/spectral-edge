@@ -984,11 +984,22 @@ class SegmentedSpectrogramViewer(QMainWindow):
 
     def _build_conditioning_filter_settings(self) -> dict:
         """Build shared filter-settings payload from segmented-viewer controls."""
+        enabled = self.conditioning_filter_checkbox.isChecked()
+        filter_type = self.conditioning_filter_type_combo.currentText().strip().lower()
+        user_highpass = None
+        user_lowpass = None
+        if enabled:
+            if filter_type in {"highpass", "bandpass"}:
+                user_highpass = self.conditioning_low_cutoff_spin.value()
+            if filter_type in {"lowpass", "bandpass"}:
+                user_lowpass = self.conditioning_high_cutoff_spin.value()
         return {
-            "enabled": self.conditioning_filter_checkbox.isChecked(),
-            "filter_type": self.conditioning_filter_type_combo.currentText().strip().lower(),
+            "enabled": enabled,
+            "filter_type": filter_type,
             "filter_design": "butterworth",
             "filter_order": 6,
+            "user_highpass_hz": user_highpass,
+            "user_lowpass_hz": user_lowpass,
             "cutoff_low": self.conditioning_low_cutoff_spin.value(),
             "cutoff_high": self.conditioning_high_cutoff_spin.value(),
         }

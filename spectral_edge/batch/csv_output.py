@@ -11,10 +11,19 @@ Date: 2026-02-04
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_filename_component(value: Optional[str]) -> str:
+    """Return a filesystem-safe filename component."""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in text)
+    return safe.strip("_")
 
 
 def export_to_csv(
@@ -72,9 +81,18 @@ def export_to_csv(
                     'metadata': event_result['metadata']
                 }
 
+        filename_prefix = _sanitize_filename_component(
+            getattr(config.output_config, "filename_prefix", "")
+        )
+
         # Create a CSV file for each event
         for event_name, event_results in events_data.items():
-            csv_path = _create_event_csv(output_dir, event_name, event_results)
+            csv_path = _create_event_csv(
+                output_dir,
+                event_name,
+                event_results,
+                filename_prefix=filename_prefix,
+            )
             if csv_path:
                 created_files.append(csv_path)
 
@@ -89,7 +107,8 @@ def export_to_csv(
 def _create_event_csv(
     output_dir: Path,
     event_name: str,
-    event_results: dict
+    event_results: dict,
+    filename_prefix: str = "",
 ) -> str:
     """
     Create a CSV file for a specific event with PSD data.
@@ -108,42 +127,38 @@ def _create_event_csv(
     str
         Path to the created CSV file, or None if no data
     """
-    # Collect all PSD data
-    all_frequencies = None
-    psd_data = {}
-
+    merged_df = None
     for channel_id, result_data in event_results.items():
-        frequencies = result_data['frequencies']
-        psd_values = result_data['psd']
-
-        # Use first frequency array as reference
-        if all_frequencies is None:
-            all_frequencies = frequencies
+        frequencies = np.asarray(result_data['frequencies'])
+        psd_values = np.asarray(result_data['psd'])
+        if frequencies.size == 0 or psd_values.size == 0:
+            continue
+        length = min(frequencies.size, psd_values.size)
+        channel_df = pd.DataFrame(
+            {
+                "Frequency_Hz": frequencies[:length],
+                channel_id: psd_values[:length],
+            }
+        ).drop_duplicates(subset=["Frequency_Hz"], keep="first")
+        if merged_df is None:
+            merged_df = channel_df
         else:
-            # Handle frequency array length mismatch
-            if len(psd_values) > len(all_frequencies):
-                psd_values = psd_values[:len(all_frequencies)]
-            elif len(psd_values) < len(all_frequencies):
-                padded = np.full(len(all_frequencies), np.nan)
-                padded[:len(psd_values)] = psd_values
-                psd_values = padded
+            merged_df = merged_df.merge(channel_df, on="Frequency_Hz", how="outer")
 
-        psd_data[channel_id] = psd_values
-
-    if all_frequencies is None:
+    if merged_df is None or merged_df.empty:
         logger.warning(f"No data for event: {event_name}")
         return None
 
-    # Create DataFrame
-    df = pd.DataFrame(psd_data)
-    df.insert(0, 'Frequency_Hz', all_frequencies)
+    merged_df = merged_df.sort_values("Frequency_Hz").reset_index(drop=True)
 
     # Clean filename
-    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in event_name)
-    csv_path = output_dir / f"{safe_name}_psd.csv"
+    safe_name = _sanitize_filename_component(event_name) or "event"
+    prefix = _sanitize_filename_component(filename_prefix)
+    file_name = f"{safe_name}_psd.csv" if not prefix else f"{prefix}_{safe_name}_psd.csv"
+    csv_path = output_dir / file_name
 
     # Save to CSV
-    df.to_csv(csv_path, index=False)
+    merged_df.to_csv(csv_path, index=False)
     logger.info(f"CSV file saved: {csv_path}")
 
     return str(csv_path)

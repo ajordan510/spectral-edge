@@ -424,6 +424,17 @@ class EventManagerWindow(QMainWindow):
     
     def _update_table(self):
         """Update the table with current events."""
+        previous_states_by_identity = {}
+        previous_states_by_row = {}
+        previous_row_count = self.table.rowCount()
+        for row in range(min(previous_row_count, len(self.events))):
+            checkbox_item = self.table.item(row, 0)
+            if checkbox_item is None:
+                continue
+            check_state = checkbox_item.checkState()
+            previous_states_by_row[row] = check_state
+            previous_states_by_identity[self._event_identity(self.events[row])] = check_state
+
         # Block signals to prevent triggering cellChanged
         self.table.blockSignals(True)
         
@@ -433,7 +444,12 @@ class EventManagerWindow(QMainWindow):
             # Enabled checkbox
             enabled_item = QTableWidgetItem()
             enabled_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-            enabled_item.setCheckState(Qt.CheckState.Checked)
+            event_identity = self._event_identity(event)
+            check_state = previous_states_by_identity.get(
+                event_identity,
+                previous_states_by_row.get(i, Qt.CheckState.Checked),
+            )
+            enabled_item.setCheckState(check_state)
             self.table.setItem(i, 0, enabled_item)
             
             # Name
@@ -456,6 +472,24 @@ class EventManagerWindow(QMainWindow):
         
         # Unblock signals
         self.table.blockSignals(False)
+
+    @staticmethod
+    def _event_identity(event):
+        """Build a stable identity tuple for checkbox state restoration."""
+        return (
+            str(event.name),
+            round(float(event.start_time), 9),
+            round(float(event.end_time), 9),
+        )
+
+    def get_enabled_events(self):
+        """Return currently enabled events from table checkbox state."""
+        enabled_events = []
+        for i, event in enumerate(self.events):
+            checkbox_item = self.table.item(i, 0)
+            if checkbox_item is not None and checkbox_item.checkState() == Qt.CheckState.Checked:
+                enabled_events.append(event)
+        return enabled_events
     
     def _on_cell_changed(self, row, column):
         """Handle cell changes in the table."""
@@ -567,11 +601,7 @@ class EventManagerWindow(QMainWindow):
             return
 
         # Get enabled events
-        enabled_events = []
-        for i, event in enumerate(self.events):
-            checkbox_item = self.table.item(i, 0)
-            if checkbox_item.checkState() == Qt.CheckState.Checked:
-                enabled_events.append(event)
+        enabled_events = self.get_enabled_events()
         
         if not enabled_events:
             show_warning(self, "No Events", "Please enable at least one event.")

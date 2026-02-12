@@ -21,6 +21,8 @@ class FilterConfig:
     """Configuration for signal filtering."""
     
     enabled: bool = False
+    user_highpass_hz: Optional[float] = None
+    user_lowpass_hz: Optional[float] = None
     filter_type: str = "lowpass"  # lowpass, highpass, bandpass
     filter_design: str = "butterworth"  # butterworth, chebyshev, bessel
     filter_order: int = 4
@@ -47,12 +49,6 @@ class FilterConfig:
             
         if self.filter_order < 1 or self.filter_order > 10:
             raise ValueError(f"Invalid filter_order: {self.filter_order}")
-            
-        if self.filter_type in ["lowpass", "bandpass"] and self.cutoff_high is None:
-            raise ValueError(f"{self.filter_type} requires cutoff_high")
-            
-        if self.filter_type in ["highpass", "bandpass"] and self.cutoff_low is None:
-            raise ValueError(f"{self.filter_type} requires cutoff_low")
 
 
 @dataclass
@@ -66,7 +62,7 @@ class PSDConfig:
     desired_df: float = 5.0
     freq_min: float = 20.0
     freq_max: float = 2000.0
-    remove_running_mean: bool = True
+    remove_running_mean: bool = False
     running_mean_window: float = 1.0  # Window size in seconds for running mean removal
     frequency_spacing: str = "constant_bandwidth"  # constant_bandwidth or fractional octaves
 
@@ -263,10 +259,11 @@ class OutputConfig:
     """Configuration for output generation."""
     
     excel_enabled: bool = True
-    csv_enabled: bool = True
+    csv_enabled: bool = False
     powerpoint_enabled: bool = True
-    hdf5_writeback_enabled: bool = True
+    hdf5_writeback_enabled: bool = False
     output_directory: str = ""
+    filename_prefix: str = ""
     
     def validate(self):
         """
@@ -419,6 +416,16 @@ class BatchConfig:
         """
         # Convert nested dictionaries to dataclass instances
         if 'filter_config' in data and isinstance(data['filter_config'], dict):
+            filter_cfg = data['filter_config']
+            # Backward compatibility: infer explicit user cutoffs from legacy fields.
+            if 'user_highpass_hz' not in filter_cfg:
+                filter_type = str(filter_cfg.get('filter_type', 'bandpass')).strip().lower()
+                if filter_type in ['highpass', 'bandpass']:
+                    filter_cfg['user_highpass_hz'] = filter_cfg.get('cutoff_low')
+            if 'user_lowpass_hz' not in filter_cfg:
+                filter_type = str(filter_cfg.get('filter_type', 'bandpass')).strip().lower()
+                if filter_type in ['lowpass', 'bandpass']:
+                    filter_cfg['user_lowpass_hz'] = filter_cfg.get('cutoff_high')
             data['filter_config'] = FilterConfig(**data['filter_config'])
             
         if 'psd_config' in data and isinstance(data['psd_config'], dict):

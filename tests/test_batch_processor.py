@@ -42,6 +42,18 @@ class TestConfigClasses:
         config.filter_type = "invalid"
         with pytest.raises(ValueError):
             config.validate()
+
+    def test_filter_config_accepts_user_override_fields(self):
+        """User cutoff overrides should be accepted without hard-stop range checks."""
+        config = FilterConfig(
+            enabled=True,
+            filter_type="bandpass",
+            filter_design="butterworth",
+            filter_order=4,
+            user_highpass_hz=0.3,
+            user_lowpass_hz=50000.0,
+        )
+        config.validate()  # Clamping happens later during processing, not config validation.
     
     def test_psd_config_validation(self):
         """Test PSDConfig validation."""

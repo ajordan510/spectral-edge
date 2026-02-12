@@ -395,26 +395,13 @@ class BatchProcessorWindow(QMainWindow):
         freq_group.setLayout(freq_layout)
         layout.addWidget(freq_group)
         
-        # Mean removal with configurable window
-        mean_group = QGroupBox("Running Mean Removal")
-        mean_layout = QHBoxLayout()
-
-        self.remove_mean_checkbox = QCheckBox("Remove Running Mean")
-        self.remove_mean_checkbox.setChecked(True)
-        mean_layout.addWidget(self.remove_mean_checkbox)
-
-        mean_layout.addWidget(QLabel("Window:"))
-        self.running_mean_window_spin = QDoubleSpinBox()
-        self.running_mean_window_spin.setRange(0.1, 10.0)
-        self.running_mean_window_spin.setValue(1.0)
-        self.running_mean_window_spin.setSuffix(" s")
-        self.running_mean_window_spin.setDecimals(1)
-        self.running_mean_window_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
-        mean_layout.addWidget(self.running_mean_window_spin)
-        mean_layout.addStretch()
-
-        mean_group.setLayout(mean_layout)
-        layout.addWidget(mean_group)
+        mean_note = QLabel(
+            "Running mean removal is disabled.\n"
+            "Baseline highpass (1.0 Hz) handles DC/drift removal."
+        )
+        mean_note.setStyleSheet("color: #9ca3af;")
+        mean_note.setWordWrap(True)
+        layout.addWidget(mean_note)
         
         layout.addStretch()
         self.tab_widget.addTab(tab, "PSD Parameters")
@@ -425,53 +412,70 @@ class BatchProcessorWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         
         # Enable filtering
-        self.filter_enabled_checkbox = QCheckBox("Enable Signal Filtering")
+        self.filter_enabled_checkbox = QCheckBox("Enable Optional User Filter Overrides")
         layout.addWidget(self.filter_enabled_checkbox)
+
+        baseline_info = QLabel(
+            "Baseline filtering is always applied per file:\n"
+            "Highpass = 1.0 Hz, Lowpass = 0.45 x sample rate.\n"
+            "Optional user cutoffs below/above valid bounds are auto-clamped."
+        )
+        baseline_info.setStyleSheet("color: #9ca3af;")
+        baseline_info.setWordWrap(True)
+        layout.addWidget(baseline_info)
         
         # Filter settings
-        filter_group = QGroupBox("Filter Settings")
+        filter_group = QGroupBox("Optional Additional Filtering")
         filter_layout = QVBoxLayout()
         
-        # Filter type
+        # Legacy filter type controls are kept for backward compatibility only.
         type_row = QHBoxLayout()
         self.filter_type_combo = QComboBox()
         self.filter_type_combo.addItems(["lowpass", "highpass", "bandpass"])
+        self.filter_type_combo.setCurrentText("bandpass")
+        self.filter_type_combo.setVisible(False)
         type_row.addWidget(QLabel("Filter Type:"))
         type_row.addWidget(self.filter_type_combo)
         type_row.addStretch()
+        type_row.itemAt(0).widget().setVisible(False)
         filter_layout.addLayout(type_row)
         
-        # Filter design
+        # Legacy filter design controls are kept for backward compatibility only.
         design_row = QHBoxLayout()
         self.filter_design_combo = QComboBox()
         self.filter_design_combo.addItems(["butterworth", "chebyshev", "bessel"])
+        self.filter_design_combo.setCurrentText("butterworth")
+        self.filter_design_combo.setVisible(False)
         design_row.addWidget(QLabel("Filter Design:"))
         design_row.addWidget(self.filter_design_combo)
         design_row.addStretch()
+        design_row.itemAt(0).widget().setVisible(False)
         filter_layout.addLayout(design_row)
         
-        # Filter order
+        # Legacy filter order controls are kept for backward compatibility only.
         order_row = QHBoxLayout()
         self.filter_order_spin = QSpinBox()
         self.filter_order_spin.setRange(1, 10)
         self.filter_order_spin.setValue(4)
         self.filter_order_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
+        self.filter_order_spin.setVisible(False)
         order_row.addWidget(QLabel("Filter Order:"))
         order_row.addWidget(self.filter_order_spin)
         order_row.addStretch()
+        order_row.itemAt(0).widget().setVisible(False)
         filter_layout.addLayout(order_row)
         
-        # Cutoff frequencies
+        # User cutoff overrides
         cutoff_row = QHBoxLayout()
-        self.cutoff_low_label = QLabel("Cutoff Low:")
+        self.cutoff_low_label = QLabel("User Highpass:")
         self.cutoff_low_spin = QDoubleSpinBox()
-        self.cutoff_low_spin.setRange(0.1, 100000.0)
-        self.cutoff_low_spin.setValue(100.0)
+        self.cutoff_low_spin.setRange(0.0, 100000.0)
+        self.cutoff_low_spin.setValue(1.0)
         self.cutoff_low_spin.setSuffix(" Hz")
         self.cutoff_low_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
-        self.cutoff_high_label = QLabel("Cutoff High:")
+        self.cutoff_high_label = QLabel("User Lowpass:")
         self.cutoff_high_spin = QDoubleSpinBox()
-        self.cutoff_high_spin.setRange(0.1, 100000.0)
+        self.cutoff_high_spin.setRange(0.0, 100000.0)
         self.cutoff_high_spin.setValue(2000.0)
         self.cutoff_high_spin.setSuffix(" Hz")
         self.cutoff_high_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
@@ -813,7 +817,7 @@ class BatchProcessorWindow(QMainWindow):
         format_layout.addWidget(self.excel_checkbox)
         
         self.csv_checkbox = QCheckBox("CSV - One file per event")
-        self.csv_checkbox.setChecked(True)
+        self.csv_checkbox.setChecked(False)
         format_layout.addWidget(self.csv_checkbox)
         
         self.powerpoint_checkbox = QCheckBox("PowerPoint (.pptx) - Report with plots")
@@ -821,8 +825,16 @@ class BatchProcessorWindow(QMainWindow):
         format_layout.addWidget(self.powerpoint_checkbox)
         
         self.hdf5_checkbox = QCheckBox("HDF5 Write-back - Append to source file (HDF5 only)")
-        self.hdf5_checkbox.setChecked(True)
+        self.hdf5_checkbox.setChecked(False)
         format_layout.addWidget(self.hdf5_checkbox)
+
+        prefix_row = QHBoxLayout()
+        prefix_row.addWidget(QLabel("Filename Prefix:"))
+        self.output_prefix_edit = QLineEdit()
+        self.output_prefix_edit.setPlaceholderText("Optional prefix (e.g., campaignA)")
+        self.output_prefix_edit.setText(getattr(self.config.output_config, "filename_prefix", "") or "")
+        prefix_row.addWidget(self.output_prefix_edit)
+        format_layout.addLayout(prefix_row)
         
         format_group.setLayout(format_layout)
         layout.addWidget(format_group)
@@ -1171,8 +1183,6 @@ class BatchProcessorWindow(QMainWindow):
             self.ppt_layout_buttons.buttonClicked.connect(self._on_ppt_layout_changed)
         self.powerpoint_checkbox.stateChanged.connect(self._on_powerpoint_enabled_changed)
         self.ppt_include_rms_table_checkbox.toggled.connect(self._on_rms_table_toggled)
-        self.filter_type_combo.currentTextChanged.connect(self._update_filter_cutoff_visibility)
-
         # Run batch and cancel
         self.run_batch_btn.clicked.connect(self._on_run_batch)
         self.cancel_btn.clicked.connect(self._on_cancel_batch)
@@ -1466,11 +1476,15 @@ class BatchProcessorWindow(QMainWindow):
             self.files_text.setText("\n".join(files))
             self.hdf5_radio.setChecked(True)
             self.csv_radio.setChecked(False)
+            self.selected_channels = []
+            self.config.selected_channels = []
+            self.channels_text.clear()
             if not self.output_dir_edit.text().strip():
                 default_dir = str(Path(files[0]).parent)
                 self.output_dir_edit.setText(default_dir)
                 self.config.output_config.output_directory = default_dir
             logger.info(f"Selected {len(files)} HDF5 file(s)")
+            self._on_select_channels()
     
     def _on_select_csv(self):
         """Handle CSV file selection."""
@@ -1487,6 +1501,9 @@ class BatchProcessorWindow(QMainWindow):
             self.files_text.setText("\n".join(files))
             self.csv_radio.setChecked(True)
             self.hdf5_radio.setChecked(False)
+            self.selected_channels = []
+            self.config.selected_channels = []
+            self.channels_text.clear()
             if not self.output_dir_edit.text().strip():
                 default_dir = str(Path(files[0]).parent)
                 self.output_dir_edit.setText(default_dir)
@@ -1731,15 +1748,11 @@ class BatchProcessorWindow(QMainWindow):
         self._update_spectrogram_controls()
 
     def _update_filter_cutoff_visibility(self):
-        """Show only relevant cutoff inputs for the selected filter type."""
-        filter_type = self.filter_type_combo.currentText().strip().lower()
-        show_low = filter_type in {"highpass", "bandpass"}
-        show_high = filter_type in {"lowpass", "bandpass"}
-
-        self.cutoff_low_label.setVisible(show_low)
-        self.cutoff_low_spin.setVisible(show_low)
-        self.cutoff_high_label.setVisible(show_high)
-        self.cutoff_high_spin.setVisible(show_high)
+        """Keep both override cutoffs visible in the adaptive model."""
+        self.cutoff_low_label.setVisible(True)
+        self.cutoff_low_spin.setVisible(True)
+        self.cutoff_high_label.setVisible(True)
+        self.cutoff_high_spin.setVisible(True)
     
     def _on_load_config(self):
         """Load configuration from JSON file."""
@@ -1840,16 +1853,23 @@ class BatchProcessorWindow(QMainWindow):
         self.config.psd_config.freq_min = self.freq_min_spin.value()
         self.config.psd_config.freq_max = self.freq_max_spin.value()
         self.config.psd_config.frequency_spacing = self.freq_spacing_combo.currentData()
-        self.config.psd_config.remove_running_mean = self.remove_mean_checkbox.isChecked()
-        self.config.psd_config.running_mean_window = self.running_mean_window_spin.value()
+        # Running mean removal is deprecated; keep legacy fields deterministic.
+        self.config.psd_config.remove_running_mean = False
+        self.config.psd_config.running_mean_window = 1.0
         
         # Filter config
         self.config.filter_config.enabled = self.filter_enabled_checkbox.isChecked()
-        self.config.filter_config.filter_type = self.filter_type_combo.currentText()
+        self.config.filter_config.filter_type = "bandpass"
         self.config.filter_config.filter_design = self.filter_design_combo.currentText()
         self.config.filter_config.filter_order = self.filter_order_spin.value()
         self.config.filter_config.cutoff_low = self.cutoff_low_spin.value()
         self.config.filter_config.cutoff_high = self.cutoff_high_spin.value()
+        self.config.filter_config.user_highpass_hz = (
+            self.cutoff_low_spin.value() if self.filter_enabled_checkbox.isChecked() else None
+        )
+        self.config.filter_config.user_lowpass_hz = (
+            self.cutoff_high_spin.value() if self.filter_enabled_checkbox.isChecked() else None
+        )
         
         # Spectrogram config
         self.config.spectrogram_config.enabled = (
@@ -1887,6 +1907,7 @@ class BatchProcessorWindow(QMainWindow):
             output_dir = str(Path(self.config.source_files[0]).parent)
             self.output_dir_edit.setText(output_dir)
         self.config.output_config.output_directory = output_dir
+        self.config.output_config.filename_prefix = self.output_prefix_edit.text().strip()
 
         # PowerPoint config
         self.config.powerpoint_config.layout = self._get_selected_ppt_layout()
@@ -1976,27 +1997,21 @@ class BatchProcessorWindow(QMainWindow):
         if spacing_index >= 0:
             self.freq_spacing_combo.setCurrentIndex(spacing_index)
 
-        self.remove_mean_checkbox.setChecked(self.config.psd_config.remove_running_mean)
-        self.running_mean_window_spin.setValue(self.config.psd_config.running_mean_window)
-
         # Filter tab
         self.filter_enabled_checkbox.setChecked(self.config.filter_config.enabled)
-
-        filter_type_index = self.filter_type_combo.findText(self.config.filter_config.filter_type)
-        if filter_type_index >= 0:
-            self.filter_type_combo.setCurrentIndex(filter_type_index)
         self._update_filter_cutoff_visibility()
 
-        filter_design_index = self.filter_design_combo.findText(self.config.filter_config.filter_design)
-        if filter_design_index >= 0:
-            self.filter_design_combo.setCurrentIndex(filter_design_index)
-
         self.filter_order_spin.setValue(self.config.filter_config.filter_order)
-        # Handle None values for cutoff frequencies
-        if self.config.filter_config.cutoff_low is not None:
-            self.cutoff_low_spin.setValue(self.config.filter_config.cutoff_low)
-        if self.config.filter_config.cutoff_high is not None:
-            self.cutoff_high_spin.setValue(self.config.filter_config.cutoff_high)
+        user_hp = getattr(self.config.filter_config, "user_highpass_hz", None)
+        user_lp = getattr(self.config.filter_config, "user_lowpass_hz", None)
+        if user_hp is None:
+            user_hp = self.config.filter_config.cutoff_low
+        if user_lp is None:
+            user_lp = self.config.filter_config.cutoff_high
+        if user_hp is not None:
+            self.cutoff_low_spin.setValue(float(user_hp))
+        if user_lp is not None:
+            self.cutoff_high_spin.setValue(float(user_lp))
 
         # Spectrogram tab
         self.spec_df_spin.setValue(self.config.spectrogram_config.desired_df)
@@ -2121,6 +2136,7 @@ class BatchProcessorWindow(QMainWindow):
         # Ensure spectrogram controls match layout
         self._update_spectrogram_controls()
         self.hdf5_checkbox.setChecked(self.config.output_config.hdf5_writeback_enabled)
+        self.output_prefix_edit.setText(getattr(self.config.output_config, "filename_prefix", "") or "")
         output_dir = self.config.output_config.output_directory
         if not output_dir and self.config.source_files:
             output_dir = str(Path(self.config.source_files[0]).parent)
@@ -2380,8 +2396,6 @@ class BatchProcessorWindow(QMainWindow):
         options = []
         if self.config.filter_config.enabled:
             options.append("Filtering")
-        if self.config.psd_config.remove_running_mean:
-            options.append("Mean removal")
         if self.config.spectrogram_config.enabled:
             options.append("Spectrograms")
         summary_lines.append(f"Processing: {', '.join(options) if options else 'PSD only'}")
@@ -2398,6 +2412,8 @@ class BatchProcessorWindow(QMainWindow):
         if self.hdf5_checkbox.isChecked():
             outputs.append("HDF5")
         summary_lines.append(f"Outputs: {', '.join(outputs)}")
+        if self.output_prefix_edit.text().strip():
+            summary_lines.append(f"Filename Prefix: {self.output_prefix_edit.text().strip()}")
         if self.powerpoint_checkbox.isChecked():
             layout_value = self._get_selected_ppt_layout()
             summary_lines.append(f"PPT Layout: {self._get_layout_label(layout_value)}")

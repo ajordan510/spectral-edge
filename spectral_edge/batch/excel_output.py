@@ -11,13 +11,62 @@ Date: 2026-02-02
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import logging
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils.dataframe import dataframe_to_rows
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_filename_component(value: Optional[str]) -> str:
+    """Return a filesystem-safe filename component."""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in text)
+    return safe.strip("_")
+
+
+def _build_event_dataframe(event_results: Dict) -> Optional[pd.DataFrame]:
+    """Build an event dataframe by aligning channel PSDs on frequency (outer join)."""
+    merged_df = None
+    for channel_id, result_data in event_results.items():
+        frequencies = np.asarray(result_data['frequencies'])
+        psd_values = np.asarray(result_data['psd'])
+        if frequencies.size == 0 or psd_values.size == 0:
+            continue
+        length = min(frequencies.size, psd_values.size)
+        channel_df = pd.DataFrame(
+            {
+                "Frequency (Hz)": frequencies[:length],
+                channel_id: psd_values[:length],
+            }
+        ).drop_duplicates(subset=["Frequency (Hz)"], keep="first")
+        if merged_df is None:
+            merged_df = channel_df
+        else:
+            merged_df = merged_df.merge(channel_df, on="Frequency (Hz)", how="outer")
+
+    if merged_df is None or merged_df.empty:
+        return None
+    return merged_df.sort_values("Frequency (Hz)").reset_index(drop=True)
+
+
+def _describe_filter(config: 'BatchConfig') -> str:
+    """Create deterministic filter summary text for exports."""
+    if config.filter_config.enabled:
+        hp = getattr(config.filter_config, "user_highpass_hz", None)
+        lp = getattr(config.filter_config, "user_lowpass_hz", None)
+        if hp is None:
+            hp = getattr(config.filter_config, "cutoff_low", None)
+        if lp is None:
+            lp = getattr(config.filter_config, "cutoff_high", None)
+        hp_text = "baseline" if hp is None else f"{float(hp):g}"
+        lp_text = "baseline" if lp is None else f"{float(lp):g}"
+        return f"Baseline + user overrides (HP={hp_text} Hz, LP={lp_text} Hz)"
+    return "Baseline only (HP 1.0 Hz, LP 0.45xFs)"
 
 
 def export_to_excel(
@@ -54,7 +103,11 @@ def export_to_excel(
         If file cannot be written
     """
     try:
-        output_path = str(Path(output_directory) / filename)
+        prefix = _sanitize_filename_component(getattr(config.output_config, "filename_prefix", ""))
+        resolved_filename = filename or "batch_psd_results.xlsx"
+        if prefix:
+            resolved_filename = f"{prefix}_{resolved_filename}"
+        output_path = str(Path(output_directory) / resolved_filename)
         wb = Workbook()
         
         # Remove default sheet
@@ -170,15 +223,7 @@ def _create_summary_sheet(wb: Workbook, events_data: Dict, result: 'BatchProcess
     ws[f'A{row}'] = "Frequency Spacing:"
     ws[f'B{row}'] = config.psd_config.frequency_spacing
     row += 1
-    if config.filter_config.enabled:
-        if config.filter_config.filter_type == "lowpass":
-            filt_desc = f"Lowpass @ {config.filter_config.cutoff_high} Hz"
-        elif config.filter_config.filter_type == "highpass":
-            filt_desc = f"Highpass @ {config.filter_config.cutoff_low} Hz"
-        else:
-            filt_desc = f"Bandpass {config.filter_config.cutoff_low}-{config.filter_config.cutoff_high} Hz"
-    else:
-        filt_desc = "None"
+    filt_desc = _describe_filter(config)
     ws[f'A{row}'] = "Filter:"
     ws[f'B{row}'] = filt_desc
     row += 2
@@ -265,48 +310,10 @@ def _create_event_sheet(wb: Workbook, event_name: str, event_results: Dict) -> N
     ws['A1'] = f"Event: {event_name}"
     ws['A1'].font = Font(size=12, bold=True)
     
-    # Collect all PSD data
-    all_frequencies = None
-    psd_data = {}
-    frequency_mismatch_warned = False
-
-    for channel_id, result_data in event_results.items():
-        frequencies = result_data['frequencies']
-        psd_values = result_data['psd']
-
-        # Use first frequency array as reference
-        if all_frequencies is None:
-            all_frequencies = frequencies
-        else:
-            # Validate that frequency arrays match
-            if len(frequencies) != len(all_frequencies):
-                if not frequency_mismatch_warned:
-                    logger.warning(
-                        f"Event '{event_name}': Frequency array length mismatch. "
-                        f"Reference has {len(all_frequencies)} points, "
-                        f"channel {channel_id} has {len(frequencies)} points. "
-                        f"Using reference frequencies - some channels may be misaligned."
-                    )
-                    frequency_mismatch_warned = True
-                # Truncate or pad PSD values to match reference length
-                if len(psd_values) > len(all_frequencies):
-                    psd_values = psd_values[:len(all_frequencies)]
-                elif len(psd_values) < len(all_frequencies):
-                    # Pad with NaN
-                    padded = np.full(len(all_frequencies), np.nan)
-                    padded[:len(psd_values)] = psd_values
-                    psd_values = padded
-
-        # Use channel_id as column name
-        psd_data[channel_id] = psd_values
-
-    if all_frequencies is None:
+    df = _build_event_dataframe(event_results)
+    if df is None:
         logger.warning(f"No data for event: {event_name}")
         return
-    
-    # Create DataFrame
-    df = pd.DataFrame(psd_data)
-    df.insert(0, 'Frequency (Hz)', all_frequencies)
     
     # Write to sheet starting at row 3
     for r_idx, row in enumerate(dataframe_to_rows(df, index=False, header=True), start=3):

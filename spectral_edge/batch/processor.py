@@ -20,11 +20,11 @@ from spectral_edge.core.psd import (
 )
 from spectral_edge.batch.spectrogram_generator import generate_spectrogram
 from ..utils.hdf5_loader import HDF5FlightDataLoader
+from ..utils.signal_conditioning import apply_robust_filtering
 from .config import BatchConfig, EventDefinition
 from .progress_tracker import ProgressTracker, ProgressInfo
 from .performance_utils import MemoryManager, FFTOptimizer
 from .error_handler import ErrorHandler, BatchError, log_error_with_recovery
-from scipy import signal as scipy_signal
 
 
 # Get module logger - configuration should be done at application entry point
@@ -145,7 +145,33 @@ class BatchProcessor:
         self.progress_callback = progress_callback
         self.progress_tracker = None
         self._flight_to_file_cache = None  # Cache for flight -> file mapping
-        self._filter_sos_cache = {}  # Cache for filter coefficients
+
+    def _resolve_user_filter_overrides(self) -> Tuple[Optional[float], Optional[float]]:
+        """Resolve optional user highpass/lowpass overrides from batch config."""
+        fc = self.config.filter_config
+        if not getattr(fc, "enabled", False):
+            return None, None
+
+        user_highpass = getattr(fc, "user_highpass_hz", None)
+        user_lowpass = getattr(fc, "user_lowpass_hz", None)
+
+        filter_type = str(getattr(fc, "filter_type", "bandpass")).strip().lower()
+        if user_highpass is None and filter_type in {"highpass", "bandpass"}:
+            user_highpass = getattr(fc, "cutoff_low", None)
+        if user_lowpass is None and filter_type in {"lowpass", "bandpass"}:
+            user_lowpass = getattr(fc, "cutoff_high", None)
+
+        try:
+            user_highpass = float(user_highpass) if user_highpass is not None else None
+        except (TypeError, ValueError):
+            user_highpass = None
+
+        try:
+            user_lowpass = float(user_lowpass) if user_lowpass is not None else None
+        except (TypeError, ValueError):
+            user_lowpass = None
+
+        return user_highpass, user_lowpass
         
     def process(self) -> BatchProcessingResult:
         """
@@ -336,7 +362,7 @@ class BatchProcessor:
 
     def _include_full_duration(self) -> bool:
         """Return True if full-duration outputs should be included."""
-        return self.config.process_full_duration or bool(self.config.events)
+        return bool(self.config.process_full_duration)
 
     def _process_channel_hdf5(self, flight_key: str, channel_key: str):
         """
@@ -375,8 +401,8 @@ class BatchProcessor:
         # Only load the data range needed for all events (with small buffer)
         event_min_time, event_max_time = self._get_event_time_bounds()
 
-        # Add buffer for filter edge effects (use running mean window as buffer)
-        buffer_seconds = self.config.psd_config.running_mean_window * 2
+        # Add buffer for filter edge effects during event-only loads.
+        buffer_seconds = 2.0
 
         load_start = time.perf_counter()
         if event_min_time is not None and event_max_time is not None:
@@ -567,23 +593,21 @@ class BatchProcessor:
         if self.cancel_requested:
             raise InterruptedError("Processing cancelled by user")
 
-        # Apply filtering if enabled
-        if self.config.filter_config.enabled:
-            filter_start = time.perf_counter()
-            event_signal = self._apply_filter(event_signal, sample_rate)
-            filter_time = time.perf_counter() - filter_start
-            logger.debug(f"    Filter applied in {filter_time:.3f}s")
-
-        # Check for cancellation
-        if self.cancel_requested:
-            raise InterruptedError("Processing cancelled by user")
-
-        # Apply running mean removal if enabled
-        if self.config.psd_config.remove_running_mean:
-            mean_start = time.perf_counter()
-            event_signal = self._remove_running_mean(event_signal, sample_rate)
-            mean_time = time.perf_counter() - mean_start
-            logger.debug(f"    Running mean removed in {mean_time:.3f}s")
+        # Apply baseline robust filtering (always), with optional user overrides.
+        user_highpass, user_lowpass = self._resolve_user_filter_overrides()
+        filter_start = time.perf_counter()
+        event_signal, applied_highpass, applied_lowpass, filter_messages = apply_robust_filtering(
+            event_signal,
+            sample_rate,
+            user_highpass=user_highpass,
+            user_lowpass=user_lowpass,
+        )
+        filter_time = time.perf_counter() - filter_start
+        logger.debug(f"    Baseline/user filtering applied in {filter_time:.3f}s")
+        for msg in filter_messages:
+            self.result.add_log_entry(
+                f"  Filter info ({flight_key}/{channel_key}/{event_name}): {msg}"
+            )
 
         # Check for cancellation
         if self.cancel_requested:
@@ -594,6 +618,7 @@ class BatchProcessor:
         frequencies, psd = self._calculate_psd(event_signal, sample_rate)
         psd_time = time.perf_counter() - psd_start
         logger.debug(f"    PSD calculated in {psd_time:.3f}s ({len(event_signal)} samples)")
+        actual_df_hz = float(frequencies[1] - frequencies[0]) if len(frequencies) > 1 else None
 
         # Calculate RMS
         rms = calculate_rms_from_psd(frequencies, psd)
@@ -613,7 +638,7 @@ class BatchProcessor:
                     desired_df=self.config.spectrogram_config.desired_df,
                     overlap_percent=self.config.spectrogram_config.overlap_percent,
                     snr_threshold=self.config.spectrogram_config.snr_threshold,
-                    use_efficient_fft=True
+                    use_efficient_fft=self.config.spectrogram_config.use_efficient_fft
                 )
                 spec_time = time.perf_counter() - spec_start
                 logger.debug(f"    Spectrogram generated in {spec_time:.3f}s")
@@ -636,8 +661,16 @@ class BatchProcessor:
             'window': self.config.psd_config.window,
             'overlap_percent': self.config.psd_config.overlap_percent,
             'frequency_spacing': self.config.psd_config.frequency_spacing,
-            'filter_applied': self.config.filter_config.enabled,
-            'mean_removed': self.config.psd_config.remove_running_mean,
+            'requested_df_hz': float(self.config.psd_config.desired_df),
+            'actual_df_hz': actual_df_hz,
+            'filter_applied': True,
+            'user_filter_enabled': bool(self.config.filter_config.enabled),
+            'user_highpass_hz': user_highpass,
+            'user_lowpass_hz': user_lowpass,
+            'applied_highpass_hz': applied_highpass,
+            'applied_lowpass_hz': applied_lowpass,
+            'filter_messages': list(filter_messages),
+            'mean_removed': False,
             'event_start_time': start_time,
             'event_end_time': end_time,
             'timestamp': datetime.now().isoformat(),
@@ -653,115 +686,6 @@ class BatchProcessor:
         self.result.add_log_entry(
             f"  Event '{event_name}': RMS = {rms:.4f} {units} (processed in {event_total_time:.2f}s)"
         )
-    
-    def _apply_filter(self, signal: np.ndarray, sample_rate: float) -> np.ndarray:
-        """
-        Apply digital filter to signal.
-
-        Uses cached filter coefficients for performance when the same
-        filter configuration is applied to multiple signals.
-
-        Parameters:
-        -----------
-        signal : np.ndarray
-            Input signal
-        sample_rate : float
-            Sample rate in Hz
-
-        Returns:
-        --------
-        np.ndarray
-            Filtered signal
-        """
-        fc = self.config.filter_config
-
-        # Build cache key from filter parameters and sample rate
-        cache_key = (
-            fc.filter_type,
-            fc.filter_design,
-            fc.filter_order,
-            fc.cutoff_low,
-            fc.cutoff_high,
-            sample_rate
-        )
-
-        # Check if we have cached filter coefficients
-        if cache_key in self._filter_sos_cache:
-            sos = self._filter_sos_cache[cache_key]
-        else:
-            # Design filter
-            nyquist = sample_rate / 2.0
-
-            # Prepare cutoff frequencies (normalized to Nyquist)
-            if fc.filter_type == "lowpass":
-                Wn = min(fc.cutoff_high / nyquist, 0.95)
-                btype = "lowpass"
-            elif fc.filter_type == "highpass":
-                Wn = max(fc.cutoff_low / nyquist, 0.01)
-                btype = "highpass"
-            elif fc.filter_type == "bandpass":
-                Wn = [max(fc.cutoff_low / nyquist, 0.01),
-                      min(fc.cutoff_high / nyquist, 0.95)]
-                btype = "bandpass"
-            else:
-                raise ValueError(f"Unknown filter type: {fc.filter_type}")
-
-            # Design filter using SOS format for numerical stability
-            if fc.filter_design == "butterworth":
-                sos = scipy_signal.butter(fc.filter_order, Wn, btype=btype, output='sos')
-            elif fc.filter_design == "chebyshev":
-                sos = scipy_signal.cheby1(fc.filter_order, 0.5, Wn, btype=btype, output='sos')
-            elif fc.filter_design == "bessel":
-                sos = scipy_signal.bessel(fc.filter_order, Wn, btype=btype, output='sos')
-            else:
-                raise ValueError(f"Unknown filter design: {fc.filter_design}")
-
-            # Cache the filter coefficients
-            self._filter_sos_cache[cache_key] = sos
-            logger.debug(f"Cached filter coefficients for {fc.filter_design} {fc.filter_type}")
-
-        # Apply filter
-        filtered_signal = scipy_signal.sosfiltfilt(sos, signal)
-
-        return filtered_signal
-    
-    def _remove_running_mean(self, signal: np.ndarray, sample_rate: float) -> np.ndarray:
-        """
-        Remove running mean from signal using configurable window.
-
-        Uses scipy.ndimage.uniform_filter1d for O(n) performance.
-
-        Parameters:
-        -----------
-        signal : np.ndarray
-            Input signal
-        sample_rate : float
-            Sample rate in Hz
-
-        Returns:
-        --------
-        np.ndarray
-            Signal with running mean removed
-        """
-        from scipy.ndimage import uniform_filter1d
-
-        # Use configurable window size (default 1.0 seconds)
-        window_seconds = self.config.psd_config.running_mean_window
-        window_size = int(sample_rate * window_seconds)
-
-        # Ensure minimum window size
-        window_size = max(1, window_size)
-
-        n = len(signal)
-        if n < window_size:
-            # If signal is shorter than window, just remove overall mean
-            return signal - np.mean(signal)
-
-        # Use uniform_filter1d for O(n) running mean calculation
-        # This is much faster than convolution for large window sizes
-        running_mean = uniform_filter1d(signal.astype(np.float64), size=window_size, mode='nearest')
-
-        return signal - running_mean
     
     def _calculate_psd(self, signal: np.ndarray, sample_rate: float) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -793,7 +717,10 @@ class BatchProcessor:
         elif pc.method == "maximax":
             frequencies, psd = calculate_psd_maximax(
                 signal, sample_rate,
-                window=pc.window
+                window=pc.window,
+                overlap_percent=pc.overlap_percent,
+                df=pc.desired_df,
+                use_efficient_fft=pc.use_efficient_fft,
             )
         else:
             raise ValueError(f"Unknown PSD method: {pc.method}")

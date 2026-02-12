@@ -624,13 +624,21 @@ class SpectrogramWindow(QMainWindow):
         filter_type = str(settings.get("filter_type", "lowpass")).strip().lower()
         if filter_type not in {"lowpass", "highpass", "bandpass"}:
             filter_type = "lowpass"
+        user_highpass = settings.get("user_highpass_hz")
+        user_lowpass = settings.get("user_lowpass_hz")
+        if user_highpass is None and filter_type in {"highpass", "bandpass"}:
+            user_highpass = settings.get("cutoff_low")
+        if user_lowpass is None and filter_type in {"lowpass", "bandpass"}:
+            user_lowpass = settings.get("cutoff_high")
         return {
             "enabled": bool(settings.get("enabled", False)),
             "filter_type": filter_type,
             "filter_design": str(settings.get("filter_design", "butterworth")).strip().lower(),
             "filter_order": int(settings.get("filter_order", 4)),
-            "cutoff_low": float(settings.get("cutoff_low", 20.0) or 20.0),
-            "cutoff_high": float(settings.get("cutoff_high", 2000.0) or 2000.0),
+            "user_highpass_hz": float(user_highpass if user_highpass is not None else 20.0),
+            "user_lowpass_hz": float(user_lowpass if user_lowpass is not None else 2000.0),
+            "cutoff_low": float(user_highpass if user_highpass is not None else 20.0),
+            "cutoff_high": float(user_lowpass if user_lowpass is not None else 2000.0),
         }
 
     def _apply_conditioning_defaults_to_controls(self):
@@ -640,8 +648,8 @@ class SpectrogramWindow(QMainWindow):
         self.conditioning_filter_type_combo.setCurrentText(
             str(defaults.get("filter_type", "lowpass")).capitalize()
         )
-        self.conditioning_low_cutoff_spin.setValue(float(defaults.get("cutoff_low", 20.0)))
-        self.conditioning_high_cutoff_spin.setValue(float(defaults.get("cutoff_high", 2000.0)))
+        self.conditioning_low_cutoff_spin.setValue(float(defaults.get("user_highpass_hz", defaults.get("cutoff_low", 20.0))))
+        self.conditioning_high_cutoff_spin.setValue(float(defaults.get("user_lowpass_hz", defaults.get("cutoff_high", 2000.0))))
         self.conditioning_remove_mean_checkbox.setChecked(self._conditioning_remove_mean_default)
         self._on_conditioning_filter_type_changed()
         self._on_conditioning_filter_enabled_changed(self.conditioning_filter_checkbox.isChecked())
@@ -670,11 +678,22 @@ class SpectrogramWindow(QMainWindow):
 
     def _build_conditioning_filter_settings(self) -> dict:
         """Build shared conditioning filter settings payload from UI."""
+        enabled = self.conditioning_filter_checkbox.isChecked()
+        filter_type = self.conditioning_filter_type_combo.currentText().strip().lower()
+        user_highpass = None
+        user_lowpass = None
+        if enabled:
+            if filter_type in {"highpass", "bandpass"}:
+                user_highpass = self.conditioning_low_cutoff_spin.value()
+            if filter_type in {"lowpass", "bandpass"}:
+                user_lowpass = self.conditioning_high_cutoff_spin.value()
         return {
-            "enabled": self.conditioning_filter_checkbox.isChecked(),
-            "filter_type": self.conditioning_filter_type_combo.currentText().strip().lower(),
+            "enabled": enabled,
+            "filter_type": filter_type,
             "filter_design": "butterworth",
             "filter_order": 4,
+            "user_highpass_hz": user_highpass,
+            "user_lowpass_hz": user_lowpass,
             "cutoff_low": self.conditioning_low_cutoff_spin.value(),
             "cutoff_high": self.conditioning_high_cutoff_spin.value(),
         }

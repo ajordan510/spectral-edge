@@ -9,6 +9,12 @@ Author: SpectralEdge Development Team
 Date: 2026-02-04
 """
 
+from spectral_edge.utils.theme import (
+    get_context_menu_stylesheet,
+    get_pyqtgraph_tool_stylesheet,
+    install_global_context_menu_style,
+)
+
 # Aerospace-inspired dark theme for main windows
 DARK_THEME = """
     QMainWindow {
@@ -139,7 +145,12 @@ DIALOG_LIGHT_THEME = """
 """
 
 # Combined stylesheet for application
-GLOBAL_STYLESHEET = DARK_THEME + DIALOG_LIGHT_THEME
+GLOBAL_STYLESHEET = (
+    DARK_THEME
+    + DIALOG_LIGHT_THEME
+    + get_context_menu_stylesheet()
+    + get_pyqtgraph_tool_stylesheet()
+)
 
 
 def apply_global_stylesheet(app):
@@ -153,6 +164,7 @@ def apply_global_stylesheet(app):
         app: QApplication instance
     """
     app.setStyleSheet(GLOBAL_STYLESHEET)
+    install_global_context_menu_style(app)
 
 
 def get_dark_theme():

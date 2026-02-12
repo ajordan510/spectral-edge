@@ -23,6 +23,11 @@ def app():
     return application
 
 
+@pytest.fixture(autouse=True)
+def _disable_psd_context_menu_styler(monkeypatch):
+    monkeypatch.setattr(psd_module, "apply_context_menu_style", lambda *_args, **_kwargs: None)
+
+
 class _StatsConfig:
     pdf_bins = 50
     running_window_seconds = 1.0
@@ -125,7 +130,6 @@ def test_psd_statistics_window_receives_conditioned_signal(monkeypatch, app):
     window.channel_sample_rates = [100.0]
     window.sample_rate = 100.0
     window.enable_filter_checkbox.setChecked(False)
-    window.remove_mean_checkbox.setChecked(True)
 
     window._open_statistics()
     app.processEvents()
@@ -134,6 +138,6 @@ def test_psd_statistics_window_receives_conditioned_signal(monkeypatch, app):
     assert conditioned_signal.shape == signal.shape
     assert not np.allclose(conditioned_signal, signal)
     assert abs(np.mean(conditioned_signal)) < abs(np.mean(signal))
-    assert "Running Mean Removed (1.0s)" in captured["processing_note"]
-    assert captured["processing_flags"]["running_mean_removed"] is True
+    assert "Running Mean Not Removed" in captured["processing_note"]
+    assert captured["processing_flags"]["running_mean_removed"] is False
     window.close()
